@@ -11,31 +11,31 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.8'
+          python-version: '3.9'
 
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential git zip unzip \
-              openjdk-11-jdk python3-pip python3-setuptools \
-              libncurses5 libstdc++6 libffi-dev libssl-dev \
-              libsqlite3-dev libjpeg-dev zlib1g-dev
-          pip install --upgrade pip Cython virtualenv
-          pip install buildozer
+          sudo apt install -y zip unzip openjdk-11-jdk python3-pip ffmpeg libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libgstreamer1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+          pip install --upgrade pip
+          pip install buildozer cython
+
+      - name: Initialize buildozer (if needed)
+        run: |
+          if [ ! -f buildozer.spec ]; then buildozer init; fi
 
       - name: Build APK
         run: |
-          cd pymusic
           buildozer android debug
 
       - name: Upload APK
-        uses: actions/upload-artifact@v2
+        if: success() && exists('bin/*.apk')
+        uses: actions/upload-artifact@v3
         with:
           name: pymusic-apk
           path: bin/*.apk
-
