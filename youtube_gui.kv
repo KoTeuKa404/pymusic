@@ -1,0 +1,96 @@
+<YoutubeSearchScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: dp(10)
+        padding: dp(10)
+
+        Label:
+            text: "🎵 YouTube Music Search"
+            font_size: '20sp'
+            size_hint_y: None
+            height: dp(50)
+            bold: True
+
+        TextInput:
+            id: search_input
+            hint_text: "🔍 Введіть запит..."
+            size_hint_y: None
+            height: dp(40)
+            multiline: False
+            on_text_validate: root.search()
+
+        Button:
+            text: "🔍 Пошук"
+            size_hint_y: None
+            height: dp(50)
+            background_color: 0, 0, 0.5, 1
+            on_press: root.search()
+
+        ScrollView:
+            GridLayout:
+                id: video_list
+                cols: 1
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(5)
+
+<VideoItem>:
+    BoxLayout:
+        size_hint_y: None
+        height: dp(80)
+        padding: dp(5)
+        spacing: dp(10)
+        canvas.before:
+            Color:
+                rgba: 1, 1, 1, 1
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        AsyncImage:
+            id: thumbnail
+            size_hint_x: None
+            width: dp(120)
+            allow_stretch: True
+            keep_ratio: True
+
+            Label:
+                id: duration
+                text: "00:00"
+                font_size: "14sp"
+                color: 1, 1, 1, 1
+                size_hint: None, None
+                size: self.texture_size
+                pos_hint: {'right': 1, 'bottom': 1}
+                canvas.before:
+                    Color:
+                        rgba: 0, 0, 0, 0.7
+                    Rectangle:
+                        pos: self.pos
+                        size: self.size
+
+        BoxLayout:
+            orientation: "vertical"
+            spacing: dp(5)
+
+            Label:
+                id: title
+                text: "Назва відео"
+                font_size: "16sp"
+                bold: True
+                size_hint_y: None
+                height: self.texture_size[1]
+
+            Label:
+                id: channel
+                text: "Назва каналу"
+                font_size: "14sp"
+                color: 0.5, 0.5, 0.5, 1
+                size_hint_y: None
+                height: self.texture_size[1]
+
+        Button:
+            text: "▶"
+            size_hint_x: None
+            width: dp(50)
+            on_press: root.play_audio()

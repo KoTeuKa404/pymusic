@@ -1,0 +1,6 @@
+kivy==2.2.1
+kivymd==1.1.1
+ffpyplayer==4.5.2
+requests
+certifi
+youtubesearchpython
