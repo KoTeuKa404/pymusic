@@ -37,4 +37,5 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: pymusic-apk
-          path: pymusic/bin/*.apk
+          path: bin/*.apk
+
