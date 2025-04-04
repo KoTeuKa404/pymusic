@@ -34,8 +34,9 @@ jobs:
           buildozer android debug
 
       - name: Upload APK
-        if: success() && exists('bin/*.apk')
+        if: success()
         uses: actions/upload-artifact@v3
         with:
           name: pymusic-apk
           path: bin/*.apk
+
