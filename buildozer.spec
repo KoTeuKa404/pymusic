@@ -1,18 +1,15 @@
 [app]
-title = pymusic
+title = Python Music
 package.name = pymusic
-package.domain = org.koteuka
+package.domain = org.yourname
 source.dir = .
-source.include_exts = py,kv,mp3,mp4
-version = 0.1
-requirements = python3,kivy,ffpyplayer,requests
+version = 1.0
+requirements = python3,kivy==2.2.1,kivymd,ffpyplayer,youtube-search-python
+source.include_exts = py,kv,png,jpg,ttf
 orientation = portrait
-fullscreen = 0
 android.permissions = INTERNET
-android.api = 30
+android.api = 33
 android.minapi = 21
-android.ndk = 23b
 android.arch = armeabi-v7a
-android.entrypoint = main.py
-android.ndk_api = 21
-android.private_storage = True
+fullscreen = 0
+android.allow_backup = True
