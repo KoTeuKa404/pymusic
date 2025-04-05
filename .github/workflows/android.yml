@@ -3,7 +3,7 @@ name: Build APK for Android
 on:
   push:
     branches:
-      - main
+      - master   # змінюй на "main", якщо твоя гілка має іншу назву
     tags:
       - 'v*'
 
