@@ -3,13 +3,13 @@ name: Build APK for Android
 on:
   push:
     branches:
-      - master   # або "main", залежно від твоєї гілки
+      - master
     tags:
       - 'v*'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # ✅ стабільний образ
 
     steps:
       - name: Checkout repository
@@ -31,7 +31,7 @@ jobs:
           buildozer android debug
 
       - name: Upload APK
-        uses: actions/upload-artifact@v3.1.3  # ✅ КОНКРЕТНА версія
+        uses: actions/upload-artifact@v3.1.3
         with:
           name: pymusic-apk
           path: bin/*.apk
