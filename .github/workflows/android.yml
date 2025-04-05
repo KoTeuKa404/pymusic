@@ -3,7 +3,7 @@ name: Build APK for Android
 on:
   push:
     branches:
-      - master   # змінюй на "main", якщо твоя гілка має іншу назву
+      - master   # або "main", залежно від твоєї гілки
     tags:
       - 'v*'
 
@@ -31,7 +31,7 @@ jobs:
           buildozer android debug
 
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v3.1.3  # ✅ КОНКРЕТНА версія
         with:
           name: pymusic-apk
           path: bin/*.apk
