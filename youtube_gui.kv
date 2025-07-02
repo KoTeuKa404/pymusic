@@ -1,0 +1,183 @@
+# youtube_gui.kv
+
+<YoutubeSearchScreen>:
+    name: "search"
+    MDBoxLayout:
+        orientation: "vertical"
+        spacing: dp(10)
+        padding: dp(10)
+
+        MDTextField:
+            id: search_input
+            hint_text: "Enter song name"
+            size_hint_y: None
+            height: dp(60)
+            mode: "rectangle"
+
+        MDRaisedButton:
+            text: "Search"
+            size_hint_y: None
+            height: dp(50)
+            pos_hint: {"center_x": 0.5}
+            on_release: root.perform_search()
+
+        MDScrollView:
+            MDGridLayout:
+                id: results_grid
+                cols: 1
+                adaptive_height: True
+                spacing: dp(10)
+                padding: dp(10)
+
+<AudioItem@BoxLayout>:
+    size_hint_y: None
+    height: dp(80)
+    padding: dp(5)
+    spacing: dp(10)
+    canvas.before:
+        Color:
+            rgba: 1, 1, 1, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+    AsyncImage:
+        id: thumbnail
+        size_hint_x: None
+        width: dp(120)
+        allow_stretch: True
+        keep_ratio: True
+
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: dp(5)
+
+        Label:
+            id: title
+            text: root.title if hasattr(root, 'title') else ''
+            font_size: '16sp'
+            bold: True
+            size_hint_y: None
+            height: self.texture_size[1]
+
+        Label:
+            id: channel
+            text: root.channel if hasattr(root, 'channel') else ''
+            font_size: '14sp'
+            color: 0.5, 0.5, 0.5, 1
+            size_hint_y: None
+            height: self.texture_size[1]
+
+    Button:
+        text: "♫"
+        size_hint_x: None
+        width: dp(50)
+        on_press: root.play_audio()
+
+<ProgressSlider@Slider>:
+    cursor_image: ''
+    cursor_size: dp(24), dp(24)
+    background_width: dp(2)
+    canvas.after:
+        Color:
+            rgba: 1, 1, 1, .5
+        Ellipse:
+            size: self.cursor_size
+            pos: self.x + (self.value - self.min) / ((self.max - self.min) if (self.max - self.min) else 1) * (self.width - self.cursor_size[0]), self.center_y - self.cursor_size[1] / 2
+<AudioPlayerScreen>:
+    name: 'audio'
+    canvas.before:
+        Color:
+            rgba: 1, 1, 1, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+    AnchorLayout:
+        anchor_x: 'center'
+        anchor_y: 'top'
+
+        BoxLayout:
+            orientation: 'vertical'
+            size_hint: 1, None
+            height: self.minimum_height
+            spacing: dp(10)
+            padding: dp(20)
+
+            FloatLayout:
+                size_hint_y: None
+                height: dp(200)
+
+                AsyncImage:
+                    id: audio_thumbnail
+                    pos: self.parent.pos
+                    size_hint: 1, 1
+                    allow_stretch: True
+                    keep_ratio: True
+
+                BoxLayout:
+                    orientation: 'horizontal'
+                    size_hint: 0.9, None
+                    height: dp(30)
+                    pos_hint: {'center_x': 0.5, 'y': 0.05}
+                    spacing: dp(10)
+
+                    Label:
+                        id: current_time_label
+                        text: '0:00'
+                        size_hint_x: None
+                        width: dp(50)
+                        font_size: '14sp'
+                        color: 1, 1, 1, 1
+
+                    ProgressSlider:
+                        id: progress_slider
+                        min: 0
+                        max: 1
+                        value: 0
+                        on_touch_up: if self.collide_point(*args[1].pos): root.seek(self.value)
+
+                    Label:
+                        id: total_time_label
+                        text: '0:00'
+                        size_hint_x: None
+                        width: dp(50)
+                        font_size: '14sp'
+                        color: 1, 1, 1, 1
+
+            Label:
+                id: audio_title
+                text: ''
+                font_size: '20sp'
+                halign: 'center'
+                color: 0, 0, 0, 1
+                size_hint_y: None
+                height: self.texture_size[1] + dp(10)
+
+            BoxLayout:
+                size_hint_y: None
+                height: dp(70)
+                spacing: dp(10)
+                padding: dp(10)
+
+                Button:
+                    id: play_pause_btn
+                    text: '▶ Play'
+                    font_size: '18sp'
+                    on_press: root.toggle_play_pause()
+
+                Button:
+                    id: repeat_btn
+                    text: '🔁'
+                    font_size: '18sp'
+                    on_press: root.toggle_repeat()
+
+                Button:
+                    text: '🎬 Відео'
+                    font_size: '18sp'
+                    on_press: root.play_video()   # Ось ця кнопка для відео з панеллю!
+
+                Button:
+                    text: '⏪ Back'
+                    font_size: '18sp'
+                    on_press: root.go_back()
