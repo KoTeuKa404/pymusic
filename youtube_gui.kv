@@ -78,12 +78,21 @@
     cursor_image: ''
     cursor_size: dp(24), dp(24)
     background_width: dp(2)
+    background_normal: ''
+    background_active: ''
+    canvas.before:
+        Color:
+            rgba: 0, 0, 0, 0
+        Rectangle:
+            pos: self.pos
+            size: self.size
     canvas.after:
         Color:
             rgba: 1, 1, 1, .5
         Ellipse:
             size: self.cursor_size
             pos: self.x + (self.value - self.min) / ((self.max - self.min) if (self.max - self.min) else 1) * (self.width - self.cursor_size[0]), self.center_y - self.cursor_size[1] / 2
+
 <AudioPlayerScreen>:
     name: 'audio'
     canvas.before:

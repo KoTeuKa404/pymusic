@@ -271,3 +271,19 @@ class AudioPlayerScreen(Screen):
         self.stop_audio()
         hide_native_video()
         self.manager.current = "search"
+
+    def play_playlist(self, tracks, playlist_title):
+        self.playlist_tracks = tracks
+        self.playlist_index = 0
+        self.ids.audio_title.text = f"[PL] {playlist_title}"
+        self._play_current_track()
+
+    def _play_current_track(self):
+        if not hasattr(self, "playlist_tracks"): return
+        url, title, channel = self.playlist_tracks[self.playlist_index]
+        self.play_audio(url, title, channel, "")
+
+    def _play_next_track(self, *args):
+        if hasattr(self, "playlist_tracks") and self.playlist_index + 1 < len(self.playlist_tracks):
+            self.playlist_index += 1
+            self._play_current_track()
