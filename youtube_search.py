@@ -37,7 +37,6 @@ def fetch_youtube_results(query):
                         f"https://www.youtube.com/watch?v={vid}",
                         title, chan, thumb, dur
                     ))
-                # Плейлист
                 pl = it.get("playlistRenderer")
                 if pl:
                     title = "".join([r["text"] for r in pl["title"]["runs"]])

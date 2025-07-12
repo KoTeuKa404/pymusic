@@ -6,10 +6,7 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.uix.screenmanager import Screen
 
-from jnius import (
-    autoclass, cast,
-    PythonJavaClass, java_method
-)
+from jnius import ( autoclass, cast, PythonJavaClass, java_method )
 from android.runnable import run_on_ui_thread
 
 # Вимикаємо кеш yt_dlp
@@ -17,7 +14,6 @@ yt_dlp.cache.store  = lambda *a, **k: None
 yt_dlp.cache.load   = lambda *a, **k: None
 yt_dlp.cache.remove = lambda *a, **k: None
 
-# Android Java класи
 MediaPlayer       = autoclass('android.media.MediaPlayer')
 PythonActivity    = autoclass('org.kivy.android.PythonActivity')
 Uri               = autoclass('android.net.Uri')
@@ -35,6 +31,19 @@ wake_lock         = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, 'PyMusic::Wak
 android_player = None
 is_playing     = False
 
+
+
+class OnCompletionListener(PythonJavaClass):
+    __javainterfaces__ = ['android/media/MediaPlayer$OnCompletionListener']
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    @java_method('(Landroid/media/MediaPlayer;)V')
+    def onCompletion(self, mp):
+        self.callback()
+
+
 def acquire_wake_lock():
     try:
         if not wake_lock.isHeld():
@@ -49,7 +58,7 @@ def release_wake_lock():
     except Exception as e:
         print(f"[WAKE_LOCK] Error releasing: {e}")
 
-# === VideoView Controller (чорна панель) ===
+# === VideoView Controller  ===
 
 @run_on_ui_thread
 def show_native_video(url):
@@ -95,14 +104,17 @@ class PreparedListener(PythonJavaClass):
                                          ._init_slider(0), 0)
 
 @run_on_ui_thread
-def play_audio_android(url):
+def play_audio_android(url, completion_listener=None):
     global android_player
     ctx = cast('android.content.Context', PythonActivity.mActivity)
     uri = Uri.parse(url)
     android_player = MediaPlayer()
     android_player.setOnPreparedListener(PreparedListener())
+    if completion_listener:
+        android_player.setOnCompletionListener(completion_listener)
     android_player.setDataSource(ctx, uri)
     android_player.prepareAsync()
+
 
 @run_on_ui_thread
 def pause_audio_android():
@@ -141,15 +153,14 @@ class AudioPlayerScreen(Screen):
         super().__init__(**kwargs)
         self.repeat = False
         self._update_ev = None
-        self._last_url = None  # для перемикання між режимами
-
+        self._last_url = None 
     def on_pre_leave(self):
         self.stop_audio()
         hide_native_video()
 
     def play_audio(self, video_url, title, channel, duration):
         acquire_wake_lock()
-        self._last_url = video_url  # зберігаємо останній url
+        self._last_url = video_url  
         self.stop_audio()
         hide_native_video()
         self.ids.audio_title.text        = title
@@ -158,11 +169,23 @@ class AudioPlayerScreen(Screen):
         self.ids.progress_slider.value   = 0
         self.ids.progress_slider.max     = 1
         self.ids.audio_thumbnail.source  = ""
+        self._on_completion_listener = OnCompletionListener(self._on_track_finished)
         threading.Thread(
             target=self._fetch_and_play_audio,
             args=(video_url,),
             daemon=True
         ).start()
+
+    def _on_track_finished(self, *args):
+        if self.repeat:
+            self._play_current_track()
+        elif hasattr(self, "playlist_tracks") and self.playlist_index + 1 < len(self.playlist_tracks):
+            self.playlist_index += 1
+            self._play_current_track()
+        else:
+            self.stop_audio()
+            print("[PLAYLIST] End of playlist.")
+
 
     def _fetch_and_play_audio(self, video_url):
         opts = {
@@ -179,13 +202,14 @@ class AudioPlayerScreen(Screen):
                 audio_url = info['url']
                 thumb     = info.get('thumbnail', '')
                 Clock.schedule_once(lambda dt: self._update_thumbnail(thumb), 0)
-                Clock.schedule_once(lambda dt: play_audio_android(audio_url), 0)
+                Clock.schedule_once(lambda dt: play_audio_android(audio_url, self._on_completion_listener), 0)
         except Exception as e:
             print(f"[ERROR] Не вдалося отримати URL потоку: {e}")
 
+
     def play_video(self):
         """Відтворити відео поверх (VideoView + MediaController)"""
-        release_wake_lock()  # не треба wake lock для відео
+        release_wake_lock()  
         self.stop_audio()
         threading.Thread(
             target=self._fetch_and_play_video,
@@ -230,14 +254,11 @@ class AudioPlayerScreen(Screen):
         if not android_player:
             return False
         pos_s = android_player.getCurrentPosition() / 1000.0
-        if self.repeat and pos_s >= self.ids.progress_slider.max - .1:
-            android_player.seekTo(0)
-            android_player.start()
-            is_playing = True
         self.ids.progress_slider.value = pos_s
         m, s = divmod(int(pos_s), 60)
         self.ids.current_time_label.text = f"{m}:{s:02}"
         return True
+
 
     def toggle_play_pause(self, *args):
         global is_playing

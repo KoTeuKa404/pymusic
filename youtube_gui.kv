@@ -163,30 +163,39 @@
                 size_hint_y: None
                 height: self.texture_size[1] + dp(10)
 
-            BoxLayout:
+            MDBoxLayout:
                 size_hint_y: None
-                height: dp(70)
-                spacing: dp(10)
-                padding: dp(10)
+                height: dp(50)
+                spacing: dp(8)
+                padding: dp(4)
+                pos_hint: {"center_x": 0.5}
 
-                Button:
+                Widget:   # Лівий "розтягуючий" віджет
+                    size_hint_x: 1
+
+                MDIconButton:
                     id: play_pause_btn
-                    text: '▶ Play'
-                    font_size: '18sp'
-                    on_press: root.toggle_play_pause()
+                    icon: 'ico/icoplaybutton.png'
+                    user_font_size: "30sp"
+                    on_release: root.toggle_play_pause()
 
-                Button:
+                MDIconButton:
                     id: repeat_btn
-                    text: '🔁'
-                    font_size: '18sp'
-                    on_press: root.toggle_repeat()
+                    icon: 'ico/icorepeat.png'
+                    user_font_size: "26sp"
+                    on_release: root.toggle_repeat()
 
-                Button:
-                    text: '🎬 Відео'
-                    font_size: '18sp'
-                    on_press: root.play_video()   # Ось ця кнопка для відео з панеллю!
+                MDIconButton:
+                    id: stop_btn
+                    icon: 'ico/icostopbuttons.png'
+                    user_font_size: "26sp"
+                    on_release: root.stop_audio()
 
-                Button:
-                    text: '⏪ Back'
-                    font_size: '18sp'
-                    on_press: root.go_back()
+                MDIconButton:
+                    id: back_btn
+                    icon: 'ico/icobackbutton.png'
+                    user_font_size: "26sp"
+                    on_release: root.go_back()
+
+                Widget:   # Правий "розтягуючий" віджет
+                    size_hint_x: 1

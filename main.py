@@ -17,16 +17,40 @@ from youtube_search import fetch_youtube_results
 from audio_screen import AudioPlayerScreen
 from kivymd.uix.screen import MDScreen
 from jnius import autoclass
+import re
 
 Builder.load_file("youtube_gui.kv")
 
 class YoutubeSearchScreen(MDScreen):
     def perform_search(self):
         query = self.ids.search_input.text.strip()
-        grid  = self.ids.results_grid
+        grid = self.ids.results_grid
         grid.clear_widgets()
         if not query:
             return
+
+        yt_video_regex = r"(?:v=|be/)([A-Za-z0-9_-]{11})"
+        yt_playlist_regex = r"(?:list=)([A-Za-z0-9_-]+)"
+        video_id = None
+        playlist_id = None
+
+        if "youtube.com" in query or "youtu.be" in query:
+            video_match = re.search(yt_video_regex, query)
+            playlist_match = re.search(yt_playlist_regex, query)
+            if playlist_match:
+                playlist_id = playlist_match.group(1)
+            if video_match:
+                video_id = video_match.group(1)
+
+            if playlist_id:
+                playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+                self.open_playlist(playlist_url, f"Playlist {playlist_id}")
+                return
+            elif video_id:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                self.play_audio(video_url, f"Video {video_id}", "", "")
+                return
+
         videos, playlists = fetch_youtube_results(query)
         if not videos and not playlists:
             from kivymd.uix.label import MDLabel
@@ -39,7 +63,6 @@ class YoutubeSearchScreen(MDScreen):
         from kivymd.uix.label     import MDLabel
         from kivy.uix.image       import AsyncImage
 
-        # Додаємо плейлисти
         for url, title, channel, thumb, count in playlists:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
             card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
@@ -54,7 +77,6 @@ class YoutubeSearchScreen(MDScreen):
             card.add_widget(box)
             grid.add_widget(card)
 
-        # Додаємо відео
         for url, title, channel, thumb, dur in videos:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
             card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
