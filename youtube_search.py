@@ -9,23 +9,29 @@ def fetch_youtube_results(query):
         )
     }
     url = f"https://www.youtube.com/results?search_query={query}"
-    resp = httpx.get(url, headers=headers, timeout=10)
+    try:
+        resp = httpx.get(url, headers=headers, timeout=10)
+    except Exception as e:
+        print("[SEARCH] HTTP error:", e)
+        return [], []
+
     if resp.status_code != 200:
+        print("[SEARCH] Non-200:", resp.status_code)
         return [], []
 
     match = re.search(r"var ytInitialData = ({.*?});", resp.text)
     if not match:
+        print("[SEARCH] ytInitialData not found")
         return [], []
 
-    data = json.loads(match.group(1))
     try:
+        data = json.loads(match.group(1))
         sections = data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"]["sectionListRenderer"]["contents"]
         videos = []
         playlists = []
         for sec in sections:
             items = sec.get("itemSectionRenderer", {}).get("contents", [])
             for it in items:
-                # Відео
                 vr = it.get("videoRenderer")
                 if vr:
                     title   = "".join([r["text"] for r in vr["title"]["runs"]])
@@ -49,5 +55,6 @@ def fetch_youtube_results(query):
                         title, chan, thumb, count
                     ))
         return videos, playlists
-    except Exception:
+    except Exception as e:
+        print("[SEARCH] parse error:", e)
         return [], []

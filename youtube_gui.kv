@@ -1,23 +1,43 @@
 # youtube_gui.kv
 
+<PNGIconButton@ButtonBehavior+Image>:
+    size_hint: None, None
+    size: dp(36), dp(36)   # близько до 26sp у MDIconButton
+    allow_stretch: True
+    keep_ratio: True
+
 <YoutubeSearchScreen>:
+    on_pre_enter: root.show_recent_videos(); root.ids.search_history_box.clear_widgets()
     name: "search"
     MDBoxLayout:
         orientation: "vertical"
-        spacing: dp(10)
-        padding: dp(10)
+        spacing: dp(8)
+        padding: dp(12), dp(8), dp(12), dp(4)
 
         MDTextField:
             id: search_input
             hint_text: "Enter song name"
-            size_hint_y: None
-            height: dp(60)
             mode: "rectangle"
+            multiline: False
+            size_hint_y: None
+            size_hint_x: 1
+            height: dp(48)
+            pos_hint: {"center_x": 0.5}
+            font_size: "17sp"
+            padding: [dp(8), dp(8), dp(8), dp(8)]
+
+        MDBoxLayout:
+            id: search_history_box
+            size_hint_y: None
+            height: self.minimum_height
+            spacing: dp(6)
+            padding: 0, dp(0), 0, dp(4)
+            adaptive_height: True
 
         MDRaisedButton:
             text: "Search"
             size_hint_y: None
-            height: dp(50)
+            height: dp(44)
             pos_hint: {"center_x": 0.5}
             on_release: root.perform_search()
 
@@ -75,23 +95,33 @@
         on_press: root.play_audio()
 
 <ProgressSlider@Slider>:
-    cursor_image: ''
-    cursor_size: dp(24), dp(24)
-    background_width: dp(2)
+    cursor_image: ''          # не використовуємо стандартну картинку
+    cursor_size: 0, 0         # ⬅️ ховаємо рідний курсор повністю
+    background_width: 0
     background_normal: ''
     background_active: ''
+
     canvas.before:
         Color:
             rgba: 0, 0, 0, 0
         Rectangle:
             pos: self.pos
             size: self.size
+
     canvas.after:
+        # (необовʼязково) лінія треку — прибери ці 4 рядки, якщо не треба
+        Color:
+            rgba: 1, 1, 1, .25
+        Rectangle:
+            pos: self.x, self.center_y - dp(1)
+            size: self.width, dp(2)
+
+        # наш кастомний круглий повзунок
         Color:
             rgba: 1, 1, 1, .5
         Ellipse:
-            size: self.cursor_size
-            pos: self.x + (self.value - self.min) / ((self.max - self.min) if (self.max - self.min) else 1) * (self.width - self.cursor_size[0]), self.center_y - self.cursor_size[1] / 2
+            size: dp(14), dp(14)          # ← було dp(24), зробили менше
+            pos: self.x + (self.value - self.min) / ((self.max - self.min) if (self.max - self.min) else 1) * (self.width - dp(14)), self.center_y - dp(7)
 
 <AudioPlayerScreen>:
     name: 'audio'
@@ -179,17 +209,16 @@
                     user_font_size: "30sp"
                     on_release: root.toggle_play_pause()
 
-                MDIconButton:
+                PNGIconButton:
                     id: repeat_btn
-                    icon: 'ico/icorepeat.png'
-                    user_font_size: "26sp"
+                    source: "ico/icorepeat.png"
                     on_release: root.toggle_repeat()
 
-                MDIconButton:
-                    id: stop_btn
-                    icon: 'ico/icostopbuttons.png'
-                    user_font_size: "26sp"
-                    on_release: root.stop_audio()
+#                MDIconButton:
+#                    id: stop_btn
+#                    icon: 'ico/icostopbuttons.png'
+#                    user_font_size: "26sp"
+#                    on_release: root.stop_audio()
 
                 MDIconButton:
                     id: back_btn

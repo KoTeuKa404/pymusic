@@ -11,10 +11,10 @@ orientation = portrait
 osx.python_version = 3
 fullscreen = 1
 icon.filename = ico/icopymusic.png
-source.include_patterns = images/*.png, ico/*.png, *.kv, *.py
+source.include_patterns = images/*.png, ico/*.png, *.kv, *.py , *.json
 
 # Android configurations
-android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE,MODIFY_AUDIO_SETTINGS,RECORD_AUDIO,READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE
+android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, MODIFY_AUDIO_SETTINGS, RECORD_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS
 android.minapi = 21
 android.sdk = 33
 android.ndk = 25c
@@ -26,7 +26,7 @@ android.entrypoint = org.kivy.android.PythonActivity
 android.apptheme = @android:style/Theme.NoTitleBar
 android.archs = armeabi-v7a, arm64-v8a
 android.foreground = False
-android.services = audio_service:service.main
+android.services = audio_service:audio_service.py
 
 
 # Manual NDK & SDK paths
