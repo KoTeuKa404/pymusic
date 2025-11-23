@@ -1,8 +1,6 @@
-# youtube_gui.kv
-
 <PNGIconButton@ButtonBehavior+Image>:
     size_hint: None, None
-    size: dp(36), dp(36)   # близько до 26sp у MDIconButton
+    size: dp(36), dp(36)
     allow_stretch: True
     keep_ratio: True
 
@@ -61,12 +59,18 @@
             pos: self.pos
             size: self.size
 
-    AsyncImage:
-        id: thumbnail
+    # блок мініатюри (фіксована ширина)
+    FloatLayout:
         size_hint_x: None
-        width: dp(120)
-        allow_stretch: True
-        keep_ratio: True
+        width: dp(80)
+
+        AsyncImage:
+            id: audio_thumbnail
+            source: ""
+            allow_stretch: True
+            keep_ratio: True
+            size_hint: 1, 1
+            pos_hint: {"x": 0, "y": 0}
 
     BoxLayout:
         orientation: 'vertical'
@@ -95,8 +99,8 @@
         on_press: root.play_audio()
 
 <ProgressSlider@Slider>:
-    cursor_image: ''          # не використовуємо стандартну картинку
-    cursor_size: 0, 0         # ⬅️ ховаємо рідний курсор повністю
+    cursor_image: ''
+    cursor_size: 0, 0
     background_width: 0
     background_normal: ''
     background_active: ''
@@ -109,18 +113,16 @@
             size: self.size
 
     canvas.after:
-        # (необовʼязково) лінія треку — прибери ці 4 рядки, якщо не треба
         Color:
             rgba: 1, 1, 1, .25
         Rectangle:
             pos: self.x, self.center_y - dp(1)
             size: self.width, dp(2)
 
-        # наш кастомний круглий повзунок
         Color:
             rgba: 1, 1, 1, .5
         Ellipse:
-            size: dp(14), dp(14)          # ← було dp(24), зробили менше
+            size: dp(14), dp(14)
             pos: self.x + (self.value - self.min) / ((self.max - self.min) if (self.max - self.min) else 1) * (self.width - dp(14)), self.center_y - dp(7)
 
 <AudioPlayerScreen>:
@@ -149,8 +151,8 @@
 
                 AsyncImage:
                     id: audio_thumbnail
-                    pos: self.parent.pos
                     size_hint: 1, 1
+                    pos_hint: {'x': 0, 'y': 0}
                     allow_stretch: True
                     keep_ratio: True
 
@@ -200,7 +202,7 @@
                 padding: dp(4)
                 pos_hint: {"center_x": 0.5}
 
-                Widget:   # Лівий "розтягуючий" віджет
+                Widget:
                     size_hint_x: 1
 
                 MDIconButton:
@@ -214,17 +216,11 @@
                     source: "ico/icorepeat.png"
                     on_release: root.toggle_repeat()
 
-#                MDIconButton:
-#                    id: stop_btn
-#                    icon: 'ico/icostopbuttons.png'
-#                    user_font_size: "26sp"
-#                    on_release: root.stop_audio()
-
                 MDIconButton:
                     id: back_btn
                     icon: 'ico/icobackbutton.png'
                     user_font_size: "26sp"
                     on_release: root.go_back()
 
-                Widget:   # Правий "розтягуючий" віджет
+                Widget:
                     size_hint_x: 1

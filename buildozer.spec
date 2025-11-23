@@ -1,12 +1,12 @@
 [app]
 
-title = Py Music 
+title = Py Music
 package.name = pymusic
 package.domain = org.koteuka404
 source.dir = .
 source.include_exts = py,kv,png,jpg,ttf,mp3,mp4,wav
 version = 1.0
-requirements = python3, kivy==2.2.1, kivymd, ffpyplayer, yt-dlp, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi,yt_dlp, idna, httpcore, cryptography, h11, requests,typing_extensions,pyjnius
+requirements = python3, kivy==2.2.1, kivymd, ffpyplayer, yt_dlp>=2025.10.0, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi,yt_dlp, idna, httpcore, cryptography, h11, requests,typing_extensions,pyjnius
 orientation = portrait
 osx.python_version = 3
 fullscreen = 1
@@ -14,7 +14,7 @@ icon.filename = ico/icopymusic.png
 source.include_patterns = images/*.png, ico/*.png, *.kv, *.py , *.json
 
 # Android configurations
-android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, MODIFY_AUDIO_SETTINGS, RECORD_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS
+android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, MODIFY_AUDIO_SETTINGS, RECORD_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS, READ_MEDIA_VIDEO, READ_MEDIA_IMAGES
 android.minapi = 21
 android.sdk = 33
 android.ndk = 25c

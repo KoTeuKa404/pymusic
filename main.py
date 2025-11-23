@@ -1,5 +1,6 @@
 import os
 os.environ["KIVY_AUDIO"] = "sdl2"
+
 import re
 import threading
 
@@ -22,6 +23,8 @@ from kivy.clock import Clock
 from android.runnable import run_on_ui_thread  # UI calls
 from kivy.app import App
 
+import media_android as ma  # <<< ДОДАНО
+
 from recent_utils import load_recent, save_recent
 from search_utils import load_search_history, save_search_history
 from kivymd.uix.chip import MDChip
@@ -34,7 +37,7 @@ from kivy.uix.image       import AsyncImage
 
 Builder.load_file("youtube_gui.kv")
 
-# ================= NOTIFICATION / ANDROID UTILS =================
+# ================= ANDROID UTILS =================
 
 def _sdk_int():
     return autoclass('android.os.Build$VERSION').SDK_INT
@@ -42,246 +45,66 @@ def _sdk_int():
 def _activity():
     return autoclass('org.kivy.android.PythonActivity').mActivity
 
-def _pm():
-    return _activity().getPackageManager()
-
-def _pkg():
-    return _activity().getPackageName()
-
-def _uid():
-    return _activity().getApplicationInfo().uid
-
 def _notif_manager():
     Context = autoclass('android.content.Context')
     return _activity().getSystemService(Context.NOTIFICATION_SERVICE)
 
 def _notif_perm_granted():
-    """Runtime POST_NOTIFICATIONS (Android 13+)."""
     if _sdk_int() < 33:
         return True
     PM = autoclass('android.content.pm.PackageManager')
     return _activity().checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PM.PERMISSION_GRANTED
 
 def _notif_enabled_in_system():
-    """Загальний системний тумблер (на MIUI часто викл.)."""
     try:
         return bool(_notif_manager().areNotificationsEnabled())
     except Exception:
-        return True  # якщо API нема — вважаємо, що ок
+        return True
 
 def notifications_ready():
     return _notif_perm_granted() and _notif_enabled_in_system()
 
 # ---------- ОДИН ВИКЛИК ДЛЯ ВСІХ RUNTIME-ПРАВ ----------
+
+_perm_once_guard = {"asked_post_notif": False, "asked_media_storage": False}
+
 @run_on_ui_thread
-def request_all_runtime_permissions_auto():
-    """
-    Попросити всі небезпечні (runtime) дозволи ОДНИМ системним діалогом.
-    Normal-права (INTERNET/WAKE_LOCK/FOREGROUND_SERVICE...) у runtime не просяться.
-    """
+def request_runtime_permissions_safely():
     PM = autoclass('android.content.pm.PackageManager')
     act = _activity()
     sdk = _sdk_int()
 
-    perms = set()
-    # те, що реально потрібне застосунку:
-    perms.add("android.permission.RECORD_AUDIO")
+    # 1) POST_NOTIFICATIONS (Android 13+)
+    if sdk >= 33 and not _perm_once_guard["asked_post_notif"]:
+        _perm_once_guard["asked_post_notif"] = True
+        if act.checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PM.PERMISSION_GRANTED:
+            try:
+                print("[PERMS] requesting POST_NOTIFICATIONS")
+                act.requestPermissions(["android.permission.POST_NOTIFICATIONS"], 900)
+            except Exception as e:
+                print("[PERMS] POST_NOTIFICATIONS request failed:", e)
 
-    if sdk >= 33:
-        # Android 13+: заміна READ/WRITE_EXTERNAL_STORAGE
-        perms.add("android.permission.READ_MEDIA_AUDIO")
-        # додай за потреби:
-        # perms.add("android.permission.READ_MEDIA_VIDEO")
-        # perms.add("android.permission.READ_MEDIA_IMAGES")
-        perms.add("android.permission.POST_NOTIFICATIONS")
-    else:
-        # Android 12 та нижче
-        perms.add("android.permission.READ_EXTERNAL_STORAGE")
-        perms.add("android.permission.WRITE_EXTERNAL_STORAGE")
+    # 2) Медійні/сторедж-права — одним батчем (один раз)
+    if not _perm_once_guard["asked_media_storage"]:
+        perms = set()
+        if sdk >= 33:
+            perms.add("android.permission.READ_MEDIA_AUDIO")
+            # perms.add("android.permission.READ_MEDIA_VIDEO")
+            # perms.add("android.permission.READ_MEDIA_IMAGES")
+        else:
+            perms.add("android.permission.READ_EXTERNAL_STORAGE")
+            perms.add("android.permission.WRITE_EXTERNAL_STORAGE")
 
-    to_request = [p for p in perms if act.checkSelfPermission(p) != PM.PERMISSION_GRANTED]
-    if to_request:
-        print("[PERMS] requesting runtime in one dialog:", to_request)
-        try:
-            act.requestPermissions(to_request, 777)
-        except Exception as e:
-            print("[PERMS] requestPermissions failed:", e)
-    else:
-        print("[PERMS] all runtime already granted")
-
-# ---------- відкривач налаштувань сповіщень (робастний) ----------
-@run_on_ui_thread
-def open_app_notification_settings_robust():
-    """
-    Прагматичний відкривач налаштувань сповіщень:
-      1) AOSP APP_NOTIFICATION_SETTINGS (O+ і L–N),
-      2) Application details (універсально),
-      3) MIUI SecurityCenter (два відомих варіанти),
-      4) Загальні системні списки (останній шанс).
-    Вибирає перший, що реально резолвиться.
-    """
-    Intent   = autoclass('android.content.Intent')
-    Settings = autoclass('android.provider.Settings')
-    Uri      = autoclass('android.net.Uri')
-    act = _activity(); pm = _pm()
-    pkg = _pkg(); uid = _uid()
-
-    candidates = []
-
-    # --- AOSP O+ (API 26+) ---
-    if _sdk_int() >= 26:
-        it = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-        try:
-            EXTRA_APP_PACKAGE = getattr(Settings, 'EXTRA_APP_PACKAGE')
-            it.putExtra(EXTRA_APP_PACKAGE, pkg)
-        except Exception:
-            pass
-        it.putExtra("android.provider.extra.APP_PACKAGE", pkg)
-        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        candidates.append(it)
-
-    # --- AOSP L–N (API 21–25) ---
-    if 21 <= _sdk_int() < 26:
-        it = Intent("android.settings.APP_NOTIFICATION_SETTINGS")
-        it.putExtra("app_package", pkg)
-        it.putExtra("app_uid", uid)
-        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        candidates.append(it)
-
-    # --- Деталі застосунку (майже завжди є) ---
-    it = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-    it.setData(Uri.parse("package:" + pkg))
-    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    candidates.append(it)
-
-    # --- MIUI специфіка 1 ---
-    it = Intent("miui.intent.action.APP_PERM_EDITOR")
-    it.setClassName("com.miui.securitycenter",
-                    "com.miui.permcenter.permissions.PermissionsEditorActivity")
-    it.putExtra("extra_pkgname", pkg)
-    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    candidates.append(it)
-
-    # --- MIUI специфіка 2 ---
-    it = Intent("miui.intent.action.APP_PERM_EDITOR")
-    it.setClassName("com.miui.securitycenter",
-                    "com.miui.permcenter.settings.AppPermissionsEditorActivity")
-    it.putExtra("extra_pkgname", pkg)
-    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    candidates.append(it)
-
-    # --- Загальні екрани ---
-    it = Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS)
-    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    candidates.append(it)
-
-    it = Intent(Settings.ACTION_APPLICATION_SETTINGS)
-    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    candidates.append(it)
-
-    for idx, candidate in enumerate(candidates):
-        try:
-            if pm.resolveActivity(candidate, 0) is not None:
-                print(f"[NOTIF] open settings candidate #{idx} -> OK")
-                act.startActivity(candidate)
-                return True
-        except Exception as e:
-            print(f"[NOTIF] candidate #{idx} failed:", e)
-
-    print("[NOTIF] no settings intent could be resolved")
-    return False
-
-def send_test_heads_up_notification():
-    """Коротке heads-up після увімкнення сповіщень (канал IMPORTANCE_HIGH)."""
-    if not notifications_ready():
-        print("[NOTIF] test skipped: not ready"); return
-    act = _activity()
-    NotificationManager = autoclass('android.app.NotificationManager')
-    NotificationChannel = autoclass('android.app.NotificationChannel')
-    NotificationBuilder = autoclass('android.app.Notification$Builder')
-    channel_id, channel_name = "pymusic_alerts", "PyMusic Alerts"
-    importance = NotificationManager.IMPORTANCE_HIGH
-    nm = _notif_manager()
-    if nm.getNotificationChannel(channel_id) is None:
-        ch = NotificationChannel(channel_id, channel_name, importance)
-        ch.enableVibration(True)
-        nm.createNotificationChannel(ch)
-    b = NotificationBuilder(act, channel_id)
-    b.setContentTitle("PyMusic")
-    b.setContentText("Сповіщення увімкнено ✅")
-    b.setSmallIcon(act.getApplicationInfo().icon)
-    b.setAutoCancel(True)
-    nm.notify(1001, b.build())
-
-# ========== ЖОРСТКИЙ ГЕЙТ (force settings loop) ==========
-
-class NotificationForceSettingsGate:
-    """
-    Автоматично і наполегливо веде юзера в екран дозволів:
-      • Показує діалог без закриття поза ним,
-      • Питає runtime-дозвіл,
-      • Відкриває екран налаштувань,
-      • Щосекунди перевіряє; кожні 4с знову відкриває налаштування,
-      • Завершує, коли notifications_ready() == True.
-    """
-    def __init__(self):
-        self.dialog = None
-        self._tries = 0
-
-    def start(self):
-        if notifications_ready():
-            print("[NOTIF-GATE] already ok"); send_test_heads_up_notification(); return
-        self._show_dialog()
-        request_all_runtime_permissions_auto()  # на випадок, якщо ще не просили
-        open_app_notification_settings_robust()
-        Clock.schedule_once(self._poll, 1.0)
-
-    def _poll(self, dt):
-        ok = notifications_ready()
-        print(f"[NOTIF-GATE] ready? {ok}")
-        if ok:
-            self._dismiss(); send_test_heads_up_notification(); return
-        self._tries += 1
-        if self._tries % 4 == 0:
-            open_app_notification_settings_robust()
-        Clock.schedule_once(self._poll, 1.0)
-
-    def _dismiss(self):
-        if self.dialog:
-            try: self.dialog.dismiss()
-            except Exception: pass
-            self.dialog = None
-
-    def _on_exit(self, *a):
-        App.get_running_app().stop()
-
-    def _on_open_settings(self, *a):
-        open_app_notification_settings_robust()
-
-    def _show_dialog(self):
-        if self.dialog: return
-        content = MDBoxLayout(orientation="vertical", adaptive_height=True,
-                              spacing="8dp", padding=("0dp","4dp","0dp","0dp"))
-        lbl = MDLabel(
-            text=("PyMusic потребує сповіщень, щоб працювати у фоні та показувати плеєр.\n"
-                  "Ми відкрили екран налаштувань — увімкни сповіщення для застосунку."),
-            halign="left", theme_text_color="Primary"
-        )
-        # не даємо тексту накладатися
-        lbl.bind(width=lambda *_: setattr(lbl, "text_size", (lbl.width, None)))
-        content.add_widget(lbl)
-
-        self.dialog = MDDialog(
-            title="Увімкнути сповіщення",
-            type="custom",
-            content_cls=content,
-            auto_dismiss=False,
-            buttons=[
-                MDFlatButton(text="ВИЙТИ", on_release=self._on_exit),
-                MDRaisedButton(text="НАЛАШТУВАННЯ", on_release=self._on_open_settings),
-            ],
-        )
-        self.dialog.open()
+        to_request = [p for p in perms if act.checkSelfPermission(p) != PM.PERMISSION_GRANTED]
+        if to_request:
+            _perm_once_guard["asked_media_storage"] = True
+            try:
+                print("[PERMS] requesting media/storage:", to_request)
+                act.requestPermissions(to_request, 901)
+            except Exception as e:
+                print("[PERMS] media/storage request failed:", e)
+        else:
+            print("[PERMS] media/storage already granted")
 
 # =================== UI / SEARCH ===================
 
@@ -394,6 +217,7 @@ class YoutubeSearchScreen(MDScreen):
         self.manager.current = "audio"
 
     def play_audio(self, url, title, channel, duration, thumb="", *args, **kwargs):
+        from recent_utils import load_recent, save_recent
         recent = load_recent()
         entry = {"url": url, "title": title, "channel": channel, "thumb": thumb}
         recent = [r for r in recent if r["url"] != url]
@@ -432,10 +256,14 @@ class YoutubeSearchApp(MDApp):
 
     def on_start(self):
         _log_build_info()
-        # один системний діалог на увесь набір runtime-дозволів
-        request_all_runtime_permissions_auto()
-        # Жорсткий гейт сповіщень (особливо для MIUI)
-        Clock.schedule_once(lambda dt: NotificationForceSettingsGate().start(), 0.5)
+        # Канал і пермішени для нотифікацій до першого показу
+        ma.create_notification_channel()
+        try:
+            ma.request_post_notifications_permission()
+        except Exception:
+            pass
+        # інші runtime-права
+        request_runtime_permissions_safely()
 
 if __name__ == "__main__":
     YoutubeSearchApp().run()
