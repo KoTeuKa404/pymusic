@@ -43,11 +43,18 @@ jobs:
         python3 -m pip install "cython<3.0"
         python3 -m pip install buildozer
 
-    - name: Prepare buildozer dirs
+    - name: Prepare directories
       run: |
         mkdir -p ~/.buildozer
         mkdir -p .buildozer
-        mkdir -p bin   # <<< Ось це додано
+        mkdir -p bin
+
+    - name: Build APK
+      run: |
+        echo "Running buildozer..."
+        buildozer android debug
+        echo "Build complete. Listing bin/:"
+        ls -lah bin || true
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
