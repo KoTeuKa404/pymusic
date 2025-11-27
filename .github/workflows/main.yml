@@ -1,61 +1,61 @@
-name: Android APK build (Buildozer)
+name: Build APK with Buildozer
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:
 
 jobs:
-  build-apk:
+  build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            zip \
-            unzip \
-            openjdk-17-jdk \
-            python3-pip \
-            python3-setuptools \
-            python3-venv \
-            libncurses5:i386 \
-            libstdc++6:i386 \
-            libgtk2.0-0:i386 \
-            libpangox-1.0-0:i386 \
-            libpangoxft-1.0-0:i386 \
-            libidn11:i386 \
-            libglu1-mesa \
-            libglu1-mesa-dev
+    - name: Install dependencies
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          git \
+          zip \
+          unzip \
+          openjdk-17-jdk \
+          python3-pip \
+          python3-setuptools \
+          python3-venv \
+          libncurses5:i386 \
+          libstdc++6:i386 \
+          libgtk2.0-0:i386 \
+          libc6:i386 \
+          zlib1g:i386 \
+          libsm6:i386 \
+          libxext6:i386 \
+          libxrender1:i386 \
+          libglu1-mesa \
+          libglu1-mesa-dev
 
-      - name: Install Buildozer
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "cython<3.0" virtualenv
-          python3 -m pip install buildozer
+    - name: Install Buildozer
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install "cython<3.0"
+        python3 -m pip install buildozer
 
-      - name: Create local build directory
-        run: |
-          mkdir -p ~/.buildozer
-          mkdir -p .buildozer
+    - name: Prepare buildozer dirs
+      run: |
+        mkdir -p ~/.buildozer
+        mkdir -p .buildozer
 
-      - name: Build APK with Buildozer
-        env:
-          BUILDOZER_WARN_ON_ROOT: "1"
-        run: |
-          buildozer android debug
+    - name: Build APK
+      env:
+        BUILDOZER_WARN_ON_ROOT: "1"
+      run: |
+        buildozer android debug
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-apk
-          path: bin/*.apk
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: apk-output
+        path: bin/*.apk
