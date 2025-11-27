@@ -1,0 +1,61 @@
+name: Android APK build (Buildozer)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            zip \
+            unzip \
+            openjdk-17-jdk \
+            python3-pip \
+            python3-setuptools \
+            python3-venv \
+            libncurses5:i386 \
+            libstdc++6:i386 \
+            libgtk2.0-0:i386 \
+            libpangox-1.0-0:i386 \
+            libpangoxft-1.0-0:i386 \
+            libidn11:i386 \
+            libglu1-mesa \
+            libglu1-mesa-dev
+
+      - name: Install Buildozer
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cython<3.0" virtualenv
+          python3 -m pip install buildozer
+
+      - name: Create local build directory
+        run: |
+          mkdir -p ~/.buildozer
+          mkdir -p .buildozer
+
+      - name: Build APK with Buildozer
+        env:
+          BUILDOZER_WARN_ON_ROOT: "1"
+        run: |
+          buildozer android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: bin/*.apk
