@@ -30,8 +30,8 @@ android.services = audio_service:audio_service.py
 
 
 # Manual NDK & SDK paths
-android.ndk_path = /home/home/.buildozer/android/platform/android-ndk-r25c
-android.sdk_path = /home/home/.buildozer/android/platform/android-sdk
+android.ndk_path =
+android.sdk_path =
 
 # SDL2 bootstrap (for GUI)
 android.bootstrap = sdl2
