@@ -29,11 +29,6 @@ android.archs = armeabi-v7a, arm64-v8a
 android.foreground = False
 android.services = audio_service:audio_service.py
 
-
-# Manual NDK & SDK paths
-android.ndk_path =
-android.sdk_path =
-
 # SDL2 bootstrap (for GUI)
 android.bootstrap = sdl2
 
