@@ -47,6 +47,7 @@ jobs:
       run: |
         mkdir -p ~/.buildozer
         mkdir -p .buildozer
+        mkdir -p bin   # <<< Ось це додано
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
