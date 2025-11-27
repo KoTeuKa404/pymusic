@@ -12,6 +12,7 @@ osx.python_version = 3
 fullscreen = 1
 icon.filename = ico/icopymusic.png
 source.include_patterns = images/*.png, ico/*.png, *.kv, *.py , *.json
+android.accept_sdk_license = True
 
 # Android configurations
 android.permissions = INTERNET, WAKE_LOCK, FOREGROUND_SERVICE, MODIFY_AUDIO_SETTINGS, RECORD_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS, READ_MEDIA_VIDEO, READ_MEDIA_IMAGES
