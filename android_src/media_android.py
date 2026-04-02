@@ -660,12 +660,13 @@ ACTION_PLAY = None
 ACTION_PAUSE = None
 ACTION_TOGGLE = None
 ACTION_NEXT = None
+ACTION_REPEAT = None
 ACTION_WEB_URL = None
 ACTION_WEB_MODE = None
 
 
 def _ensure_action_constants():
-    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_WEB_URL, ACTION_WEB_MODE
+    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_REPEAT, ACTION_WEB_URL, ACTION_WEB_MODE
     if _ACTION_PREFIX:
         return
     try:
@@ -682,6 +683,7 @@ def _ensure_action_constants():
     ACTION_PAUSE = f"{_ACTION_PREFIX}.PAUSE"
     ACTION_TOGGLE = f"{_ACTION_PREFIX}.TOGGLE"
     ACTION_NEXT = f"{_ACTION_PREFIX}.NEXT"
+    ACTION_REPEAT = f"{_ACTION_PREFIX}.REPEAT"
     ACTION_WEB_URL = f"{_ACTION_PREFIX}.WEB_URL"
     ACTION_WEB_MODE = f"{_ACTION_PREFIX}.WEB_MODE"
 
@@ -774,13 +776,11 @@ def create_or_update_media_notification(*,
         if hasattr(b, "setOngoing"):
             b.setOngoing(is_playing)
 
-        # Large icon (арт)
-        bmp = _load_bitmap(large_icon_path)
-        if bmp is not None:
-            try:
-                b.setLargeIcon(bmp)
-            except Exception:
-                pass
+        # Не показуємо великий лівий арт/аватар у шторці.
+        try:
+            b.setLargeIcon(None)
+        except Exception:
+            pass
 
         # Tap -> open app
         intent_open = Intent(act, PythonActivity)
@@ -794,15 +794,28 @@ def create_or_update_media_notification(*,
         pi_open = PendingIntent.getActivity(act, 0, intent_open, flags)
         b.setContentIntent(pi_open)
 
-        # Actions PendingIntent helper (route via Activity -> on_new_intent)
-        def _pi(action: str, req: int):
-            it = Intent(act, act.getClass())
-            it.setAction(action)
+        # Actions PendingIntent helper via ACTION_MEDIA_BUTTON broadcast.
+        # Це працює стабільніше у background, ніж on_new_intent через Activity.
+        def _pi_media(keycode: int, req: int):
+            it = Intent(Intent.ACTION_MEDIA_BUTTON)
             try:
-                it.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                it.setPackage(act.getPackageName())
             except Exception:
                 pass
-            return PendingIntent.getActivity(act, req, it, flags)
+            try:
+                ev = KeyEvent(KeyEvent.ACTION_DOWN, int(keycode))
+                it.putExtra(Intent.EXTRA_KEY_EVENT, ev)
+            except Exception:
+                pass
+            return PendingIntent.getBroadcast(act, req, it, flags)
+
+        def _pi_action(action: str, req: int):
+            it = Intent(action)
+            try:
+                it.setPackage(act.getPackageName())
+            except Exception:
+                pass
+            return PendingIntent.getBroadcast(act, req, it, flags)
 
         # Actions (use Notification.Action to avoid addAction signature mismatch)
         actions_added = 0
@@ -828,12 +841,13 @@ def create_or_update_media_notification(*,
                         actions_added += 1
                     except Exception as e3:
                         log(f"[NOTIF] addAction fallback err: {e3}")
-        _add_action(R_draw.ic_media_previous, "Prev", _pi(ACTION_PREV, 203))
+        _add_action(R_draw.ic_media_previous, "Prev", _pi_media(KeyEvent.KEYCODE_MEDIA_PREVIOUS, 203))
         if is_playing:
-            _add_action(R_draw.ic_media_pause, "Pause", _pi(ACTION_PAUSE, 201))
+            _add_action(R_draw.ic_media_pause, "Pause", _pi_media(KeyEvent.KEYCODE_MEDIA_PAUSE, 201))
         else:
-            _add_action(R_draw.ic_media_play, "Play", _pi(ACTION_PLAY, 202))
-        _add_action(R_draw.ic_media_next, "Next", _pi(ACTION_NEXT, 204))
+            _add_action(R_draw.ic_media_play, "Play", _pi_media(KeyEvent.KEYCODE_MEDIA_PLAY, 202))
+        _add_action(R_draw.ic_media_next, "Next", _pi_media(KeyEvent.KEYCODE_MEDIA_NEXT, 204))
+        _add_action(R_draw.ic_menu_revert, "Repeat", _pi_action(ACTION_REPEAT, 206))
 
         # MediaStyle з compact-кнопками і токеном сесії
         try:
@@ -1002,7 +1016,7 @@ def _handle_media_button_intent(intent) -> bool:
 
 
 class _MediaSessionCallback(PythonJavaClass):
-    __javaclass__ = 'android/media/session/MediaSession$Callback'
+    __javabase__ = 'android/media/session/MediaSession$Callback'
     __javacontext__ = 'app'
     __javainterfaces__ = []
 
@@ -1080,19 +1094,15 @@ def set_media_session_callback(owner):
         if ms is None:
             return
         _ms_cb_owner = owner
+        java_pkg = os.environ.get("MEDIAKEY_JAVA_PACKAGE") or _ACTION_PREFIX
+        JavaMsCb = autoclass(f"{java_pkg}.MediaSessionCallback")
+        _ms_cb_instance = JavaMsCb(PythonActivity.mActivity)
         try:
-            java_pkg = os.environ.get("MEDIAKEY_JAVA_PACKAGE") or _ACTION_PREFIX
-            JavaMsCb = autoclass(f"{java_pkg}.MediaSessionCallback")
-            _ms_cb_instance = JavaMsCb(PythonActivity.mActivity)
-            try:
-                handler = Handler(Looper.getMainLooper())
-                ms.setCallback(_ms_cb_instance, handler)
-            except Exception:
-                ms.setCallback(_ms_cb_instance)
-            log("[MS] java callback set")
-        except Exception as e:
-            log(f"[MS] java callback err: {e}")
-            _ms_cb_instance = None
+            handler = Handler(Looper.getMainLooper())
+            ms.setCallback(_ms_cb_instance, handler)
+        except Exception:
+            ms.setCallback(_ms_cb_instance)
+        log("[MS] java callback set")
         try:
             act = PythonActivity.mActivity
             flags = PendingIntent.FLAG_UPDATE_CURRENT
@@ -1106,7 +1116,6 @@ def set_media_session_callback(owner):
         except Exception as e:
             log(f"[MS] set media button receiver err: {e}")
         try:
-            java_pkg = os.environ.get("MEDIAKEY_JAVA_PACKAGE") or _ACTION_PREFIX
             JavaMb = autoclass(f"{java_pkg}.MediaButtonReceiver")
             JavaMb.register(PythonActivity.mActivity)
             log("[MS] media button receiver registered")
@@ -1215,6 +1224,10 @@ def _route_action_intent(intent):
                 cb()
         elif act == ACTION_PAUSE:
             cb = getattr(_action_owner, "_ms_pause", None)
+            if callable(cb):
+                cb()
+        elif act == ACTION_REPEAT:
+            cb = getattr(_action_owner, "_ms_repeat", None)
             if callable(cb):
                 cb()
         elif act == Intent.ACTION_MEDIA_BUTTON:

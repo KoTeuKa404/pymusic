@@ -5,11 +5,22 @@ import android.view.KeyEvent;
 import org.kivy.android.PythonActivity;
 
 public class MediaKeyActivity extends PythonActivity {
-    private void dispatchAction(String action) {
-        Intent i = new Intent(this, this.getClass());
+    public void dispatchMediaAction(String action) {
+        if (action == null) return;
+        Intent i = new Intent();
         i.setAction(action);
-        i.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        startActivity(i);
+        try {
+            setIntent(i);
+        } catch (Exception ignored) {
+        }
+        try {
+            onNewIntent(i);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void dispatchAction(String action) {
+        dispatchMediaAction(action);
     }
 
     @Override

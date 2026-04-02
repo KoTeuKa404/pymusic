@@ -2,6 +2,10 @@
 # ytdlp_helpers.py
 from __future__ import annotations
 
+import html
+import re
+import ssl
+import urllib.request
 import urllib.parse as urlparse
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -43,6 +47,132 @@ _ANDROID_WEB_UA = (
     "(KHTML, like Gecko) Chrome Mobile Safari/537.36"
 )
 
+
+def _normalize_img_url(url: str) -> str:
+    u = html.unescape(url or "")
+    u = u.replace("\\u0026", "&").replace("\\/", "/")
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+
+def _pick_yt3_avatar_from_text(text: str) -> str:
+    # Дуже надійний fallback: беремо перший yt3.ggpht URL з watch/channel HTML.
+    matches = re.findall(r'(https?:)?//yt3\.ggpht\.com/[^"\\\s<]+', text or "")
+    if not matches:
+        return ""
+    raw = matches[0]
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    return _normalize_img_url(raw)
+
+
+def _extract_channel_thumb_from_watch_page(video_url: str, ua: str) -> str:
+    try:
+        req = urllib.request.Request(
+            video_url,
+            headers={
+                "User-Agent": ua or _ANDROID_WEB_UA,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.youtube.com",
+                "Connection": "keep-alive",
+            },
+        )
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+            raw = resp.read(400_000)
+        text = raw.decode("utf-8", errors="ignore")
+        m = re.search(r'ytProfileIconImage[^>]+src="([^"]+)"', text)
+        if not m:
+            m = re.search(r'"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"', text)
+        if not m:
+            m = re.search(r'"channelAvatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"', text)
+        if m:
+            return _normalize_img_url(m.group(1) or "")
+        return _pick_yt3_avatar_from_text(text)
+    except Exception:
+        return ""
+
+
+def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str, str]:
+    """
+    Повертає (channel_name, channel_thumb) з watch-page.
+    """
+    try:
+        req = urllib.request.Request(
+            video_url,
+            headers={
+                "User-Agent": ua or _ANDROID_WEB_UA,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.youtube.com",
+                "Connection": "keep-alive",
+            },
+        )
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+            raw = resp.read(450_000)
+        text = raw.decode("utf-8", errors="ignore")
+
+        channel_name = ""
+        for p in (
+            r'"ownerChannelName":"([^"]+)"',
+            r'"channelName":"([^"]+)"',
+            r'"ownerText"\s*:\s*\{"runs"\s*:\s*\[\{"text":"([^"]+)"',
+            r'"shortBylineText"\s*:\s*\{"runs"\s*:\s*\[\{"text":"([^"]+)"',
+            r'"longBylineText"\s*:\s*\{"runs"\s*:\s*\[\{"text":"([^"]+)"',
+            r'"author":"([^"]+)"',
+        ):
+            m = re.search(p, text)
+            if m:
+                channel_name = html.unescape(m.group(1) or "")
+                channel_name = channel_name.replace("\\u0026", "&").replace("\\/", "/")
+                break
+
+        thumb = ""
+        for p in (
+            r'ytProfileIconImage[^>]+src="([^"]+)"',
+            r'"channelThumbnailSupportedRenderers"\s*:\s*\{"channelThumbnailWithLinkRenderer"\s*:\s*\{"thumbnail"\s*:\s*\{"thumbnails"\s*:\s*\[\{"url":"([^"]+)"',
+            r'"channelAvatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"',
+            r'"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"',
+        ):
+            m = re.search(p, text)
+            if m:
+                thumb = _normalize_img_url(m.group(1) or "")
+                break
+        if not thumb:
+            thumb = _pick_yt3_avatar_from_text(text)
+
+        return channel_name, thumb
+    except Exception:
+        return "", ""
+
+
+def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
+    if not channel_url:
+        return ""
+    try:
+        req = urllib.request.Request(
+            channel_url,
+            headers={
+                "User-Agent": ua or _ANDROID_WEB_UA,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.youtube.com",
+                "Connection": "keep-alive",
+            },
+        )
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+            raw = resp.read(350_000)
+        text = raw.decode("utf-8", errors="ignore")
+        m = re.search(r'<meta property="og:image" content="([^"]+)"', text)
+        if not m:
+            m = re.search(r'"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"', text)
+        if m:
+            return _normalize_img_url(m.group(1) or "")
+        return _pick_yt3_avatar_from_text(text)
+    except Exception:
+        return ""
+
 def _parse_expire_ts(url: str) -> Optional[int]:
     try:
         q = urlparse.urlparse(url).query
@@ -64,7 +194,11 @@ def _best_effort_headers(src: Dict[str, str] | None, defaults: Dict[str, str]) -
     return headers
 
 
-def _pick_best_audio(formats: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _pick_best_audio(
+    formats: List[Dict[str, Any]],
+    *,
+    prefer_compat: bool = False,
+) -> Optional[Dict[str, Any]]:
     """
     Пріоритезуємо аудіо потоки:
       1) OPUS/webm
@@ -78,20 +212,30 @@ def _pick_best_audio(formats: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     def is_audio(f: Dict[str, Any]) -> bool:
         return f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none") and f.get("url")
 
-    # 1) opus/webm
-    for f in formats:
-        if is_audio(f) and (str(f.get("acodec", "")).lower().startswith("opus") or f.get("ext") == "webm"):
-            return f
+    if prefer_compat:
+        # Режим сумісності для Android MediaPlayer: AAC/M4A спочатку.
+        for f in formats:
+            ac = str(f.get("acodec", "")).lower()
+            if is_audio(f) and (f.get("ext") in ("m4a", "mp4") or "mp4a" in ac or ac == "aac"):
+                return f
+        for f in formats:
+            if is_audio(f) and f.get("ext") in ("mp3", "aac"):
+                return f
+    else:
+        # 1) opus/webm
+        for f in formats:
+            if is_audio(f) and (str(f.get("acodec", "")).lower().startswith("opus") or f.get("ext") == "webm"):
+                return f
 
-    # 2) webm будь-який аудіо
-    for f in formats:
-        if is_audio(f) and f.get("ext") == "webm":
-            return f
+        # 2) webm будь-який аудіо
+        for f in formats:
+            if is_audio(f) and f.get("ext") == "webm":
+                return f
 
-    # 3) m4a
-    for f in formats:
-        if is_audio(f) and f.get("ext") == "m4a":
-            return f
+        # 3) m4a
+        for f in formats:
+            if is_audio(f) and f.get("ext") == "m4a":
+                return f
 
     # 4) інший audio-only
     for f in formats:
@@ -184,12 +328,17 @@ def py_headers_to_javamap(headers: Dict[str, str], HashMapClass) -> Any:
 
 
 # ============================ AUDIO API ================================
-def extract_audio_info(video_url: str) -> Dict[str, Any]:
+def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[str, Any]:
     """
     Повертає:
       {
         'audio_url': str,                 # прямий URL аудіо
         'thumb': str,                     # мініатюра
+        'title': str,                     # назва відео
+        'channel': str,                   # канал/автор
+        'view_count': Optional[int],      # кількість переглядів
+        'channel_thumb': str,             # аватар/іконка каналу
+        'related_videos': list,           # raw related videos list
         'expire_ts': Optional[int],       # UNIX time з параметра expire, якщо є
         'http_headers': Dict[str, str],   # заголовки для доступу до CDN
       }
@@ -202,6 +351,12 @@ def extract_audio_info(video_url: str) -> Dict[str, Any]:
         "nocheckcertificate": True,
         "logger": YDLLogger(),
         "format": (
+            "bestaudio[ext=m4a]/"
+            "bestaudio[ext=mp4]/"
+            "bestaudio[acodec*=mp4a]/"
+            "bestaudio/best/"
+            "best[protocol^=m3u8]"
+            if prefer_compat else
             "bestaudio[acodec^=opus]/"
             "bestaudio[ext=webm]/"
             "bestaudio[ext=m4a]/"
@@ -218,34 +373,82 @@ def extract_audio_info(video_url: str) -> Dict[str, Any]:
         "ignoreerrors": "only_download",
     }
 
-    info, err = _extract_info_with_clients(video_url, BASE_OPTS, ("android", "web"))
+    clients = ("web", "android") if prefer_compat else ("android", "web")
+    info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
     if not info:
         print(f"[AUDIO] extract failed: {repr(err)}")
         raise RuntimeError("YouTube не повернув метадані (онови yt-dlp в APK).")
 
-    # інколи info['url'] вже містить audio-only (DASH)
-    url = info.get("url") or ""
     fmts = info.get("formats") or []
-    headers = _best_effort_headers(info.get("http_headers"), BASE_OPTS["http_headers"])
-
-    chosen: Optional[Dict[str, Any]] = None
-
-    if not url:
-        chosen = _pick_best_audio(fmts)
-        if chosen and chosen.get("url"):
-            url = chosen["url"]
-            headers = _best_effort_headers(chosen.get("http_headers"), BASE_OPTS["http_headers"])
+    chosen: Optional[Dict[str, Any]] = _pick_best_audio(fmts, prefer_compat=prefer_compat)
+    if chosen and chosen.get("url"):
+        url = chosen["url"]
+        headers = _best_effort_headers(chosen.get("http_headers"), BASE_OPTS["http_headers"])
+    else:
+        # fallback: інколи info['url'] вже містить audio-only
+        url = info.get("url") or ""
+        headers = _best_effort_headers(info.get("http_headers"), BASE_OPTS["http_headers"])
 
     if not url:
         # типовий випадок "Only images are available"
         raise RuntimeError("Не знайдено жодного аудіо-формату (YouTube віддав тільки зображення).")
 
-    thumb = info.get("thumbnail", "") or ""
+    thumb = _normalize_img_url(info.get("thumbnail", "") or "")
+    title = info.get("title") or ""
+    channel = info.get("channel") or info.get("uploader") or info.get("creator") or info.get("artist") or ""
+    view_count = info.get("view_count")
+    channel_thumb = (
+        info.get("channel_thumbnail")
+        or info.get("uploader_thumbnail")
+        or ""
+    )
+    channel_thumb = _normalize_img_url(channel_thumb or "")
+    channel_url = (
+        info.get("channel_url")
+        or info.get("uploader_url")
+        or ""
+    )
+    channel_id = info.get("channel_id") or info.get("uploader_id") or ""
+    if not channel_url and channel_id:
+        channel_url = f"https://www.youtube.com/channel/{channel_id}"
+    if (not channel) or (not channel_thumb):
+        page_channel, page_thumb = _extract_channel_meta_from_watch_page(
+            str(video_url or ""),
+            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+        )
+        if (not channel) and page_channel:
+            channel = page_channel
+        if (not channel_thumb) and page_thumb:
+            channel_thumb = _normalize_img_url(page_thumb)
+    if not channel_thumb:
+        channel_thumb = _extract_channel_thumb_from_watch_page(
+            str(video_url or ""),
+            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+        )
+    if not channel_thumb:
+        channel_thumb = _extract_channel_thumb_from_channel_page(
+            str(channel_url or ""),
+            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+        )
+    channel_thumb = _normalize_img_url(channel_thumb or "")
+    related_videos = info.get("related_videos") or []
     expire_ts = _parse_expire_ts(url)
+    try:
+        print(
+            f"[YTDLP] meta title={title!r} channel={channel!r} "
+            f"thumb={'yes' if channel_thumb else 'no'} views={view_count}"
+        )
+    except Exception:
+        pass
 
     return {
         "audio_url": url,
         "thumb": thumb,
+        "title": title,
+        "channel": channel,
+        "view_count": view_count,
+        "channel_thumb": channel_thumb,
+        "related_videos": related_videos,
         "expire_ts": expire_ts,
         "http_headers": headers,
     }

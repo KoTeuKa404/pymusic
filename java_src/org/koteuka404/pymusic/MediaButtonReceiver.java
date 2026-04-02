@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.view.KeyEvent;
+import org.kivy.android.PythonActivity;
 
 public class MediaButtonReceiver extends BroadcastReceiver {
     private static MediaButtonReceiver instance;
@@ -27,6 +28,13 @@ public class MediaButtonReceiver extends BroadcastReceiver {
     }
 
     private static void dispatchAction(Context context, String action) {
+        try {
+            if (PythonActivity.mActivity instanceof MediaKeyActivity) {
+                ((MediaKeyActivity) PythonActivity.mActivity).dispatchMediaAction(action);
+                return;
+            }
+        } catch (Exception ignored) {
+        }
         Intent i = new Intent(context, MediaKeyActivity.class);
         i.setAction(action);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);

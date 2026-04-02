@@ -13,9 +13,16 @@ public class MediaSessionCallback extends MediaSession.Callback {
 
     private void dispatchAction(String action) {
         if (activity == null) return;
+        try {
+            if (activity instanceof MediaKeyActivity) {
+                ((MediaKeyActivity) activity).dispatchMediaAction(action);
+                return;
+            }
+        } catch (Exception ignored) {
+        }
         Intent i = new Intent(activity, activity.getClass());
         i.setAction(action);
-        i.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        i.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
         activity.startActivity(i);
     }
 

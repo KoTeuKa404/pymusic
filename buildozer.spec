@@ -36,8 +36,9 @@ android.entrypoint = org.koteuka404.pymusic.MediaKeyActivity
 android.apptheme = @android:style/Theme.NoTitleBar
 android.add_src = java_src
 
-android.archs = armeabi-v7a, arm64-v8a
+android.archs = arm64-v8a
 android.bootstrap = sdl2
+android.gradle_options = -Xmx6144m -XX:MaxMetaspaceSize=2048m -Dfile.encoding=UTF-8 -XX:+UseG1GC
 
 log_level = 2
 warn_on_root = 1

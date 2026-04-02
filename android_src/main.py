@@ -37,6 +37,7 @@ from kivymd.uix.dialog    import MDDialog
 from kivy.uix.image       import AsyncImage
 from kivy.animation       import Animation
 from kivy.uix.widget      import Widget
+from kivy.uix.stencilview import StencilView
 from kivy.metrics         import dp
 
 Builder.load_file("youtube_gui.kv")
@@ -255,23 +256,47 @@ class YoutubeSearchScreen(MDScreen):
         threading.Thread(target=self._fetch_results_thread, args=(query,), daemon=True).start()
 
     def _fetch_results_thread(self, query):
-        yt_video_regex = r"(?:v=|be/)([A-Za-z0-9_-]{11})"
-        yt_playlist_regex = r"(?:list=)([A-Za-z0-9_-]+)"
-        video_id = playlist_id = None
+        video_id = None
+        playlist_id = None
+        normalized_watch_url = None
         if "youtube.com" in query or "youtu.be" in query:
-            vm = re.search(yt_video_regex, query); pm = re.search(yt_playlist_regex, query)
-            if pm: playlist_id = pm.group(1)
-            if vm: video_id    = vm.group(1)
-            if playlist_id:
-                Clock.schedule_once(lambda dt: self.open_playlist(f"https://www.youtube.com/playlist?list={playlist_id}", f"Playlist {playlist_id}")); return
-            elif video_id:
-                Clock.schedule_once(lambda dt: self.play_audio(f"https://www.youtube.com/watch?v={video_id}", f"Video {video_id}", "", "")); return
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(query.strip())
+                host = (parsed.netloc or "").lower()
+                q = parse_qs(parsed.query or "")
+                playlist_id = (q.get("list") or [None])[0]
+                video_id = (q.get("v") or [None])[0]
+                if not video_id and "youtu.be" in host:
+                    video_id = (parsed.path or "").strip("/").split("/")[0] or None
+                if video_id:
+                    normalized_watch_url = f"https://www.youtube.com/watch?v={video_id}"
+                    if playlist_id:
+                        normalized_watch_url = f"{normalized_watch_url}&list={playlist_id}"
+                if playlist_id:
+                    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+                    Clock.schedule_once(
+                        lambda dt: self.open_playlist(
+                            playlist_url,
+                            "Черга",
+                            start_video_id=video_id,
+                            fallback_url=normalized_watch_url or query.strip(),
+                        )
+                    )
+                    return
+                if video_id:
+                    Clock.schedule_once(
+                        lambda dt: self.play_audio(normalized_watch_url, f"Video {video_id}", "", "")
+                    )
+                    return
+            except Exception:
+                pass
         videos, playlists, cont, cfg = fetch_youtube_results(query)
         Clock.schedule_once(lambda dt: self._show_results_on_ui(videos, playlists, cont, cfg))
 
     def _render_results(self, grid, videos, playlists, *, add_headers: bool):
         if add_headers and playlists:
-            grid.add_widget(MDLabel(text="Playlists", halign="left", font_style="Subtitle1"))
+            grid.add_widget(MDLabel(text="Збірки", halign="left", font_style="Subtitle1"))
         for url, title, channel, thumb, count in playlists:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
             card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
@@ -280,14 +305,14 @@ class YoutubeSearchScreen(MDScreen):
             title_w._label.markup = True
             title_w.set_text(f"[b]{title}[/b]")
             box.add_widget(title_w)
-            box.add_widget(MDLabel(text=f"{channel} • {count} tracks", theme_text_color="Secondary", size_hint_y=None, height="30dp"))
+            box.add_widget(MDLabel(text=f"{channel} • {count} треків", theme_text_color="Secondary", size_hint_y=None, height="30dp"))
             btn_box = MDBoxLayout(orientation="horizontal", spacing="8dp", size_hint_y=None, height="40dp")
-            open_btn = MDRaisedButton(text="▶ Playlist", size_hint=(None, None), size=("100dp","40dp"))
+            open_btn = MDRaisedButton(text="▶ Відкрити", size_hint=(None, None), size=("100dp","40dp"))
             open_btn.bind(on_press=lambda inst, u=url, t=title: self.open_playlist(u, t))
             btn_box.add_widget(open_btn); box.add_widget(btn_box)
             card.add_widget(box); grid.add_widget(card)
         if add_headers and videos:
-            grid.add_widget(MDLabel(text="Videos", halign="left", font_style="Subtitle1"))
+            grid.add_widget(MDLabel(text="Відео", halign="left", font_style="Subtitle1"))
         for url, title, channel, thumb, dur in videos:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
             card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
@@ -333,35 +358,165 @@ class YoutubeSearchScreen(MDScreen):
         videos, playlists, cont = fetch_youtube_continuation(self._continuation, self._ytcfg or {})
         Clock.schedule_once(lambda dt: self._append_results_on_ui(videos, playlists, cont))
 
-    def open_playlist(self, playlist_url, playlist_title, start_video_id=None):
+    def open_playlist(
+        self,
+        playlist_url,
+        playlist_title,
+        start_video_id=None,
+        start_after=False,
+        fallback_url=None,
+    ):
         threading.Thread(
             target=self._fetch_playlist_thread,
-            args=(playlist_url, playlist_title, start_video_id),
+            args=(playlist_url, playlist_title, start_video_id, start_after, fallback_url),
             daemon=True,
         ).start()
 
-    def _fetch_playlist_thread(self, playlist_url, playlist_title, start_video_id=None):
-        from yt_dlp import YoutubeDL
-        opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(playlist_url, download=False)
-            entries = info['entries']
-            tracks = [(e['url'], e['title'], e.get('uploader', '')) for e in entries]
+    def _fetch_playlist_thread(
+        self,
+        playlist_url,
+        playlist_title,
+        start_video_id=None,
+        start_after=False,
+        fallback_url=None,
+    ):
+        try:
+            from yt_dlp import YoutubeDL
+            import re
+            opts = {'quiet': True, 'extract_flat': 'in_playlist', 'skip_download': True}
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(playlist_url, download=False)
+                extracted_title = (
+                    info.get("title")
+                    or info.get("playlist_title")
+                    or playlist_title
+                    or "Черга"
+                )
+                entries = info.get('entries') or []
+                tracks = []
+                track_ids = []
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    url = e.get("url") or e.get("id") or ""
+                    try:
+                        u = str(url or "")
+                        if u.startswith("//"):
+                            url = f"https:{u}"
+                        elif u.startswith("/watch") or u.startswith("/shorts/") or u.startswith("/live/"):
+                            url = f"https://www.youtube.com{u}"
+                        elif u.startswith("watch?"):
+                            url = f"https://www.youtube.com/{u}"
+                        elif u.startswith("youtube.com/") or u.startswith("www.youtube.com/") or u.startswith("youtu.be/"):
+                            url = f"https://{u}"
+                    except Exception:
+                        pass
+                    title = e.get("title") or e.get("fulltitle") or ""
+                    channel = e.get("uploader") or e.get("channel") or ""
+                    if not url:
+                        continue
+                    vid = str(e.get("id") or "")
+                    if not vid and isinstance(url, str) and url.startswith("http"):
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            parsed = urlparse(url)
+                            q = parse_qs(parsed.query or "")
+                            vid = (q.get("v") or [None])[0] or ""
+                            if not vid and "youtu.be" in (parsed.netloc or ""):
+                                vid = (parsed.path or "").lstrip("/")
+                        except Exception:
+                            vid = ""
+                    if vid and not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            p2 = urlparse(vid)
+                            q2 = parse_qs(p2.query or "")
+                            vv = (q2.get("v") or [""])[0]
+                            if vv:
+                                vid = vv
+                            elif "youtu.be" in (p2.netloc or ""):
+                                vid = (p2.path or "").lstrip("/")
+                        except Exception:
+                            pass
+                    m = re.search(r"([A-Za-z0-9_-]{11})", str(vid or ""))
+                    vid = m.group(1) if m else ""
+                    if not vid:
+                        try:
+                            turl = str(e.get("thumbnail") or "")
+                            m2 = re.search(r"/vi/([A-Za-z0-9_-]{11})/", turl)
+                            if m2:
+                                vid = m2.group(1)
+                        except Exception:
+                            pass
+                    thumb = e.get("thumbnail") or ""
+                    if isinstance(thumb, str) and thumb.startswith("//"):
+                        thumb = f"https:{thumb}"
+                    if not thumb:
+                        try:
+                            thumbs = e.get("thumbnails") or []
+                            if isinstance(thumbs, list) and thumbs:
+                                cand = thumbs[-1]
+                                if isinstance(cand, dict):
+                                    thumb = cand.get("url") or ""
+                                    if isinstance(thumb, str) and thumb.startswith("//"):
+                                        thumb = f"https:{thumb}"
+                        except Exception:
+                            thumb = thumb or ""
+                    if (not thumb) and vid:
+                        thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    duration = e.get("duration_string") or ""
+                    if not duration:
+                        try:
+                            d = int(e.get("duration") or 0)
+                            if d > 0:
+                                m, s = divmod(d, 60)
+                                h, m = divmod(m, 60)
+                                duration = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+                        except Exception:
+                            duration = ""
+                    track_ids.append(str(vid or url or ""))
+                    try:
+                        print(f"[PLAYLIST] row vid={vid!r} title={title!r} thumb={(thumb or '')!r}")
+                    except Exception:
+                        pass
+                    tracks.append((url, title, channel, thumb, duration, vid))
+        except Exception as e:
+            print(f"[PLAYLIST] extract err: {e}")
+            if fallback_url:
+                Clock.schedule_once(lambda dt: self._open_single_on_ui(fallback_url), 0)
+            return
+        if not tracks:
+            if fallback_url:
+                Clock.schedule_once(lambda dt: self._open_single_on_ui(fallback_url), 0)
+            return
         start_index = 0
         if start_video_id:
             try:
-                for idx, e in enumerate(entries):
-                    vid = str(e.get("id") or e.get("url") or "")
+                for idx, vid in enumerate(track_ids):
                     if vid == start_video_id:
-                        start_index = idx
+                        start_index = idx + (1 if start_after else 0)
+                        if start_index >= len(tracks):
+                            start_index = 0
                         break
             except Exception:
                 start_index = 0
-        Clock.schedule_once(lambda dt: self._open_playlist_on_ui(tracks, playlist_title, start_index))
+        Clock.schedule_once(
+            lambda dt: self._open_playlist_on_ui(
+                tracks,
+                extracted_title,
+                start_index,
+                playlist_url,
+            )
+        )
 
-    def _open_playlist_on_ui(self, tracks, playlist_title, start_index=0):
+    def _open_playlist_on_ui(self, tracks, playlist_title, start_index=0, playlist_url=None):
         audio_screen = self.manager.get_screen("audio")
-        audio_screen.play_playlist(tracks, playlist_title, start_index=start_index)
+        audio_screen.play_playlist(
+            tracks,
+            playlist_title,
+            start_index=start_index,
+            playlist_url=playlist_url,
+        )
         try:
             app = App.get_running_app()
             root = getattr(app, "root", None)
@@ -372,6 +527,19 @@ class YoutubeSearchScreen(MDScreen):
         except Exception:
             self.manager.current = "audio"
 
+    def _open_single_on_ui(self, url):
+        try:
+            screen = self.manager.get_screen("audio")
+            screen.play_audio(url)
+            app = App.get_running_app()
+            root = getattr(app, "root", None)
+            if root and hasattr(root, "open_audio"):
+                root.open_audio()
+            else:
+                self.manager.current = "audio"
+        except Exception:
+            pass
+
     def play_audio(self, url, title, channel, duration, thumb="", *args, **kwargs):
         from recent_utils import load_recent, save_recent
         recent = load_recent()
@@ -379,7 +547,7 @@ class YoutubeSearchScreen(MDScreen):
         recent = [r for r in recent if r["url"] != url]
         recent.insert(0, entry); save_recent(recent)
         screen = self.manager.get_screen("audio")
-        screen.play_audio(url, title, channel, duration)
+        screen.play_audio(url, title, channel, duration, thumb=thumb)
         try:
             app = App.get_running_app()
             root = getattr(app, "root", None)
@@ -425,7 +593,12 @@ class YoutubeWebScreen(MDScreen):
                 try:
                     search_screen = self.manager.get_screen("search")
                     playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
-                    search_screen.open_playlist(playlist_url, f"Playlist {playlist_id}", start_video_id=video_id)
+                    search_screen.open_playlist(
+                        playlist_url,
+                        "Черга",
+                        start_video_id=video_id,
+                        fallback_url=url,
+                    )
                     started = True
                 except Exception:
                     started = False

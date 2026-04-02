@@ -4,6 +4,102 @@
     allow_stretch: True
     keep_ratio: True
 
+<VideoTapArea@ButtonBehavior+Widget>:
+    size_hint: 1, 1
+
+<SimilarItem@ButtonBehavior+BoxLayout>:
+    size_hint_y: None
+    height: dp(76)
+    padding: dp(8), dp(6)
+    spacing: dp(10)
+
+    AsyncImage:
+        id: similar_thumb
+        size_hint: None, None
+        size: dp(96), dp(54)
+        allow_stretch: True
+        keep_ratio: True
+
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: dp(4)
+
+        Label:
+            id: similar_title
+            text: ''
+            font_size: '16sp'
+            halign: 'left'
+            valign: 'top'
+            text_size: self.width, None
+            color: 0, 0, 0, 1
+            size_hint_y: None
+            height: self.texture_size[1]
+
+        Label:
+            id: similar_channel
+            text: ''
+            font_size: '13sp'
+            halign: 'left'
+            color: 0.5, 0.5, 0.5, 1
+            size_hint_y: None
+            height: self.texture_size[1]
+
+<PlaylistTrackItem@ButtonBehavior+BoxLayout>:
+    size_hint_y: None
+    height: dp(78)
+    padding: dp(8), dp(6)
+    spacing: dp(10)
+
+    FloatLayout:
+        size_hint: None, None
+        size: dp(110), dp(62)
+
+        Image:
+            id: pt_thumb
+            size_hint: 1, 1
+            allow_stretch: True
+            keep_ratio: True
+
+        Label:
+            id: pt_duration
+            text: ''
+            size_hint: None, None
+            size: self.texture_size
+            pos_hint: {"right": 0.98, "y": 0.02}
+            color: 1, 1, 1, 1
+            font_size: '12sp'
+            canvas.before:
+                Color:
+                    rgba: 0, 0, 0, 0.75
+                RoundedRectangle:
+                    pos: self.x - dp(4), self.y - dp(1)
+                    size: self.width + dp(8), self.height + dp(2)
+                    radius: [dp(6), dp(6), dp(6), dp(6)]
+
+    BoxLayout:
+        orientation: 'vertical'
+        spacing: dp(3)
+
+        Label:
+            id: pt_title
+            text: ''
+            font_size: '16sp'
+            halign: 'left'
+            valign: 'top'
+            text_size: self.width, None
+            color: 0, 0, 0, 1
+            size_hint_y: None
+            height: min(self.texture_size[1], dp(40))
+
+        Label:
+            id: pt_channel
+            text: ''
+            font_size: '13sp'
+            halign: 'left'
+            color: 0.5, 0.5, 0.5, 1
+            size_hint_y: None
+            height: self.texture_size[1]
+
 <YoutubeSearchScreen>:
     on_pre_enter: root.show_recent_videos(); root.ids.search_history_box.clear_widgets()
     name: "search"
@@ -144,77 +240,197 @@
             orientation: 'vertical'
             size_hint: 1, None
             height: self.minimum_height
-            spacing: dp(10)
-            padding: dp(20)
+            spacing: dp(12)
+            padding: 0, 0, 0, dp(10)
 
-            FloatLayout:
+            BoxLayout:
+                id: video_block
                 size_hint_y: None
-                height: dp(200)
+                height: dp(236)
+                padding: dp(8), dp(10), dp(8), dp(6)
+                canvas.before:
+                    Color:
+                        rgba: 0, 0, 0, 1
+                    Rectangle:
+                        pos: self.pos
+                        size: self.size
 
-                AsyncImage:
-                    id: audio_thumbnail
+                FloatLayout:
                     size_hint: 1, 1
-                    pos_hint: {'x': 0, 'y': 0}
-                    allow_stretch: True
-                    keep_ratio: True
+
+                    AsyncImage:
+                        id: audio_thumbnail
+                        size_hint: 1, 1
+                        pos_hint: {'x': 0, 'y': 0}
+                        allow_stretch: True
+                        keep_ratio: True
+
+                    VideoTapArea:
+                        on_release: root.toggle_video_controls()
+
+                    BoxLayout:
+                        id: progress_bar
+                        orientation: 'horizontal'
+                        size_hint: 0.97, None
+                        height: dp(32)
+                        pos_hint: {'center_x': 0.5, 'y': 0.03}
+                        spacing: 0
+                        padding: 0, 0
+                        opacity: 0
+                        disabled: True
+
+                        canvas.before:
+                            Color:
+                                rgba: 0, 0, 0, 0.6   # напівпрозорий чорний фон
+                            RoundedRectangle:
+                                pos: self.pos
+                                size: self.size
+                                radius: [dp(14), dp(14), dp(14), dp(14)]
+
+                        Label:
+                            id: current_time_label
+                            text: '0:00'
+                            size_hint_x: None
+                            width: dp(50)
+                            font_size: '14sp'
+                            color: 1, 1, 1, 1      # білий текст на темному фоні
+
+                        ProgressSlider:
+                            id: progress_slider
+                            min: 0
+                            max: 1
+                            value: 0
+                            on_touch_up: if self.collide_point(*args[1].pos): root.seek(self.value)
+
+                        Label:
+                            id: total_time_label
+                            text: '0:00'
+                            size_hint_x: None
+                            width: dp(50)
+                            font_size: '14sp'
+                            color: 1, 1, 1, 1
+
+                    BoxLayout:
+                        id: video_controls
+                        orientation: 'horizontal'
+                        size_hint: None, None
+                        height: dp(48)
+                        width: dp(220)
+                        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+                        spacing: dp(12)
+                        padding: dp(10), dp(6)
+                        opacity: 0
+                        disabled: True
+                        canvas.before:
+                            Color:
+                                rgba: 0, 0, 0, 0.45
+                            RoundedRectangle:
+                                pos: self.pos
+                                size: self.size
+                                radius: [dp(24), dp(24), dp(24), dp(24)]
+
+                        MDIconButton:
+                            icon: "rewind-10"
+                            theme_text_color: "Custom"
+                            text_color: 1, 1, 1, 1
+                            user_font_size: "24sp"
+                            on_release: root.video_seek(-10)
+
+                        MDIconButton:
+                            id: video_play_btn
+                            icon: "play"
+                            theme_text_color: "Custom"
+                            text_color: 1, 1, 1, 1
+                            user_font_size: "28sp"
+                            on_release: root.video_toggle_play()
+
+                        MDIconButton:
+                            icon: "fast-forward-10"
+                            theme_text_color: "Custom"
+                            text_color: 1, 1, 1, 1
+                            user_font_size: "24sp"
+                            on_release: root.video_seek(10)
+
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(16), dp(8), dp(16), dp(4)
+                spacing: dp(6)
+
+                ScrollView:
+                    id: title_scroll
+                    size_hint_y: None
+                    height: dp(52)
+                    do_scroll_x: False
+                    do_scroll_y: True
+
+                    Label:
+                        id: audio_title
+                        text: ''
+                        font_size: '20sp'
+                        halign: 'left'
+                        valign: 'top'
+                        text_size: self.width, None
+                        color: 0, 0, 0, 1
+                        size_hint_y: None
+                        height: self.texture_size[1]
+
+                Label:
+                    id: audio_views
+                    text: ''
+                    font_size: '14sp'
+                    halign: 'left'
+                    text_size: self.width, None
+                    color: 0.35, 0.35, 0.35, 1
+                    size_hint_y: None
+                    height: dp(18)
 
                 BoxLayout:
-                    id: progress_bar
-                    orientation: 'horizontal'
-                    size_hint: 0.9, None
-                    height: 0
-                    pos_hint: {'center_x': 0.5, 'y': 0.05}
-                    spacing: 0
-                    padding: 0, 0
-                    opacity: 0
-                    disabled: True
+                    size_hint_y: None
+                    height: dp(46)
+                    spacing: dp(10)
 
-                    canvas.before:
-                        Color:
-                            rgba: 0, 0, 0, 0.6   # напівпрозорий чорний фон
-                        RoundedRectangle:
-                            pos: self.pos
-                            size: self.size
-                            radius: [dp(14), dp(14), dp(14), dp(14)]
+                    AsyncImage:
+                        id: channel_avatar
+                        size_hint: None, None
+                        size: dp(40), dp(40)
+                        allow_stretch: True
+                        keep_ratio: True
+                        opacity: 0
 
                     Label:
-                        id: current_time_label
-                        text: '0:00'
-                        size_hint_x: None
-                        width: dp(50)
-                        font_size: '14sp'
-                        color: 1, 1, 1, 1      # білий текст на темному фоні
+                        id: audio_channel
+                        text: ''
+                        font_size: '16sp'
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.width, None
+                        color: 0.15, 0.15, 0.15, 1
 
-                    ProgressSlider:
-                        id: progress_slider
-                        min: 0
-                        max: 1
-                        value: 0
-                        on_touch_up: if self.collide_point(*args[1].pos): root.seek(self.value)
+                    Widget:
+                        size_hint_x: 1
 
-                    Label:
-                        id: total_time_label
-                        text: '0:00'
-                        size_hint_x: None
-                        width: dp(50)
-                        font_size: '14sp'
-                        color: 1, 1, 1, 1
+                    PNGIconButton:
+                        id: repeat_inline_btn
+                        source: "ico/icorepeat.png"
+                        size: dp(28), dp(28)
+                        on_release: root.toggle_repeat()
 
-            Label:
-                id: audio_title
-                text: ''
-                font_size: '20sp'
-                halign: 'center'
-                color: 0, 0, 0, 1
-                size_hint_y: None
-                height: self.texture_size[1] + dp(10)
+                    PNGIconButton:
+                        id: favorite_btn
+                        source: "ico/icofavorite.png"
+                        size: dp(28), dp(28)
+                        on_release: root.toggle_favorite()
 
             MDBoxLayout:
                 size_hint_y: None
-                height: dp(50)
+                height: 0
                 spacing: dp(8)
                 padding: dp(4)
                 pos_hint: {"center_x": 0.5}
+                opacity: 0
+                disabled: True
 
                 Widget:
                     size_hint_x: 1
@@ -230,6 +446,12 @@
                     source: "ico/icorepeat.png"
                     on_release: root.toggle_repeat()
 
+                PNGIconButton:
+                    id: autoskip_btn
+                    source: "ico/icoauto_on.png"
+                    size: dp(28), dp(28)
+                    on_release: root.toggle_autoskip()
+
                 MDIconButton:
                     id: back_btn
                     icon: 'ico/icobackbutton.png'
@@ -238,3 +460,53 @@
 
                 Widget:
                     size_hint_x: 1
+
+            BoxLayout:
+                size_hint_y: None
+                height: dp(6)
+                canvas.before:
+                    Color:
+                        rgba: 0.93, 0.93, 0.93, 1
+                    Rectangle:
+                        pos: self.pos
+                        size: self.size
+
+            Label:
+                id: similar_header
+                text: 'Схожі відео'
+                font_size: '18sp'
+                halign: 'left'
+                color: 0, 0, 0, 1
+                size_hint_y: None
+                height: 0
+                opacity: 0
+
+            MDScrollView:
+                id: similar_scroll
+                size_hint_y: None
+                height: 0
+                opacity: 0
+                do_scroll_x: False
+
+                MDList:
+                    id: similar_list
+
+            Label:
+                id: playlist_header
+                text: 'Черга'
+                font_size: '18sp'
+                halign: 'left'
+                color: 0, 0, 0, 1
+                size_hint_y: None
+                height: 0
+                opacity: 0
+
+            MDScrollView:
+                id: playlist_scroll
+                size_hint_y: None
+                height: 0
+                opacity: 0
+                do_scroll_x: False
+
+                MDList:
+                    id: playlist_list
