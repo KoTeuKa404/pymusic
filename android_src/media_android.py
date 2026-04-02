@@ -849,15 +849,31 @@ def create_or_update_media_notification(*,
         _add_action(R_draw.ic_media_next, "Next", _pi_media(KeyEvent.KEYCODE_MEDIA_NEXT, 204))
         _add_action(R_draw.ic_menu_revert, "Repeat", _pi_action(ACTION_REPEAT, 206))
 
-        # MediaStyle з compact-кнопками і токеном сесії
+        # MediaStyle з compact-кнопками.
+        # На Android 13+ (API 33+) прив'язка session token часто перемикає картку
+        # у системний "дефолтний" вигляд. Тому за замовчуванням не прив'язуємо токен
+        # на нових версіях, але дозволяємо примусово ввімкнути через env.
         try:
             if MediaStyle is not None:
                 style = MediaStyle()
-                if session_token is not None:
+                bind_session = True
+                try:
+                    force_bind = str(os.environ.get("MEDIA_NOTIF_BIND_SESSION", "")).strip().lower()
+                    if force_bind in ("0", "false", "no", "off"):
+                        bind_session = False
+                    elif force_bind in ("1", "true", "yes", "on"):
+                        bind_session = True
+                    elif Build_VERSION.SDK_INT >= 33:
+                        bind_session = False
+                except Exception:
+                    pass
+                if session_token is not None and bind_session:
                     try:
                         style.setMediaSession(session_token)
                     except Exception as e:
                         log(f"[NOTIF] platform setMediaSession err: {e}")
+                elif session_token is not None:
+                    vlog("[NOTIF] skip setMediaSession (custom shade layout priority)")
                 if actions_added > 0:
                     idx = list(range(min(3, actions_added)))
                     try:
