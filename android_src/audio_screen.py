@@ -293,6 +293,7 @@ class AudioPlayerScreen(Screen):
         self._last_stream_recover_ts = 0.0
         self._is_scrubbing = False
         self._last_video_sync_ts = 0.0
+        self._bg_stall_since = 0.0
         self._video_active = False
         self._video_was_active = False
         self._video_resume_url = None
@@ -495,8 +496,10 @@ class AudioPlayerScreen(Screen):
             # повна висота області превʼю в px
             full_height_px = int(wh * ky)
 
-            # без додаткового резерву - відео має займати весь блок превʼю
-            height_px = full_height_px
+            # Коли видимі контроли, зсуваємо відеоряд вниз і звільняємо верхню зону для tap-контролів.
+            reserve_dp = 116 if self._video_controls_visible else 0
+            reserve_px = int(reserve_dp * ky)
+            height_px = max(0, full_height_px - reserve_px)
             if height_px < int(40 * ky):  # мінімальна висота відео
                 height_px = int(40 * ky)
 
@@ -509,6 +512,8 @@ class AudioPlayerScreen(Screen):
             top_win = wy + wh
             # відстань від верху екрана Android
             top_px = int((win_h - top_win) * ky)
+            if self._video_controls_visible:
+                top_px += reserve_px
 
             # кламп по екрану
             if width_px > screen_w:
@@ -572,6 +577,11 @@ class AudioPlayerScreen(Screen):
                 self._video_controls_ev = None
         except Exception:
             pass
+        try:
+            # Перераховуємо bounds оверлею, щоб не перекривати сенсорну зону контролів.
+            Clock.schedule_once(self._align_video_to_thumb, 0)
+        except Exception:
+            pass
         if visible and auto_hide:
             self._video_controls_ev = Clock.schedule_once(self._hide_video_controls, 3.0)
 
@@ -625,6 +635,10 @@ class AudioPlayerScreen(Screen):
             if ma.android_player and ma._is_prepared():
                 pos = ma.android_player.getCurrentPosition() or 0
                 dur = ma.android_player.getDuration() or 0
+                if dur > 0:
+                    self._last_good_dur_ms = int(dur)
+                elif self._last_good_dur_ms > 0:
+                    dur = int(self._last_good_dur_ms)
                 is_playing = bool(ma.android_player.isPlaying())
                 if self._maybe_handle_track_end(pos, dur):
                     return
@@ -639,6 +653,16 @@ class AudioPlayerScreen(Screen):
                                 is_playing = bool(ma.android_player.isPlaying())
                             except Exception:
                                 pass
+                    if dur <= 0 and pos <= 0:
+                        if self._bg_stall_since <= 0:
+                            self._bg_stall_since = now
+                        elif (now - self._bg_stall_since) > 5.0:
+                            self._bg_stall_since = now
+                            self._recover_stream("bg_stall", self._resume_pos_ms)
+                    else:
+                        self._bg_stall_since = 0.0
+                else:
+                    self._bg_stall_since = 0.0
 
                 ma.update_media_session_state(
                     is_playing,
@@ -770,10 +794,16 @@ class AudioPlayerScreen(Screen):
         thumb: str | None = None,
         *,
         clear_playlist=True,
+        hard_reset: bool = False,
     ):
         self._ensure_media_session()
         _clear = bool(clear_playlist)
-        if video_url and video_url != self._last_video_url:
+        if hard_reset:
+            try:
+                self._hard_transition_reset()
+            except Exception:
+                pass
+        elif video_url and video_url != self._last_video_url:
             try:
                 self._pre_start_cleanup()
             except Exception:
@@ -1154,7 +1184,7 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 sig = None
             # Не перебудовуємо однаковий плейлист повторно, це збиває прев'ю.
-            if sig is not None and sig == self._playlist_ui_sig:
+            if (not force) and sig is not None and sig == self._playlist_ui_sig:
                 return
             self._playlist_ui_sig = sig
             self._playlist_ui_last_ts = time.time()
@@ -1309,6 +1339,7 @@ class AudioPlayerScreen(Screen):
             track.get("channel") or "",
             track.get("thumb") or "",
             clear_playlist=False,
+            hard_reset=True,
         )
 
     def _play_from_related_index(self, idx: int):
@@ -1439,6 +1470,23 @@ class AudioPlayerScreen(Screen):
             ma.release_wake_lock()
         except Exception:
             pass
+
+    def _hard_transition_reset(self):
+        self._playback_desired = False
+        self._user_paused = False
+        self._bg_stall_since = 0.0
+        self._bad_dur_hits = 0
+        self._resume_pos_ms = 0
+        try:
+            if self._video_player:
+                self._video_player.stop()
+        except Exception:
+            pass
+        try:
+            self._set_video_mode(False)
+        except Exception:
+            pass
+        self._pre_start_cleanup()
 
     # ==================== fast path start ====================
 
@@ -2151,6 +2199,11 @@ class AudioPlayerScreen(Screen):
             ma.log(f"extract fail: {e}")
             if self._last_video_url and self._try_start_cached_audio(self._last_video_url, gen):
                 return
+            try:
+                if not ma.is_network_available():
+                    Clock.schedule_once(lambda dt: self.go_back(), 0)
+            except Exception:
+                pass
             Clock.schedule_once(lambda dt: self._ui_set_playing(False), 0)
             return
 
@@ -2364,11 +2417,31 @@ class AudioPlayerScreen(Screen):
             pass
         if not video_on:
             try:
-                
                 if self._video_player:
                     self._video_player.stop()
             except Exception:
                 pass
+
+    def hide_video_overlay_fast(self):
+        self._video_active = False
+        self._video_was_active = False
+        self._video_resume_url = None
+        self._video_resume_gen = -1
+        try:
+            self._set_video_controls_visible(False, auto_hide=False)
+        except Exception:
+            pass
+        try:
+            thumb = self.ids.get("audio_thumbnail")
+            if thumb:
+                thumb.opacity = 1.0
+        except Exception:
+            pass
+        try:
+            if self._video_player:
+                self._video_player.stop()
+        except Exception:
+            pass
 
     def _normalize_related(self, items):
         out = []
@@ -2643,6 +2716,7 @@ class AudioPlayerScreen(Screen):
                 track["channel"],
                 track.get("thumb") or "",
                 clear_playlist=False,
+                hard_reset=True,
             )
             return True
         return self._try_playlist_refresh_next()
@@ -2687,6 +2761,7 @@ class AudioPlayerScreen(Screen):
             track["channel"],
             track.get("thumb") or "",
             clear_playlist=False,
+            hard_reset=True,
         )
 
     def _act_play(self, *a):

@@ -143,6 +143,34 @@ _web_url_handler = None
 _mode_handler = None
 
 
+@run_on_ui_thread
+def _webview_stop_media():
+    try:
+        if _webview is None:
+            return
+        js = (
+            "(function(){"
+            "try{"
+            "var vids=document.querySelectorAll('video,audio');"
+            "for(var i=0;i<vids.length;i++){"
+            "try{vids[i].pause();}catch(e){}"
+            "try{vids[i].muted=true;}catch(e){}"
+            "try{vids[i].volume=0;}catch(e){}"
+            "}"
+            "}catch(e){}"
+            "})();"
+        )
+        try:
+            _webview.evaluateJavascript(js, None)
+        except Exception:
+            try:
+                _webview.loadUrl("javascript:" + js)
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"[WEB] stop media err: {e}")
+
+
 def _set_sdl_surface_visible(show: bool):
     try:
         if SDLActivity is None:
@@ -229,6 +257,11 @@ def _is_youtube_watch_url(url: str) -> bool:
         "youtube.com/watch" in u
         or "m.youtube.com/watch" in u
         or "music.youtube.com/watch" in u
+        or "youtube.com/playlist" in u
+        or "m.youtube.com/playlist" in u
+        or "music.youtube.com/playlist" in u
+        or "youtube.com/browse/" in u
+        or "music.youtube.com/browse/" in u
         or "youtu.be/" in u
         or "youtube.com/shorts/" in u
         or "m.youtube.com/shorts/" in u
@@ -293,9 +326,12 @@ def webview_create():
             pass
 
         _webview = WebView(ctx)
-        web_lp = FrameLayoutLayoutParams(ViewGroupLayoutParams.MATCH_PARENT,
-                                         ViewGroupLayoutParams.MATCH_PARENT)
+        web_lp = FrameLayoutLayoutParams(
+            ViewGroupLayoutParams.MATCH_PARENT,
+            ViewGroupLayoutParams.MATCH_PARENT
+        )
         web_lp.topMargin = 0
+        web_lp.bottomMargin = 0
         _webview.setLayoutParams(web_lp)
 
         settings = _webview.getSettings()
@@ -361,6 +397,12 @@ def webview_show(url: str | None = None):
         webview_create()
         if _webview_container is None or _webview is None:
             return
+        try:
+            lp = cast('android.widget.FrameLayout$LayoutParams', _webview.getLayoutParams())
+            lp.bottomMargin = 0
+            _webview.setLayoutParams(lp)
+        except Exception:
+            pass
         _webview_container.setVisibility(View.VISIBLE)
         _webview_shown = True
         try:
@@ -385,6 +427,10 @@ def webview_hide():
     try:
         if _webview_container is None:
             return
+        try:
+            _webview_stop_media()
+        except Exception:
+            pass
         _webview_container.setVisibility(View.GONE)
         _webview_shown = False
         _set_sdl_surface_visible(True)
@@ -721,6 +767,28 @@ def _charseq(text: str):
         return str(text)
 
 
+def _env_bool(name: str):
+    try:
+        v = os.environ.get(name)
+    except Exception:
+        v = None
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _should_bind_notification_session() -> bool:
+    forced = _env_bool("MEDIA_NOTIF_BIND_SESSION")
+    if forced is not None:
+        return bool(forced)
+    return True
+
+
 @run_on_ui_thread
 def create_notification_channel():
     try:
@@ -853,11 +921,13 @@ def create_or_update_media_notification(*,
         try:
             if MediaStyle is not None:
                 style = MediaStyle()
-                if session_token is not None:
+                if session_token is not None and _should_bind_notification_session():
                     try:
                         style.setMediaSession(session_token)
                     except Exception as e:
                         log(f"[NOTIF] platform setMediaSession err: {e}")
+                elif session_token is not None:
+                    log("[NOTIF] skip setMediaSession (API>=33 default)")
                 if actions_added > 0:
                     idx = list(range(min(3, actions_added)))
                     try:

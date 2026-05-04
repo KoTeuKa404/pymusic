@@ -267,6 +267,10 @@ class YoutubeSearchScreen(MDScreen):
                 q = parse_qs(parsed.query or "")
                 playlist_id = (q.get("list") or [None])[0]
                 video_id = (q.get("v") or [None])[0]
+                is_browse_album = (
+                    "/browse/" in (parsed.path or "")
+                    and ("youtube.com" in host)
+                )
                 if not video_id and "youtu.be" in host:
                     video_id = (parsed.path or "").strip("/").split("/")[0] or None
                 if video_id:
@@ -281,6 +285,16 @@ class YoutubeSearchScreen(MDScreen):
                             "Черга",
                             start_video_id=video_id,
                             fallback_url=normalized_watch_url or query.strip(),
+                        )
+                    )
+                    return
+                if is_browse_album:
+                    Clock.schedule_once(
+                        lambda dt: self.open_playlist(
+                            query.strip(),
+                            "Альбом",
+                            start_video_id=video_id,
+                            fallback_url=query.strip(),
                         )
                     )
                     return
@@ -383,9 +397,31 @@ class YoutubeSearchScreen(MDScreen):
         try:
             from yt_dlp import YoutubeDL
             import re
-            opts = {'quiet': True, 'extract_flat': 'in_playlist', 'skip_download': True}
+            opts = {
+                'quiet': True,
+                'extract_flat': 'in_playlist',
+                'skip_download': True,
+                'ignoreerrors': True,
+                'playlistend': 250,
+            }
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(playlist_url, download=False)
+                entries = info.get('entries') or []
+                if len(entries) < 2:
+                    try:
+                        # Fallback для міксів/нестабільних playlist endpoint.
+                        opts2 = {
+                            'quiet': True,
+                            'skip_download': True,
+                            'ignoreerrors': True,
+                            'playlistend': 250,
+                        }
+                        with YoutubeDL(opts2) as ydl2:
+                            info2 = ydl2.extract_info(playlist_url, download=False)
+                        if isinstance(info2, dict):
+                            info = info2
+                    except Exception:
+                        pass
                 extracted_title = (
                     info.get("title")
                     or info.get("playlist_title")
@@ -564,6 +600,7 @@ class YoutubeWebScreen(MDScreen):
         try:
             ma.bind_webview_action_router(self)
             ma.bind_intent_router()
+            # Не скидаємо сторінку при поверненні — WebView зберігає попередній стан.
             ma.webview_show()
         except Exception:
             pass
@@ -578,15 +615,21 @@ class YoutubeWebScreen(MDScreen):
         try:
             if not url:
                 return
-            # якщо це watch з playlist - відкриваємо плейлист і стартуємо з поточного відео
+            # якщо це watch/browse з playlist/album - відкриваємо чергу і стартуємо з поточного відео
             try:
                 from urllib.parse import urlparse, parse_qs
-                q = parse_qs(urlparse(url).query)
+                parsed = urlparse(url)
+                q = parse_qs(parsed.query)
                 playlist_id = (q.get("list") or [None])[0]
                 video_id = (q.get("v") or [None])[0]
+                is_browse_album = (
+                    "/browse/" in (parsed.path or "")
+                    and ("music.youtube.com" in (parsed.netloc or "") or "youtube.com" in (parsed.netloc or ""))
+                )
             except Exception:
                 playlist_id = None
                 video_id = None
+                is_browse_album = False
 
             started = False
             if playlist_id:
@@ -596,6 +639,18 @@ class YoutubeWebScreen(MDScreen):
                     search_screen.open_playlist(
                         playlist_url,
                         "Черга",
+                        start_video_id=video_id,
+                        fallback_url=url,
+                    )
+                    started = True
+                except Exception:
+                    started = False
+            elif is_browse_album:
+                try:
+                    search_screen = self.manager.get_screen("search")
+                    search_screen.open_playlist(
+                        url,
+                        "Альбом",
                         start_video_id=video_id,
                         fallback_url=url,
                     )
@@ -669,6 +724,21 @@ class RootLayout(MDBoxLayout):
         self.add_widget(bar)
 
     def set_screen(self, name: str):
+        if name == "web":
+            try:
+                if not ma.is_network_available():
+                    name = "search"
+            except Exception:
+                pass
+
+        if name != "audio":
+            try:
+                audio = self.sm.get_screen("audio")
+                if hasattr(audio, "hide_video_overlay_fast"):
+                    audio.hide_video_overlay_fast()
+            except Exception:
+                pass
+
         if name in ("web", "search"):
             self._active_tab = name
         if name != "web":

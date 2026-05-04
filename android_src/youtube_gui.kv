@@ -7,6 +7,14 @@
 <VideoTapArea@ButtonBehavior+Widget>:
     size_hint: 1, 1
 
+<CircularAvatar@AsyncImage>:
+    source: ''
+    size_hint: None, None
+    size: dp(40), dp(40)
+    opacity: 1
+    allow_stretch: True
+    keep_ratio: True
+
 <SimilarItem@ButtonBehavior+BoxLayout>:
     size_hint_y: None
     height: dp(76)
@@ -273,7 +281,7 @@
                         orientation: 'horizontal'
                         size_hint: 0.97, None
                         height: dp(32)
-                        pos_hint: {'center_x': 0.5, 'y': 0.03}
+                        pos_hint: {'center_x': 0.5, 'y': 0.80}
                         spacing: 0
                         padding: 0, 0
                         opacity: 0
@@ -316,7 +324,7 @@
                         size_hint: None, None
                         height: dp(48)
                         width: dp(220)
-                        pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+                        pos_hint: {'center_x': 0.5, 'center_y': 0.68}
                         spacing: dp(12)
                         padding: dp(10), dp(6)
                         opacity: 0
@@ -391,12 +399,8 @@
                     height: dp(46)
                     spacing: dp(10)
 
-                    AsyncImage:
+                    CircularAvatar:
                         id: channel_avatar
-                        size_hint: None, None
-                        size: dp(40), dp(40)
-                        allow_stretch: True
-                        keep_ratio: True
                         opacity: 0
 
                     Label:
@@ -451,6 +455,14 @@
                     source: "ico/icoauto_on.png"
                     size: dp(28), dp(28)
                     on_release: root.toggle_autoskip()
+
+                MDIconButton:
+                    id: vid
+                    icon: "video"
+                    theme_text_color: "Custom"
+                    text_color: 0.15, 0.15, 0.15, 1
+                    user_font_size: "24sp"
+                    on_release: root.vid()
 
                 MDIconButton:
                     id: back_btn
