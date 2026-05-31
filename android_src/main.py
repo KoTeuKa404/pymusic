@@ -397,6 +397,82 @@ class YoutubeSearchScreen(MDScreen):
         try:
             from yt_dlp import YoutubeDL
             import re
+            from urllib.parse import urlparse, parse_qs
+
+            def _playlist_id_from_url(u: str) -> str:
+                try:
+                    q = parse_qs(urlparse(str(u or "")).query or "")
+                    return str((q.get("list") or [""])[0] or "")
+                except Exception:
+                    return ""
+
+            def _extract_vid_from_any(u: str) -> str:
+                try:
+                    parsed = urlparse(str(u or ""))
+                    q = parse_qs(parsed.query or "")
+                    v = str((q.get("v") or [""])[0] or "")
+                    if v:
+                        return v
+                    if "youtu.be" in (parsed.netloc or ""):
+                        return str((parsed.path or "").lstrip("/") or "")
+                except Exception:
+                    pass
+                m = re.search(r"([A-Za-z0-9_-]{11})", str(u or ""))
+                return m.group(1) if m else ""
+
+            def _extract_mix_info(playlist_id: str, seed_video_id: str | None):
+                if not playlist_id.startswith("RD"):
+                    return None
+                seed = str(seed_video_id or "").strip()
+                if not seed:
+                    seed = _extract_vid_from_any(fallback_url or "")
+                if not seed:
+                    seed = _extract_vid_from_any(playlist_url)
+                if not seed:
+                    return None
+                mix_watch_url = f"https://www.youtube.com/watch?v={seed}&list={playlist_id}"
+
+                candidates = [
+                    {
+                        "quiet": True,
+                        "skip_download": True,
+                        "ignoreerrors": True,
+                        "extract_flat": "in_playlist",
+                        "playlistend": 250,
+                    },
+                    {
+                        "quiet": True,
+                        "skip_download": True,
+                        "ignoreerrors": True,
+                        "extract_flat": False,
+                        "playlistend": 250,
+                    },
+                    {
+                        "quiet": True,
+                        "skip_download": True,
+                        "ignoreerrors": True,
+                        "playlist_items": "1-250",
+                    },
+                ]
+                best = None
+                best_len = 0
+                for op in candidates:
+                    try:
+                        with YoutubeDL(op) as ydl_mix:
+                            info_mix = ydl_mix.extract_info(mix_watch_url, download=False)
+                        if not isinstance(info_mix, dict):
+                            continue
+                        en = info_mix.get("entries") or []
+                        ln = len(en)
+                        if ln > best_len:
+                            best = info_mix
+                            best_len = ln
+                        if ln >= 2:
+                            return info_mix
+                    except Exception:
+                        continue
+                return best
+
             opts = {
                 'quiet': True,
                 'extract_flat': 'in_playlist',
@@ -407,6 +483,7 @@ class YoutubeSearchScreen(MDScreen):
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(playlist_url, download=False)
                 entries = info.get('entries') or []
+                playlist_id = _playlist_id_from_url(playlist_url)
                 if len(entries) < 2:
                     try:
                         # Fallback для міксів/нестабільних playlist endpoint.
@@ -420,6 +497,22 @@ class YoutubeSearchScreen(MDScreen):
                             info2 = ydl2.extract_info(playlist_url, download=False)
                         if isinstance(info2, dict):
                             info = info2
+                            entries = info.get("entries") or []
+                    except Exception:
+                        pass
+                if len(entries) < 2 and playlist_id.startswith("RD"):
+                    try:
+                        seed_guess = start_video_id
+                        if not seed_guess and entries:
+                            first_e = entries[0] if isinstance(entries[0], dict) else {}
+                            seed_guess = (
+                                _extract_vid_from_any(first_e.get("url") or "")
+                                or _extract_vid_from_any(first_e.get("id") or "")
+                            )
+                        info_mix = _extract_mix_info(playlist_id, seed_guess)
+                        if isinstance(info_mix, dict):
+                            info = info_mix
+                            entries = info.get("entries") or []
                     except Exception:
                         pass
                 extracted_title = (
@@ -511,11 +604,11 @@ class YoutubeSearchScreen(MDScreen):
                         except Exception:
                             duration = ""
                     track_ids.append(str(vid or url or ""))
-                    try:
-                        print(f"[PLAYLIST] row vid={vid!r} title={title!r} thumb={(thumb or '')!r}")
-                    except Exception:
-                        pass
                     tracks.append((url, title, channel, thumb, duration, vid))
+                try:
+                    print(f"[PLAYLIST] extracted tracks={len(tracks)} title={extracted_title!r}")
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[PLAYLIST] extract err: {e}")
             if fallback_url:
@@ -622,6 +715,8 @@ class YoutubeWebScreen(MDScreen):
                 q = parse_qs(parsed.query)
                 playlist_id = (q.get("list") or [None])[0]
                 video_id = (q.get("v") or [None])[0]
+                if not video_id and "youtu.be" in (parsed.netloc or ""):
+                    video_id = (parsed.path or "").strip("/").split("/")[0] or None
                 is_browse_album = (
                     "/browse/" in (parsed.path or "")
                     and ("music.youtube.com" in (parsed.netloc or "") or "youtube.com" in (parsed.netloc or ""))
@@ -635,7 +730,12 @@ class YoutubeWebScreen(MDScreen):
             if playlist_id:
                 try:
                     search_screen = self.manager.get_screen("search")
-                    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+                    # Для RD mix надійніше йти через watch+list (seed video),
+                    # інакше YouTube інколи повертає лише 1 елемент.
+                    if str(playlist_id).startswith("RD") and video_id:
+                        playlist_url = f"https://www.youtube.com/watch?v={video_id}&list={playlist_id}"
+                    else:
+                        playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
                     search_screen.open_playlist(
                         playlist_url,
                         "Черга",

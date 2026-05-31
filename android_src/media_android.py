@@ -142,6 +142,26 @@ _webview_owner = None
 _web_url_handler = None
 _mode_handler = None
 
+def _force_mobile_youtube_url(url: str | None) -> str | None:
+    try:
+        u = str(url or "").strip()
+        if not u:
+            return url
+        from urllib.parse import urlparse, urlunparse
+        p = urlparse(u)
+        host = (p.netloc or "").lower()
+        if host in ("youtube.com", "www.youtube.com"):
+            p = p._replace(netloc="m.youtube.com")
+            return urlunparse(p)
+        if host == "youtu.be":
+            vid = (p.path or "").strip("/")
+            if vid:
+                q = p.query or ""
+                return f"https://m.youtube.com/watch?v={vid}" + (f"&{q}" if q else "")
+        return u
+    except Exception:
+        return url
+
 
 @run_on_ui_thread
 def _webview_stop_media():
@@ -413,7 +433,7 @@ def webview_show(url: str | None = None):
         _set_sdl_surface_visible(False)
         _set_surface_views_visible(False)
         if url:
-            _webview.loadUrl(url)
+            _webview.loadUrl(_force_mobile_youtube_url(url) or url)
         elif _webview.getUrl() is None:
             _webview.loadUrl("https://m.youtube.com/")
         log("[WEB] WebView shown")
@@ -447,7 +467,7 @@ def webview_load(url: str):
             webview_create()
         if _webview is None:
             return
-        _webview.loadUrl(url)
+        _webview.loadUrl(_force_mobile_youtube_url(url) or url)
     except Exception as e:
         log(f"[WEB] load err: {e}")
 
@@ -707,12 +727,13 @@ ACTION_PAUSE = None
 ACTION_TOGGLE = None
 ACTION_NEXT = None
 ACTION_REPEAT = None
+ACTION_SEEK = None
 ACTION_WEB_URL = None
 ACTION_WEB_MODE = None
 
 
 def _ensure_action_constants():
-    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_REPEAT, ACTION_WEB_URL, ACTION_WEB_MODE
+    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_REPEAT, ACTION_SEEK, ACTION_WEB_URL, ACTION_WEB_MODE
     if _ACTION_PREFIX:
         return
     try:
@@ -730,6 +751,7 @@ def _ensure_action_constants():
     ACTION_TOGGLE = f"{_ACTION_PREFIX}.TOGGLE"
     ACTION_NEXT = f"{_ACTION_PREFIX}.NEXT"
     ACTION_REPEAT = f"{_ACTION_PREFIX}.REPEAT"
+    ACTION_SEEK = f"{_ACTION_PREFIX}.SEEK"
     ACTION_WEB_URL = f"{_ACTION_PREFIX}.WEB_URL"
     ACTION_WEB_MODE = f"{_ACTION_PREFIX}.WEB_MODE"
 
@@ -1300,6 +1322,15 @@ def _route_action_intent(intent):
             cb = getattr(_action_owner, "_ms_repeat", None)
             if callable(cb):
                 cb()
+        elif act == ACTION_SEEK:
+            try:
+                pos_ms = intent.getLongExtra("seek_to_ms", -1)
+            except Exception:
+                pos_ms = -1
+            if pos_ms is not None and int(pos_ms) >= 0:
+                cb = getattr(_action_owner, "seek", None)
+                if callable(cb):
+                    cb(float(pos_ms) / 1000.0)
         elif act == Intent.ACTION_MEDIA_BUTTON:
             _handle_media_button_intent(intent)
     except Exception as e:

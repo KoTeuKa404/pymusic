@@ -23,7 +23,16 @@ import ssl
 import media_android as ma
 import ytdlp_helpers as ydlh
 from headset_listener import headset_router
-from recent_utils import load_recent, update_recent_cache, update_recent_art
+from recent_utils import (
+    load_recent,
+    save_recent,
+    update_recent_cache,
+    update_recent_art,
+    is_favorite,
+    upsert_favorite,
+    remove_favorite,
+    update_favorite_cache,
+)
 
 # новий імпорт замість локального класу
 from video_player import AndroidVideoPlayer
@@ -317,10 +326,15 @@ class AudioPlayerScreen(Screen):
         self._stream_error_hits = 0
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
+        self._recover_loop_url = ""
+        self._recover_loop_hits = 0
+        self._recover_loop_ts = 0.0
         self._playlist_ui_sig = None
         self._playlist_ui_last_ts = 0.0
         self._playlist_thumb_inflight = set()
         self._playlist_thumb_waiters = {}
+        self._playlist_thumb_sem = threading.BoundedSemaphore(4)
+        self._fav_cache_inflight = set()
 
     # ==================== lifecycle ====================
 
@@ -329,6 +343,9 @@ class AudioPlayerScreen(Screen):
             return True
         try:
             self._video_player = AndroidVideoPlayer()
+            self._video_player.set_tap_callback(
+                lambda zone="center": Clock.schedule_once(lambda dt: self._handle_video_surface_tap(zone), 0)
+            )
             print("[VIDEO] AndroidVideoPlayer created")
             return True
         except Exception as e:
@@ -360,6 +377,22 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
         return 0
+
+    def _is_screen_active(self) -> bool:
+        try:
+            if self.manager is not None and self.manager.current != self.name:
+                return False
+        except Exception:
+            pass
+        try:
+            app = App.get_running_app()
+            root = getattr(app, "root", None)
+            sm = getattr(root, "sm", None)
+            if sm is not None and sm.current != self.name:
+                return False
+        except Exception:
+            pass
+        return True
 
     def on_pre_enter(self):
         self._app_in_background = False
@@ -414,6 +447,7 @@ class AudioPlayerScreen(Screen):
 
     def handle_app_pause(self):
         self._app_in_background = True
+        self._last_bg_resume_ts = time.time()
         try:
             self._video_was_active = bool(self._video_active)
             if self._video_active:
@@ -428,6 +462,9 @@ class AudioPlayerScreen(Screen):
 
     def handle_app_resume(self):
         self._app_in_background = False
+        self._last_bg_resume_ts = time.time()
+        self._last_watch_pos = None
+        self._buffer_watchdog_ts = time.time()
         try:
             if (
                 self._video_was_active
@@ -457,10 +494,10 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
-    def _align_video_to_thumb(self, *args): # TODO переробити це забрати обмеження фіксації рамки відео щоб воно було таке як є навіть якщо там чорні рамки
+    def _align_video_to_thumb(self, *args):
         """
-        Виставляє SurfaceView так, щоб він співпадав з зоною прев'ю audio_thumbnail,
-        але залишав смужку знизу під слайдер (як у YouTube).
+        Виставляє SurfaceView у межах прев'ю. Сам SurfaceView потім
+        зменшується під реальний aspect-ratio відео в AndroidVideoPlayer.
         """
         try:
             if not self._video_player:
@@ -493,13 +530,9 @@ class AudioPlayerScreen(Screen):
             ww = thumb.width
             wh = thumb.height
 
-            # повна висота області превʼю в px
             full_height_px = int(wh * ky)
 
-            # Коли видимі контроли, зсуваємо відеоряд вниз і звільняємо верхню зону для tap-контролів.
-            reserve_dp = 116 if self._video_controls_visible else 0
-            reserve_px = int(reserve_dp * ky)
-            height_px = max(0, full_height_px - reserve_px)
+            height_px = max(0, full_height_px)
             if height_px < int(40 * ky):  # мінімальна висота відео
                 height_px = int(40 * ky)
 
@@ -512,8 +545,6 @@ class AudioPlayerScreen(Screen):
             top_win = wy + wh
             # відстань від верху екрана Android
             top_px = int((win_h - top_win) * ky)
-            if self._video_controls_visible:
-                top_px += reserve_px
 
             # кламп по екрану
             if width_px > screen_w:
@@ -545,15 +576,25 @@ class AudioPlayerScreen(Screen):
                 height_px,
             )
 
-            # ВАЖЛИВО:
-            # AndroidVideoPlayer всередині вже займається тим,
-            # щоб відео не розтягувалось, а зберігало пропорції з чорними смугами.
             self._video_player.set_bounds(left_px, top_px, width_px, height_px)
         except Exception as e:
             print("[VIDEO] align err:", e)
 
     def toggle_video_controls(self):
         self._set_video_controls_visible(not self._video_controls_visible)
+
+    def _handle_video_surface_tap(self, zone: str = "center"):
+        zone = str(zone or "center")
+        if not self._video_controls_visible:
+            self._set_video_controls_visible(True)
+            return
+        if zone == "left":
+            self.video_seek(-10)
+        elif zone == "right":
+            self.video_seek(10)
+        else:
+            self.video_toggle_play()
+        self._set_video_controls_visible(True)
 
     def _set_video_controls_visible(self, visible: bool, auto_hide: bool = True):
         self._video_controls_visible = bool(visible)
@@ -572,6 +613,11 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
         try:
+            if self._video_player and hasattr(self._video_player, "set_native_controls_visible"):
+                self._video_player.set_native_controls_visible(bool(visible))
+        except Exception:
+            pass
+        try:
             if self._video_controls_ev:
                 self._video_controls_ev.cancel()
                 self._video_controls_ev = None
@@ -583,7 +629,7 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
         if visible and auto_hide:
-            self._video_controls_ev = Clock.schedule_once(self._hide_video_controls, 3.0)
+            self._video_controls_ev = Clock.schedule_once(self._hide_video_controls, 5.0)
 
     def _hide_video_controls(self, dt):
         self._set_video_controls_visible(False, auto_hide=False)
@@ -785,6 +831,23 @@ class AudioPlayerScreen(Screen):
 
     # ==================== public API (audio) ====================
 # TODO створи клас для відео з всіма полями тайлтлу і тд щоб їх отримувати тут
+    def _remember_recent(self, url: str, title: str, channel: str, thumb: str):
+        try:
+            if not url:
+                return
+            recent = load_recent()
+            entry = {
+                "url": url,
+                "title": title or "",
+                "channel": channel or "",
+                "thumb": thumb or "",
+            }
+            recent = [r for r in recent if r.get("url") != url]
+            recent.insert(0, entry)
+            save_recent(recent)
+        except Exception:
+            pass
+
     def play_audio(
         self,
         video_url: str,
@@ -811,6 +874,8 @@ class AudioPlayerScreen(Screen):
         if _clear:
             self._playlist_url = None
         self._last_video_url = video_url
+        self._remember_recent(video_url, title, channel, str(thumb or ""))
+        self._favorite = bool(is_favorite(video_url))
         self._video_was_active = False
         self._video_resume_url = None
         self._video_resume_gen = -1
@@ -844,7 +909,6 @@ class AudioPlayerScreen(Screen):
             self._views_text = ""
             self._channel_thumb = ""
             self._channel_thumb_local = ""
-            self._favorite = False
             self._render_similar_ui()
 
         self._playback_desired = True
@@ -1093,51 +1157,68 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
-        waiters = self._playlist_thumb_waiters.setdefault(path, [])
-        waiters.append(img_widget)
-        if path in self._playlist_thumb_inflight:
-            return
-        self._playlist_thumb_inflight.add(path)
+        try:
+            img_widget.source = ""
+        except Exception:
+            pass
 
-        def _job():
-            ok = False
-            tmp = f"{path}.part"
+        try:
+            self._playlist_thumb_waiters.setdefault(path, []).append(img_widget)
+            if path in self._playlist_thumb_inflight:
+                return
+            self._playlist_thumb_inflight.add(path)
+        except Exception:
+            pass
+
+        def _apply(_dt=None):
+            waiters = []
             try:
-                req = urllib.request.Request(
-                    src,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
-                        "Referer": "https://www.youtube.com",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept": "image/jpeg,image/png,image/*;q=0.9,*/*;q=0.8",
-                        "Connection": "keep-alive",
-                    },
-                )
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp, open(tmp, "wb") as f:
-                    f.write(resp.read())
-                if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-                    os.replace(tmp, path)
-                    ok = True
+                waiters = self._playlist_thumb_waiters.pop(path, [])
             except Exception:
+                waiters = []
+            for widget in waiters:
                 try:
-                    if os.path.exists(tmp):
-                        os.remove(tmp)
-                except Exception:
-                    pass
-            finally:
-                self._playlist_thumb_inflight.discard(path)
-
-            def _apply(_dt):
-                widgets = self._playlist_thumb_waiters.pop(path, [])
-                for w in widgets:
+                    widget.source = path
                     try:
-                        w.source = path if ok else ""
-                        w.reload()
+                        widget.reload()
                     except Exception:
                         pass
+                except Exception:
+                    pass
 
-            Clock.schedule_once(_apply, 0)
+        def _job():
+            try:
+                with self._playlist_thumb_sem:
+                    tmp = f"{path}.tmp"
+                    req = urllib.request.Request(
+                        src,
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
+                            "Referer": "https://www.youtube.com",
+                            "Accept-Language": "en-US,en;q=0.9",
+                            "Accept": "image/jpeg,image/png,image/*;q=0.9,*/*;q=0.8",
+                            "Connection": "keep-alive",
+                        },
+                    )
+                    ctx = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp, open(tmp, "wb") as f:
+                        f.write(resp.read())
+                    if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                        os.replace(tmp, path)
+                    else:
+                        try:
+                            os.remove(tmp)
+                        except Exception:
+                            pass
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    Clock.schedule_once(_apply, 0)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self._playlist_thumb_inflight.discard(path)
+                except Exception:
+                    pass
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -1218,13 +1299,9 @@ class AudioPlayerScreen(Screen):
                     vid = Playlist._normalize_video_id(str(item.get("url") or ""))
                 if not vid:
                     vid = Playlist._video_id_from_thumb_url(thumb)
-                # Для плейлиста завжди беремо стабільний youtube static thumb без sqp/rs.
+                # Для плейлиста беремо легший static thumb без sqp/rs.
                 if vid:
-                    thumb = f"https://img.youtube.com/vi/{vid}/0.jpg"
-                try:
-                    print(f"[PLTHUMB] idx={idx} vid={vid!r} thumb={thumb!r}")
-                except Exception:
-                    pass
+                    thumb = f"https://img.youtube.com/vi/{vid}/mqdefault.jpg"
                 if thumb:
                     self._set_playlist_thumb(row.ids.pt_thumb, thumb)
                 row.ids.pt_duration.text = str(item.get("duration") or "")
@@ -1422,6 +1499,8 @@ class AudioPlayerScreen(Screen):
         швидше за все потік завис через проблеми з інтернетом, тоді запускаємо
         мʼякий рестарт із повторним витягуванням URL.
         """
+        if self._app_in_background or (time.time() - float(self._last_bg_resume_ts or 0.0)) < 6.0:
+            return
         if not self._playback_desired or self._user_paused:
             return
         if not ma.android_player:
@@ -1719,6 +1798,7 @@ class AudioPlayerScreen(Screen):
                     f.write(chunk)
             os.replace(tmp_path, path)
             update_recent_cache(video_url, path)
+            update_favorite_cache(video_url, path)
             return path
         except Exception as e:
             try:
@@ -1819,7 +1899,7 @@ class AudioPlayerScreen(Screen):
 
     def _auto_video_for_current(self, gen: int, sync_start: bool = False):
         """Автоматичний показ YouTube-відео для поточного треку."""
-        if self._app_in_background:
+        if self._app_in_background or not self._is_screen_active():
             return
         if not self._is_current_gen(gen) or not self._playback_desired:
             return
@@ -1833,15 +1913,11 @@ class AudioPlayerScreen(Screen):
                 if sync_start:
                     self._start_audio_only_after_prepared(gen)
                 return
-            Clock.schedule_once(lambda dt: self._set_video_mode(True), 0)
-            try:
-                self._video_player.play(self._last_video_url, start_pos_provider=self._audio_pos_ms)
-            except Exception as e:
-                try:
-                    print("[VIDEO] embed play err:", e)
-                except Exception:
-                    pass
+            if not self._is_screen_active():
                 Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
+                return
+            Clock.schedule_once(lambda dt: self._set_video_mode(True), 0)
+            Clock.schedule_once(lambda dt: self._play_embed_if_screen_active(), 0)
             if sync_start:
                 self._start_audio_only_after_prepared(gen)
             return
@@ -1855,6 +1931,8 @@ class AudioPlayerScreen(Screen):
 
         def _job():
             try:
+                if self._app_in_background or not self._is_screen_active():
+                    return
                 info_v = ydlh.safe_extract_video_info(self._last_video_url)
                 if not info_v:
                     print("[VIDEO] no video info from yt_dlp")
@@ -1871,7 +1949,7 @@ class AudioPlayerScreen(Screen):
                     if sync_start:
                         self._start_audio_only_after_prepared(gen)
                     return
-                if not self._is_current_gen(gen) or not self._playback_desired:
+                if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
                     return
 
                 vurl_final = vurl
@@ -1887,10 +1965,10 @@ class AudioPlayerScreen(Screen):
                         else:
                             print("[VIDEO] buffering failed, streaming remote url")
 
-                if not self._is_current_gen(gen) or not self._playback_desired:
+                if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
                     return
 
-                if not self._video_enabled:
+                if not self._video_enabled or not self._is_screen_active():
                     Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
                     if sync_start:
                         self._start_audio_only_after_prepared(gen)
@@ -1904,11 +1982,9 @@ class AudioPlayerScreen(Screen):
                 else:
                     if self._video_player:
                         Clock.schedule_once(self._align_video_to_thumb, 0)
-                        self._video_player.play(
-                            vurl_final,
-                            headers=(vheaders_final or {}),
-                            loop=False,
-                            start_pos_provider=self._audio_pos_ms,
+                        Clock.schedule_once(
+                            lambda dt: self._play_video_if_screen_active(vurl_final, vheaders_final or {}),
+                            0,
                         )
             except Exception as e:
                 try:
@@ -1918,9 +1994,36 @@ class AudioPlayerScreen(Screen):
                 Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
 
         threading.Thread(target=_job, daemon=True).start()
+
+    def _play_embed_if_screen_active(self):
+        if not self._is_screen_active() or self._app_in_background or not self._video_enabled:
+            self._set_video_mode(False)
+            return
+        try:
+            if self._video_player:
+                self._video_player.play(self._last_video_url, start_pos_provider=self._audio_pos_ms)
+        except Exception as e:
+            try:
+                print("[VIDEO] embed play err:", e)
+            except Exception:
+                pass
+            self._set_video_mode(False)
+
+    def _play_video_if_screen_active(self, vurl: str, vheaders: dict):
+        if not self._is_screen_active() or self._app_in_background or not self._video_enabled:
+            self._set_video_mode(False)
+            return
+        if self._video_player:
+            self._video_player.play(
+                vurl,
+                headers=(vheaders or {}),
+                loop=False,
+                start_pos_provider=self._audio_pos_ms,
+            )
+
     def _start_synced_audio_and_video(self, gen: int, vurl: str, vheaders: dict):
         """Старт аудіо і відео максимально одночасно."""
-        if not self._is_current_gen(gen) or not self._playback_desired:
+        if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
             return
 
         if not self._ensure_video_player():
@@ -1940,13 +2043,7 @@ class AudioPlayerScreen(Screen):
 
         try:
             if self._video_player:
-                self._video_player.play(
-                    vurl,
-                    headers=(vheaders or {}),
-                    loop=False,
-                    start_pos_provider=self._audio_pos_ms,
-                 
-                )
+                self._play_video_if_screen_active(vurl, vheaders or {})
         except Exception as e:
             try:
                 print("[VIDEO] synced start error:", e)
@@ -2401,6 +2498,8 @@ class AudioPlayerScreen(Screen):
         video_on = True  -> відео поверх, мініатюра прозора
         video_on = False -> тільки мініатюра, без відео-ряду
         """
+        if video_on and not self._is_screen_active():
+            video_on = False
         self._video_active = bool(video_on)
         try:
             if not video_on:
@@ -2540,6 +2639,26 @@ class AudioPlayerScreen(Screen):
         self._last_stream_recover_ts = now
         self._resume_pos_ms = int(pos or 0)
         print(f"[AUDIO] recover stream ({reason})")
+
+        cur_url = str(self._last_video_url or "")
+        if cur_url and cur_url == self._recover_loop_url and (now - self._recover_loop_ts) < 90.0:
+            self._recover_loop_hits += 1
+        else:
+            self._recover_loop_url = cur_url
+            self._recover_loop_hits = 1
+        self._recover_loop_ts = now
+
+        # Захист від нескінченного циклу ресетів одного й того ж треку.
+        if self._recover_loop_hits >= 4:
+            print("[AUDIO] recover loop detected, skipping track")
+            self._recover_loop_hits = 0
+            if self._auto_skip and self._advance_to_next_track():
+                return
+            self._playback_desired = False
+            self._user_paused = True
+            Clock.schedule_once(lambda dt: self._ui_set_playing(False), 0)
+            return
+
         if self._last_video_url and self._try_start_cached_audio(self._last_video_url, self._load_gen):
             return
         if self._last_video_url:
@@ -2573,7 +2692,13 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 return
 
-        if self._bad_dur_hits >= 4 and self._playback_desired and not self._user_paused:
+        if (
+            self._bad_dur_hits >= 4
+            and self._playback_desired
+            and not self._user_paused
+            and not self._app_in_background
+            and (time.time() - float(self._last_bg_resume_ts or 0.0)) >= 6.0
+        ):
             self._recover_stream("duration=0", pos)
             self._bad_dur_hits = 0
 
@@ -2593,13 +2718,41 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
-        # embed video sync disabled to avoid audio glitches when video audio is active
+        # Не робимо частий hard seek відео до аудіо: Android MediaPlayer після
+        # seekTo() флашить декодер, що виглядає як ресет відеоряду.
+        try:
+            if (
+                self._video_enabled
+                and self._video_active
+                and self._video_player
+                and self._playback_desired
+                and not self._user_paused
+                and not self._is_scrubbing
+                and not self._app_in_background
+                and ma.android_player
+                and ma._is_prepared()
+                and ma.android_player.isPlaying()
+            ):
+                now = time.time()
+                video_pos = None
+                try:
+                    video_pos = self._video_player.get_current_position()
+                except Exception:
+                    video_pos = None
+                drift = abs(int(pos or 0) - int(video_pos or 0)) if video_pos is not None else 0
+                if drift >= 5000 and (now - float(self._last_video_sync_ts or 0.0)) >= 15.0:
+                    print(f"[VIDEO] drift resync audio={int(pos or 0)} video={int(video_pos or 0)} drift={drift}")
+                    self._video_player.seek_to(int(pos or 0))
+                    self._last_video_sync_ts = now
+        except Exception:
+            pass
 
     def _schedule_expiry(self):
         if not self._expire_ts:
             return
         now = int(time.time())
-        dt = max(5, self._expire_ts - now - 60)
+        # Не перезапускати надто часто, інакше при короткому TTL отримуємо цикли ресетів.
+        dt = max(30, self._expire_ts - now - 60)
         self._refresh_ev = Clock.schedule_once(
             lambda _: self._extract_and_start_gen(self._last_video_url, self._load_gen),
             dt
@@ -2635,6 +2788,9 @@ class AudioPlayerScreen(Screen):
             pass
 
     def toggle_favorite(self, *a):
+        url = str(self._last_video_url or "")
+        if not url:
+            return
         self._favorite = not self._favorite
         try:
             btn = self.ids.get("favorite_btn")
@@ -2642,6 +2798,62 @@ class AudioPlayerScreen(Screen):
                 btn.source = "ico/icofavorite_active.png" if self._favorite else "ico/icofavorite.png"
         except Exception:
             pass
+        if self._favorite:
+            item = {
+                "url": url,
+                "title": self._title or "",
+                "channel": self._channel or "",
+                "thumb": self._thumb or "",
+                "art_path": self._art_path or "",
+                "added_at": int(time.time()),
+            }
+            try:
+                cached = self._find_cached_audio(url)
+                if cached:
+                    item["cache_path"] = cached
+            except Exception:
+                pass
+            upsert_favorite(item)
+            self._cache_current_favorite_async(url)
+        else:
+            try:
+                cached = self._find_cached_audio(url)
+                if cached and os.path.exists(cached):
+                    os.remove(cached)
+            except Exception:
+                pass
+            update_recent_cache(url, None)
+            update_favorite_cache(url, None)
+            remove_favorite(url)
+
+    def _cache_current_favorite_async(self, url: str):
+        if not url or url in self._fav_cache_inflight:
+            return
+        self._fav_cache_inflight.add(url)
+
+        def _job():
+            try:
+                cached = self._find_cached_audio(url)
+                if cached:
+                    update_favorite_cache(url, cached)
+                    return
+                stream_url = str(self._stream_url or "")
+                headers = dict(self._headers or {})
+                if not stream_url or stream_url.startswith("file://"):
+                    try:
+                        info = ydlh.extract_audio_info(url, prefer_compat=self._prefer_compat_audio)
+                        stream_url = str(info.get("audio_url") or "")
+                        headers = dict(info.get("http_headers") or headers)
+                    except Exception:
+                        stream_url = ""
+                if stream_url:
+                    path = self._download_audio_locally(url, stream_url, headers)
+                    if path:
+                        update_favorite_cache(url, path)
+            finally:
+                self._fav_cache_inflight.discard(url)
+
+        threading.Thread(target=_job, daemon=True).start()
 
     def seek(self, value):
         try:
@@ -2813,10 +3025,41 @@ class AudioPlayerScreen(Screen):
                     self._video_player.resume()
             except Exception:
                 pass
+            try:
+                Clock.schedule_once(lambda dt: self._force_video_resync(), 0.35)
+            except Exception:
+                pass
             self._ui_set_playing(True)
         except Exception:
             if self._last_video_url:
                 self._extract_and_start_gen(self._last_video_url, self._load_gen)
+
+    def _force_video_resync(self):
+        try:
+            if (
+                self._app_in_background
+                or not self._video_enabled
+                or not self._video_active
+                or not self._video_player
+                or not self._playback_desired
+                or self._user_paused
+            ):
+                return
+            if not (ma.android_player and ma._is_prepared() and ma.android_player.isPlaying()):
+                return
+            pos = self._audio_pos_ms()
+            video_pos = None
+            try:
+                video_pos = self._video_player.get_current_position()
+            except Exception:
+                video_pos = None
+            if video_pos is not None and abs(int(pos or 0) - int(video_pos or 0)) < 1500:
+                return
+            if pos >= 0:
+                self._video_player.seek_to(int(pos))
+                self._last_video_sync_ts = time.time()
+        except Exception:
+            pass
 
     # ==================== stop / cleanup ====================
 

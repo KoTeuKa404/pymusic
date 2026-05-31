@@ -11,7 +11,11 @@ PythonActivity = autoclass("org.kivy.android.PythonActivity")
 MediaPlayer = autoclass("android.media.MediaPlayer")
 SurfaceViewClass = autoclass("android.view.SurfaceView")
 Color = autoclass("android.graphics.Color")
+FrameLayout = autoclass("android.widget.FrameLayout")
 FrameLayoutLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+LinearLayout = autoclass("android.widget.LinearLayout")
+LinearLayoutLayoutParams = autoclass("android.widget.LinearLayout$LayoutParams")
+TextView = autoclass("android.widget.TextView")
 Gravity = autoclass("android.view.Gravity")
 Uri = autoclass("android.net.Uri")
 HashMap = autoclass("java.util.HashMap")
@@ -37,7 +41,15 @@ class AndroidVideoPlayer:
         self._start_paused = False
         self._on_prepared_cb = None
         self._prepared_listener = None
+        self._video_size_listener = None
+        self._tap_listener = None
+        self._tap_callback = None
+        self._frame_bounds: tuple[int, int, int, int] | None = None
+        self._video_size: tuple[int, int] | None = None
         self._video_cache_enabled = False
+        self.controls_overlay = None
+        self._controls_touch_views = []
+        self._controls_visible = False
 
     class _OnPreparedListener(PythonJavaClass):
         __javainterfaces__ = ['android/media/MediaPlayer$OnPreparedListener']
@@ -55,6 +67,152 @@ class AndroidVideoPlayer:
             except Exception:
                 pass
 
+    class _OnVideoSizeChangedListener(PythonJavaClass):
+        __javainterfaces__ = ['android/media/MediaPlayer$OnVideoSizeChangedListener']
+        __javacontext__ = 'app'
+
+        def __init__(self, owner, gen):
+            super().__init__()
+            self._owner = owner
+            self._gen = gen
+
+        @java_method('(Landroid/media/MediaPlayer;II)V')
+        def onVideoSizeChanged(self, mp, width, height):
+            try:
+                self._owner._on_video_size_changed(int(width), int(height), self._gen)
+            except Exception:
+                pass
+
+    class _OnTouchListener(PythonJavaClass):
+        __javainterfaces__ = ['android/view/View$OnTouchListener']
+        __javacontext__ = 'app'
+
+        def __init__(self, owner):
+            super().__init__()
+            self._owner = owner
+
+        @java_method('(Landroid/view/View;Landroid/view/MotionEvent;)Z')
+        def onTouch(self, view, event):
+            try:
+                action = int(event.getAction())
+                if action != 1:  # MotionEvent.ACTION_UP
+                    return True
+                frame = getattr(self._owner, "_frame_bounds", None)
+                if frame:
+                    left, _top, frame_w, _frame_h = frame
+                    width = float(frame_w or view.getWidth() or 1)
+                    try:
+                        x = float(event.getRawX()) - float(left)
+                    except Exception:
+                        x = float(event.getX() or 0)
+                else:
+                    width = float(view.getWidth() or 1)
+                    x = float(event.getX() or 0)
+                if x < width / 3.0:
+                    zone = "left"
+                elif x > (width * 2.0) / 3.0:
+                    zone = "right"
+                else:
+                    zone = "center"
+                cb = getattr(self._owner, "_tap_callback", None)
+                if callable(cb):
+                    cb(zone)
+            except Exception:
+                pass
+            return True
+
+    def set_tap_callback(self, callback):
+        self._tap_callback = callback
+        try:
+            if self.surface_view is not None:
+                self._bind_surface_tap()
+        except Exception:
+            pass
+
+    def _bind_surface_tap(self):
+        try:
+            if self.surface_view is None:
+                return
+            if self._tap_listener is None:
+                self._tap_listener = self._OnTouchListener(self)
+            self.surface_view.setClickable(True)
+            self.surface_view.setOnTouchListener(self._tap_listener)
+        except Exception as e:
+            print("[VIDEO] bind tap err:", e)
+
+    def _bind_controls_tap(self):
+        try:
+            if self._tap_listener is None:
+                self._tap_listener = self._OnTouchListener(self)
+            views = [self.controls_overlay] + list(getattr(self, "_controls_touch_views", []) or [])
+            for view in views:
+                if view is None:
+                    continue
+                view.setClickable(True)
+                view.setOnTouchListener(self._tap_listener)
+        except Exception as e:
+            print("[VIDEO] bind controls tap err:", e)
+
+    @run_on_ui_thread
+    def _ensure_controls_overlay(self):
+        try:
+            if self.controls_overlay is not None:
+                self._bind_controls_tap()
+                return
+
+            activity = PythonActivity.mActivity
+            overlay = FrameLayout(activity)
+            try:
+                overlay.setBackgroundColor(Color.argb(92, 0, 0, 0))
+                overlay.setClickable(True)
+                overlay.setFocusable(False)
+            except Exception:
+                pass
+
+            bar = LinearLayout(activity)
+            try:
+                bar.setOrientation(LinearLayout.HORIZONTAL)
+                bar.setGravity(Gravity.CENTER)
+                bar.setClickable(False)
+            except Exception:
+                pass
+
+            for text in ("-10", "PAUSE", "+10"):
+                tv = TextView(activity)
+                try:
+                    tv.setText(text)
+                    tv.setTextColor(Color.WHITE)
+                    tv.setTextSize(20.0 if text != "PAUSE" else 18.0)
+                    tv.setGravity(Gravity.CENTER)
+                    tv.setClickable(False)
+                    tv.setBackgroundColor(Color.argb(150, 0, 0, 0))
+                except Exception:
+                    pass
+                lp = LinearLayoutLayoutParams(150, 86)
+                try:
+                    lp.setMargins(18, 0, 18, 0)
+                except Exception:
+                    pass
+                bar.addView(tv, lp)
+                self._controls_touch_views.append(tv)
+
+            bar_params = FrameLayoutLayoutParams(
+                FrameLayoutLayoutParams.WRAP_CONTENT,
+                FrameLayoutLayoutParams.WRAP_CONTENT,
+            )
+            bar_params.gravity = Gravity.CENTER
+            overlay.addView(bar, bar_params)
+            self._controls_touch_views.append(bar)
+
+            params = FrameLayoutLayoutParams(1, 1)
+            params.gravity = Gravity.TOP | Gravity.LEFT
+            activity.addContentView(overlay, params)
+            overlay.setVisibility(4)
+            self.controls_overlay = overlay
+            self._bind_controls_tap()
+        except Exception as e:
+            print("[VIDEO] controls overlay create err:", e)
+
     @run_on_ui_thread
     def create_surface(self):
         activity = PythonActivity.mActivity
@@ -63,7 +221,10 @@ class AndroidVideoPlayer:
         if self.surface_view is not None:
             try:
                 sv = self.surface_view
-                sv.setVisibility(0)
+                if self._frame_bounds:
+                    self._apply_surface_bounds()
+                else:
+                    sv.setVisibility(4)
                 parent = sv.getParent()
                 if parent is not None:
                     try:
@@ -90,6 +251,12 @@ class AndroidVideoPlayer:
 
         # CREATE NEW SURFACE
         sv = SurfaceViewClass(activity)
+        try:
+            sv.setClickable(True)
+            sv.setFocusable(False)
+            sv.setFocusableInTouchMode(False)
+        except Exception:
+            pass
 
         try:
             metrics = activity.getResources().getDisplayMetrics()
@@ -102,10 +269,7 @@ class AndroidVideoPlayer:
         self.screen_w_px = screen_w
         self.screen_h_px = screen_h
 
-        params = FrameLayoutLayoutParams(
-            FrameLayoutLayoutParams.MATCH_PARENT,
-            FrameLayoutLayoutParams.MATCH_PARENT
-        )
+        params = FrameLayoutLayoutParams(1, 1)
         params.gravity = Gravity.CENTER
         sv.setLayoutParams(params)
 
@@ -137,9 +301,11 @@ class AndroidVideoPlayer:
             print("[VIDEO] addContentView error:", e)
             return
 
-        sv.setVisibility(0)
+        sv.setVisibility(4)
 
         self.surface_view = sv
+        self._bind_surface_tap()
+        self._ensure_controls_overlay()
         try:
             if getattr(self, "pending_bounds", None):
                 pending = self.pending_bounds
@@ -188,6 +354,7 @@ class AndroidVideoPlayer:
         self._start_pos_provider = start_pos_provider
         self._start_paused = start_paused
         self._on_prepared_cb = on_prepared
+        self._video_size = None
 
         try:
             print("[VIDEO] MediaPlayer setDataSource", video_url)
@@ -222,10 +389,19 @@ class AndroidVideoPlayer:
             self.player.setLooping(loop)
             self.player.setVolume(0.0, 0.0)
             try:
+                self.player.setVideoScalingMode(1)  # VIDEO_SCALING_MODE_SCALE_TO_FIT
+            except Exception:
+                pass
+            try:
                 self._prepared_listener = self._OnPreparedListener(self, gen)
                 self.player.setOnPreparedListener(self._prepared_listener)
             except Exception:
                 self._prepared_listener = None
+            try:
+                self._video_size_listener = self._OnVideoSizeChangedListener(self, gen)
+                self.player.setOnVideoSizeChangedListener(self._video_size_listener)
+            except Exception:
+                self._video_size_listener = None
 
 
             Clock.schedule_once(lambda dt: self._attach_and_prepare_when_surface_ready(gen), 0.05)
@@ -267,6 +443,96 @@ class AndroidVideoPlayer:
                 self._on_prepared_cb()
         except Exception:
             pass
+
+    def _on_video_size_changed(self, width: int, height: int, gen: int):
+        if gen != self._play_gen:
+            return
+        if width <= 0 or height <= 0:
+            return
+        self._video_size = (int(width), int(height))
+        self._apply_surface_bounds()
+
+    def _fit_rect_to_video(self, left: int, top: int, width: int, height: int) -> tuple[int, int, int, int]:
+        vw, vh = self._video_size or (16, 9)
+        if vw <= 0 or vh <= 0 or width <= 0 or height <= 0:
+            return left, top, width, height
+
+        frame_ratio = float(width) / float(height)
+        video_ratio = float(vw) / float(vh)
+        if video_ratio > frame_ratio:
+            out_w = int(width)
+            out_h = max(1, int(round(out_w / video_ratio)))
+        else:
+            out_h = int(height)
+            out_w = max(1, int(round(out_h * video_ratio)))
+
+        out_left = int(left + max(0, (width - out_w) / 2))
+        out_top = int(top + max(0, (height - out_h) / 2))
+        return out_left, out_top, out_w, out_h
+
+    @run_on_ui_thread
+    def _apply_surface_bounds(self) -> None:
+        try:
+            if self.surface_view is None or not self._frame_bounds:
+                return
+
+            left, top, width, height = self._frame_bounds
+            if width <= 0 or height <= 0:
+                print("[VIDEO] set_bounds skip, non positive size:", width, height)
+                return
+
+            left, top, width, height = self._fit_rect_to_video(left, top, width, height)
+            sv = self.surface_view
+            params = FrameLayoutLayoutParams(int(width), int(height))
+            params.leftMargin = int(left)
+            params.topMargin = int(top)
+            sv.setLayoutParams(params)
+            sv.setVisibility(0)
+
+            parent = sv.getParent()
+            if parent is not None:
+                try:
+                    parent.bringChildToFront(sv)
+                except Exception:
+                    pass
+                try:
+                    parent.requestLayout()
+                except Exception:
+                    try:
+                        sv.requestLayout()
+                    except Exception:
+                        pass
+                try:
+                    parent.invalidate()
+                except Exception:
+                    try:
+                        sv.invalidate()
+                    except Exception:
+                        pass
+
+            try:
+                self._ensure_controls_overlay()
+                ov = self.controls_overlay
+                if ov is not None:
+                    ov_params = FrameLayoutLayoutParams(int(width), int(height))
+                    ov_params.leftMargin = int(left)
+                    ov_params.topMargin = int(top)
+                    ov.setLayoutParams(ov_params)
+                    ov.setVisibility(0 if self._controls_visible else 4)
+                    try:
+                        ov.bringToFront()
+                    except Exception:
+                        pass
+                    try:
+                        ov.requestLayout()
+                    except Exception:
+                        pass
+            except Exception as e:
+                print("[VIDEO] controls bounds err:", e)
+
+            print(f"[VIDEO] surface applied left={left}, top={top}, w={width}, h={height}, video_size={self._video_size}")
+        except Exception as e:
+            print(f"[VIDEO] apply bounds error: {e}")
 
     def _attach_and_prepare_when_surface_ready(self, gen: int):
 
@@ -345,6 +611,12 @@ class AndroidVideoPlayer:
                 self.surface_view.setVisibility(4)
         except Exception:
             pass
+        try:
+            if self.controls_overlay is not None:
+                self.controls_overlay.setVisibility(4)
+        except Exception:
+            pass
+        self._controls_visible = False
 
     @run_on_ui_thread
     def seek_to(self, ms: int):
@@ -358,6 +630,14 @@ class AndroidVideoPlayer:
         except Exception:
             pass
 
+    def get_current_position(self) -> int | None:
+        try:
+            if self.player is None or not self._prepared:
+                return None
+            return int(self.player.getCurrentPosition() or 0)
+        except Exception:
+            return None
+
     @run_on_ui_thread
     def set_bounds(self, left: int, top: int, width: int, height: int) -> None:
         try:
@@ -366,41 +646,29 @@ class AndroidVideoPlayer:
                 print("[VIDEO] set_bounds stored pending:", self.pending_bounds)
                 return
 
-            sv = self.surface_view
-
             if width <= 0 or height <= 0:
                 print("[VIDEO] set_bounds skip, non positive size:", width, height)
                 return
 
-            params = FrameLayoutLayoutParams(int(width), int(height))
-            params.leftMargin = int(left)
-            params.topMargin = int(top)
-            sv.setLayoutParams(params)
-
-            parent = sv.getParent()
-            if parent is not None:
-                try:
-                    parent.bringChildToFront(sv)
-                except Exception:
-                    pass
-                try:
-                    parent.requestLayout()
-                except Exception:
-                    try:
-                        sv.requestLayout()
-                    except Exception:
-                        pass
-                try:
-                    parent.invalidate()
-                except Exception:
-                    try:
-                        sv.invalidate()
-                    except Exception:
-                        pass
-
-            print(f"[VIDEO] set_bounds applied left={left}, top={top}, w={width}, h={height}")
+            self._frame_bounds = (int(left), int(top), int(width), int(height))
+            self._apply_surface_bounds()
         except Exception as e:
             print(f"[VIDEO] set_bounds error: {e}")
+
+    @run_on_ui_thread
+    def set_native_controls_visible(self, visible: bool) -> None:
+        self._controls_visible = bool(visible)
+        try:
+            self._ensure_controls_overlay()
+            if self.controls_overlay is not None:
+                self.controls_overlay.setVisibility(0 if visible else 4)
+                if visible:
+                    try:
+                        self.controls_overlay.bringToFront()
+                    except Exception:
+                        pass
+        except Exception as e:
+            print("[VIDEO] controls visible err:", e)
 
     @run_on_ui_thread
     def pause(self):

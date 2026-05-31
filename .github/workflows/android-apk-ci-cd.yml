@@ -1,0 +1,118 @@
+name: Android APK CI/CD
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build APK
+    runs-on:
+      - self-hosted
+      - Linux
+      - ARM64
+      - raspberry-pi
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Buildozer and Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip autoconf libtool pkg-config \
+            zlib1g-dev cmake libffi-dev libssl-dev libltdl-dev libsqlite3-dev libbz2-dev
+
+      - name: Install Buildozer and Cython
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "cython<3.1" buildozer
+
+      - name: Build debug APK
+        run: buildozer android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-ci-latest:
+    name: Publish APK (latest-ci)
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')
+    needs: build-apk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-debug
+          path: ./dist
+
+      - name: Publish or update ci-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-latest
+          name: CI latest APK
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          files: ./dist/*.apk
+          generate_release_notes: false
+
+  publish-tag-release:
+    name: Publish Release APK (tag)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-apk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-debug
+          path: ./dist
+
+      - name: Create GitHub release and upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist/*.apk
+          generate_release_notes: true

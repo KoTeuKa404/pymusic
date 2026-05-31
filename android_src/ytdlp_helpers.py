@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import ssl
 import urllib.request
@@ -46,6 +47,21 @@ _ANDROID_WEB_UA = (
     "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome Mobile Safari/537.36"
 )
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    try:
+        raw = os.environ.get(name)
+    except Exception:
+        raw = None
+    if raw is None:
+        return bool(default)
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return bool(default)
 
 
 def _normalize_img_url(url: str) -> str:
@@ -373,7 +389,14 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "ignoreerrors": "only_download",
     }
 
-    clients = ("web", "android") if prefer_compat else ("android", "web")
+    # На Android часто ламається web-client через PO Token/EJS,
+    # що дає "Only images are available" і цикл -1004/-38 у MediaPlayer.
+    # Тому за замовчуванням НЕ використовуємо web-client.
+    allow_web_client = _env_bool("YTDLP_ALLOW_WEB_CLIENT", False)
+    if allow_web_client:
+        clients = ("android", "web")
+    else:
+        clients = ("android",)
     info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
     if not info:
         print(f"[AUDIO] extract failed: {repr(err)}")

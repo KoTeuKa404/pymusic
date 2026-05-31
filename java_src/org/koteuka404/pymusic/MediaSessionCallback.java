@@ -26,6 +26,15 @@ public class MediaSessionCallback extends MediaSession.Callback {
         activity.startActivity(i);
     }
 
+    private void dispatchSeekTo(long posMs) {
+        if (activity == null) return;
+        Intent i = new Intent(activity, activity.getClass());
+        i.setAction("org.koteuka404.pymusic.SEEK");
+        i.putExtra("seek_to_ms", posMs);
+        i.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+        activity.startActivity(i);
+    }
+
     @Override
     public void onPlay() {
         dispatchAction("org.koteuka404.pymusic.PLAY");
@@ -44,5 +53,10 @@ public class MediaSessionCallback extends MediaSession.Callback {
     @Override
     public void onSkipToPrevious() {
         dispatchAction("org.koteuka404.pymusic.PREV");
+    }
+
+    @Override
+    public void onSeekTo(long pos) {
+        dispatchSeekTo(pos);
     }
 }
