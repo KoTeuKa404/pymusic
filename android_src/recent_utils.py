@@ -2,10 +2,39 @@
 
 import os
 import json
+import threading
+import time
+
+# ``sitecustomize`` contains lightweight player fixes.  Python-for-Android does
+# not guarantee that the application directory is already on sys.path during
+# the interpreter's automatic sitecustomize lookup, so import it from a module
+# that audio_screen always loads.  The short background poll waits until
+# AudioPlayerScreen has finished being defined before applying the overrides.
+try:
+    import sitecustomize as _player_hotfix
+
+    def _install_player_hotfix_when_ready():
+        for _ in range(200):
+            try:
+                if _player_hotfix._patch_audio_screen():
+                    return
+            except Exception:
+                pass
+            time.sleep(0.05)
+
+    threading.Thread(
+        target=_install_player_hotfix_when_ready,
+        name="pymusic-player-hotfix",
+        daemon=True,
+    ).start()
+except Exception as _hotfix_error:
+    print("[HOTFIX] loader failed:", _hotfix_error)
+
 
 RECENT_PATH = "recent.json"
 FAVORITES_PATH = "favorites.json"
 MAX_RECENT = 10
+
 
 def load_recent():
     if os.path.exists(RECENT_PATH):
@@ -15,6 +44,7 @@ def load_recent():
         except Exception:
             return []
     return []
+
 
 def save_recent(recent_list):
     try:
