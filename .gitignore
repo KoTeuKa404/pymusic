@@ -1,0 +1,42 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+.buildozer
+.codex
+bin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Secrets and signing keys
+.env
+.env.*
+*.jks
+*.keystore
+keystore.properties
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Crash dumps
+*.hprof
