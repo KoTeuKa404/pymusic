@@ -1,0 +1,471 @@
+name: Apply player performance hotfix
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/apply-player-performance-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-hotfix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Patch player code
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          audio_path = Path("android_src/audio_screen.py")
+          helper_path = Path("android_src/ytdlp_helpers.py")
+          workflow_path = Path(".github/workflows/apply-player-performance-hotfix.yml")
+
+          audio = audio_path.read_text(encoding="utf-8")
+          helper = helper_path.read_text(encoding="utf-8")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly one match, got {count}")
+              return text.replace(old, new, 1)
+
+          def regex_once(text: str, pattern: str, replacement: str, label: str) -> str:
+              result, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly one match, got {count}")
+              return result
+
+          already_patched = (
+              "self._related_inflight = set()" in audio
+              and "def extract_related_videos(" in helper
+          )
+
+          if not already_patched:
+              audio = replace_once(
+                  audio,
+                  "        self._metadata_loaded_urls = set()\n",
+                  "        self._metadata_cache = {}\n"
+                  "        self._metadata_cache_max = 30\n"
+                  "        self._related_cache = {}\n"
+                  "        self._related_inflight = set()\n",
+                  "metadata cache fields",
+              )
+
+              audio = regex_once(
+                  audio,
+                  r"        def _retry_apply_to_this_widget\(_dt=None\):.*?        for _delay in \(0\.05, 0\.25, 0\.75, 1\.5, 3\.0\):",
+                  '''        def _retry_apply_to_this_widget(_dt=None):
+            # Do not decode the same image repeatedly on Kivy's UI thread.
+            try:
+                if getattr(img_widget, "texture", None) is not None:
+                    return
+                _apply_file_to_widget(img_widget)
+            except Exception:
+                pass
+
+        for _delay in (0.08, 0.45):''',
+                  "thumbnail retry throttling",
+              )
+
+              audio = replace_once(
+                  audio,
+                  '''                            if getattr(w, "_pymusic_expected_thumb_path", None) != p:
+                                return
+                            setter = getattr(w, "set_local_file", None)
+''',
+                  '''                            if getattr(w, "_pymusic_expected_thumb_path", None) != p:
+                                return
+                            if getattr(w, "texture", None) is not None:
+                                return
+                            setter = getattr(w, "set_local_file", None)
+''',
+                  "delayed thumbnail reload guard",
+              )
+
+              audio = regex_once(
+                  audio,
+                  r"    def toggle_playlist_collapsed\(self\):.*?(?=    def _set_collapsible_header\()",
+                  '''    def _update_playlist_visibility(self) -> bool:
+        """Update only section geometry. Return True when rows must be built."""
+        lst = self.ids.get("playlist_list")
+        scroll = self.ids.get("playlist_scroll")
+        header = self.ids.get("playlist_header")
+        header_row = self.ids.get("playlist_header_row")
+        toggle_btn = self.ids.get("playlist_toggle_btn")
+        visible = bool(self.playlist and self.playlist.tracks)
+        collapsed = bool(getattr(self, "_playlist_collapsed", False))
+        title = self.playlist.name or "Черга"
+        self._set_collapsible_header(
+            header_row, header, toggle_btn, visible, title, collapsed
+        )
+        if scroll is not None:
+            expanded = bool(visible and not collapsed)
+            scroll.height = dp(240) if expanded else 0
+            scroll.opacity = 1 if expanded else 0
+            scroll.disabled = not expanded
+        return bool(
+            visible
+            and not collapsed
+            and lst is not None
+            and not list(getattr(lst, "children", []) or [])
+        )
+
+    def _update_similar_visibility(self) -> bool:
+        """Update only section geometry. Return True when rows must be built."""
+        lst = self.ids.get("similar_list")
+        scroll = self.ids.get("similar_scroll")
+        header = self.ids.get("similar_header")
+        header_row = self.ids.get("similar_header_row")
+        toggle_btn = self.ids.get("similar_toggle_btn")
+        visible = bool(self._related_items)
+        collapsed = bool(getattr(self, "_similar_collapsed", False))
+        self._set_collapsible_header(
+            header_row, header, toggle_btn, visible, "Схожі відео", collapsed
+        )
+        if scroll is not None:
+            expanded = bool(visible and not collapsed)
+            scroll.height = dp(220) if expanded else 0
+            scroll.opacity = 1 if expanded else 0
+            scroll.disabled = not expanded
+        return bool(
+            visible
+            and not collapsed
+            and lst is not None
+            and not list(getattr(lst, "children", []) or [])
+        )
+
+    def toggle_playlist_collapsed(self):
+        self._playlist_collapsed = not bool(
+            getattr(self, "_playlist_collapsed", False)
+        )
+        if self._update_playlist_visibility():
+            Clock.schedule_once(lambda dt: self._render_playlist_ui(force=True), 0)
+
+    def toggle_similar_collapsed(self):
+        self._similar_collapsed = not bool(
+            getattr(self, "_similar_collapsed", False)
+        )
+        if self._update_similar_visibility():
+            Clock.schedule_once(lambda dt: self._render_similar_ui(force=True), 0)
+
+''',
+                  "instant section collapse",
+              )
+
+              audio = audio.replace("            chunk_size = 10\n", "            chunk_size = 4\n", 1)
+              audio = audio.replace("            chunk_size = 6\n", "            chunk_size = 4\n", 1)
+
+              audio = regex_once(
+                  audio,
+                  r"    def _ensure_metadata_async\(self, video_url: str\):.*?(?=    def _apply_info_metadata\()",
+                  '''    def _cache_metadata_info(self, video_url: str, info: dict):
+        if not video_url or not isinstance(info, dict):
+            return
+        try:
+            self._metadata_cache[video_url] = dict(info)
+            while len(self._metadata_cache) > int(self._metadata_cache_max or 30):
+                oldest = next(iter(self._metadata_cache))
+                self._metadata_cache.pop(oldest, None)
+        except Exception:
+            pass
+
+    def _store_related_for_url(self, video_url: str, items):
+        if not video_url:
+            return
+        raw_items = list(items or [])
+        if raw_items:
+            try:
+                self._related_cache[video_url] = raw_items
+                while len(self._related_cache) > 30:
+                    oldest = next(iter(self._related_cache))
+                    self._related_cache.pop(oldest, None)
+            except Exception:
+                pass
+
+        def _apply(_dt):
+            if video_url != self._last_video_url:
+                return
+            self._related_items = self._normalize_related(raw_items)
+            self._render_similar_ui(force=True)
+
+        Clock.schedule_once(_apply, 0)
+
+    def _ensure_related_async(
+        self,
+        video_url: str,
+        title: str = "",
+        channel: str = "",
+    ):
+        if not video_url:
+            return
+        cached = self._related_cache.get(video_url)
+        if cached:
+            self._store_related_for_url(video_url, cached)
+            return
+        if video_url in self._related_inflight:
+            return
+
+        query_title = str(title or self._title or "").strip()
+        query_channel = str(channel or self._channel or "").strip()
+        self._related_inflight.add(video_url)
+
+        def _job():
+            try:
+                items = ydlh.extract_related_videos(
+                    video_url,
+                    title=query_title,
+                    channel=query_channel,
+                    limit=12,
+                )
+                if items:
+                    self._store_related_for_url(video_url, items)
+                elif video_url == self._last_video_url:
+                    Clock.schedule_once(lambda dt: self._render_similar_ui(force=True), 0)
+            except Exception as exc:
+                try:
+                    ma.log(f"[SIMILAR] extraction failed: {exc}")
+                except Exception:
+                    pass
+            finally:
+                self._related_inflight.discard(video_url)
+
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _ensure_metadata_async(self, video_url: str):
+        if not video_url:
+            return
+        cached = self._metadata_cache.get(video_url)
+        if cached:
+            self._apply_info_metadata(dict(cached))
+            if not (cached.get("related_videos") or []):
+                self._ensure_related_async(video_url, self._title, self._channel)
+            return
+        if self._meta_inflight and self._meta_last_url == video_url:
+            return
+        self._meta_inflight = True
+        self._meta_last_url = video_url
+
+        def _job():
+            try:
+                info = ydlh.extract_audio_info(video_url)
+                if video_url != self._last_video_url:
+                    return
+                self._cache_metadata_info(video_url, info)
+                self._apply_info_metadata(info)
+                if not (info.get("related_videos") or []):
+                    self._ensure_related_async(video_url, self._title, self._channel)
+            except Exception as exc:
+                try:
+                    ma.log(f"[META] extraction failed: {exc}")
+                except Exception:
+                    pass
+            finally:
+                self._meta_inflight = False
+
+        threading.Thread(target=_job, daemon=True).start()
+
+''',
+                  "metadata and related cache",
+              )
+
+              audio = replace_once(
+                  audio,
+                  '''        related = info.get("related_videos") or []
+        if related:
+            self._related_items = self._normalize_related(related)
+            Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
+''',
+                  '''        related = info.get("related_videos") or []
+        if related:
+            self._store_related_for_url(self._last_video_url, related)
+        else:
+            self._ensure_related_async(
+                self._last_video_url,
+                title or self._title,
+                channel or self._channel,
+            )
+''',
+                  "metadata related handling",
+              )
+
+              audio = replace_once(
+                  audio,
+                  '''            related = info.get("related_videos") or []
+            self._related_items = self._normalize_related(related)
+            Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
+''',
+                  '''            related = info.get("related_videos") or []
+            if related:
+                self._store_related_for_url(video_url, related)
+            else:
+                self._ensure_related_async(video_url, self._title, self._channel)
+''',
+                  "stream extraction related handling",
+              )
+
+              audio = replace_once(
+                  audio,
+                  "            self._metadata_loaded_urls.add(video_url)\n",
+                  "            self._cache_metadata_info(video_url, info)\n",
+                  "stream metadata cache write",
+              )
+
+              audio = replace_once(
+                  audio,
+                  '''        self._ensure_metadata_async(video_url)
+
+    def play_playlist(
+''',
+                  '''        # Fresh extraction already loads metadata. Starting another
+        # yt-dlp extraction here doubled CPU/network work and made the UI stutter.
+
+    def play_playlist(
+''',
+                  "remove duplicate fresh metadata extraction",
+              )
+
+              insert_marker = "\ndef _pick_yt3_avatar_from_text(text: str) -> str:\n"
+              related_helpers = r'''
+def _extract_related_from_search(
+    video_url: str,
+    title: str = "",
+    channel: str = "",
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """Fast fallback based on the existing YouTube search parser."""
+    try:
+        from youtube_search import fetch_youtube_results
+
+        current_id = _extract_video_id_from_url(video_url)
+        clean_title = re.sub(r"[^\w\s-]+", " ", str(title or ""), flags=re.UNICODE)
+        clean_channel = re.sub(r"[^\w\s-]+", " ", str(channel or ""), flags=re.UNICODE)
+        clean_title = re.sub(r"\s+", " ", clean_title).strip()
+        clean_channel = re.sub(r"\s+", " ", clean_channel).strip()
+
+        queries = []
+        if clean_title and clean_channel:
+            queries.append(f"{clean_title} {clean_channel}")
+        if clean_title:
+            queries.append(clean_title)
+        if clean_channel:
+            queries.append(clean_channel)
+
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for query in queries:
+            videos, _playlists, _continuation, _cfg = fetch_youtube_results(query)
+            for entry in videos or []:
+                if not isinstance(entry, (tuple, list)) or not entry:
+                    continue
+                url = str(entry[0] or "")
+                video_id = _extract_video_id_from_url(url)
+                if not video_id or video_id == current_id or video_id in seen:
+                    continue
+                seen.add(video_id)
+                out.append({
+                    "id": video_id,
+                    "url": url or f"https://www.youtube.com/watch?v={video_id}",
+                    "title": str(entry[1] or "") if len(entry) > 1 else "",
+                    "channel": str(entry[2] or "") if len(entry) > 2 else "",
+                    "thumbnail": (
+                        str(entry[3] or "")
+                        if len(entry) > 3
+                        else f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+                    ),
+                    "duration": str(entry[4] or "") if len(entry) > 4 else "",
+                })
+                if len(out) >= int(limit or 12):
+                    return out
+            if out:
+                break
+        return out[: int(limit or 12)]
+    except Exception as exc:
+        try:
+            print("[RELATED] search fallback failed:", exc)
+        except Exception:
+            pass
+        return []
+
+
+def extract_related_videos(
+    video_url: str,
+    *,
+    title: str = "",
+    channel: str = "",
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """Load recommendations independently so audio startup is never blocked."""
+    results = _extract_related_from_search(
+        video_url,
+        title=title,
+        channel=channel,
+        limit=limit,
+    )
+    if results:
+        return results[: int(limit or 12)]
+    return _extract_related_from_watch_page(
+        video_url,
+        _ANDROID_WEB_UA,
+        limit=limit,
+    )[: int(limit or 12)]
+
+'''
+              if insert_marker not in helper:
+                  raise RuntimeError("related helper insertion marker not found")
+              helper = helper.replace(insert_marker, related_helpers + insert_marker, 1)
+
+              helper = replace_once(
+                  helper,
+                  '''    related_videos = info.get("related_videos") or []
+    if not related_videos:
+        related_videos = _extract_related_from_watch_page(
+            str(video_url or ""),
+            _ANDROID_WEB_UA,
+            limit=12,
+        )
+''',
+                  '''    # Keep stream extraction fast. Slow recommendation fallbacks run
+    # independently through extract_related_videos().
+    related_videos = info.get("related_videos") or []
+''',
+                  "decouple recommendations from audio extraction",
+              )
+
+              audio_path.write_text(audio, encoding="utf-8")
+              helper_path.write_text(helper, encoding="utf-8")
+
+          if workflow_path.exists():
+              workflow_path.unlink()
+          PY
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile \
+            android_src/audio_screen.py \
+            android_src/ytdlp_helpers.py \
+            android_src/youtube_search.py
+
+      - name: Commit hotfix to master
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android_src/audio_screen.py android_src/ytdlp_helpers.py .github/workflows/apply-player-performance-hotfix.yml
+          if git diff --cached --quiet; then
+            echo "Hotfix already applied"
+            exit 0
+          fi
+          git commit -m "Fix player UI lag and restore related videos"
+          git push origin HEAD:master
