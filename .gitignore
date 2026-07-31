@@ -8,7 +8,7 @@ captures/
 .buildozer
 .codex
 bin/
-
+.android
 # IDE
 .idea/
 *.iml
