@@ -5,18 +5,27 @@ import json
 import threading
 import time
 
-# ``sitecustomize`` contains lightweight player fixes.  Python-for-Android does
-# not guarantee that the application directory is already on sys.path during
-# the interpreter's automatic sitecustomize lookup, so import it from a module
-# that audio_screen always loads.  The short background poll waits until
-# AudioPlayerScreen has finished being defined before applying the overrides.
+# ``sitecustomize`` contains the main player fixes. Python-for-Android does not
+# guarantee that the application directory is already on sys.path during the
+# interpreter's automatic sitecustomize lookup, so import the runtime patches
+# from a module that audio_screen always loads. The short background poll waits
+# until AudioPlayerScreen has finished being defined before applying them.
 try:
     import sitecustomize as _player_hotfix
+    import playlist_scroll_fix as _playlist_scroll_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
             try:
-                if _player_hotfix._patch_audio_screen():
+                player_ready = bool(
+                    _player_hotfix._patch_audio_screen()
+                )
+                scroll_ready = False
+                if player_ready:
+                    scroll_ready = bool(
+                        _playlist_scroll_fix._patch_playlist_scroll()
+                    )
+                if player_ready and scroll_ready:
                     return
             except Exception:
                 pass
