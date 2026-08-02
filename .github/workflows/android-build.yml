@@ -1,0 +1,93 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "android_src/**"
+      - "java_src/**"
+      - "buildozer.spec"
+      - ".github/workflows/android-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake build-essential ccache cmake gettext git libffi-dev libltdl-dev libncurses5-dev libncursesw5-dev libssl-dev libtool ninja-build patch pkg-config unzip zip zlib1g-dev
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip wheel virtualenv
+          python -m pip install "setuptools<72" "Cython<3" "buildozer==1.5.0"
+
+      - name: Cache build files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            .buildozer/android/platform
+          key: pymusic-android-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: pymusic-android-${{ runner.os }}-
+
+      - name: Build debug APK
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+        run: |
+          sed -i 's/-Xmx6144m/-Xmx4096m/g' buildozer.spec
+          buildozer -v android debug 2>&1 | tee buildozer-build.log
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          APK_PATH="$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK_PATH"
+          cp "$APK_PATH" "dist/PyMusic-debug-${GITHUB_SHA::7}.apk"
+          sha256sum dist/*.apk > dist/PyMusic-debug.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyMusic-debug-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyMusic-build-log-${{ github.sha }}
+          path: buildozer-build.log
+          if-no-files-found: ignore
+          retention-days: 7
