@@ -16,6 +16,7 @@ try:
     import resume_ui_fix as _resume_ui_fix
     import runtime_stability_fix as _runtime_stability_fix
     import scroll_bounds_fix as _scroll_bounds_fix
+    import player_polish_fix as _player_polish_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -28,6 +29,7 @@ try:
                 resume_ready = False
                 stability_ready = False
                 bounds_ready = False
+                polish_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
@@ -61,6 +63,18 @@ try:
                     and resume_ready
                     and stability_ready
                     and bounds_ready
+                ):
+                    polish_ready = bool(
+                        _player_polish_fix._patch_player_polish()
+                    )
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and resume_ready
+                    and stability_ready
+                    and bounds_ready
+                    and polish_ready
                 ):
                     return
             except Exception:
