@@ -15,6 +15,7 @@ try:
     import video_sync_fix as _video_sync_fix
     import resume_ui_fix as _resume_ui_fix
     import runtime_stability_fix as _runtime_stability_fix
+    import scroll_bounds_fix as _scroll_bounds_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -26,6 +27,7 @@ try:
                 video_ready = False
                 resume_ready = False
                 stability_ready = False
+                bounds_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
@@ -38,8 +40,6 @@ try:
                     resume_ready = bool(
                         _resume_ui_fix._patch_resume_ui()
                     )
-                # This final layer moves AV checks off Kivy Clock and applies
-                # the compact title/views geometry after every UI refresh.
                 if player_ready and scroll_ready and video_ready and resume_ready:
                     stability_ready = bool(
                         _runtime_stability_fix._patch_runtime_stability()
@@ -50,6 +50,17 @@ try:
                     and video_ready
                     and resume_ready
                     and stability_ready
+                ):
+                    bounds_ready = bool(
+                        _scroll_bounds_fix._patch_scroll_bounds()
+                    )
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and resume_ready
+                    and stability_ready
+                    and bounds_ready
                 ):
                     return
             except Exception:
