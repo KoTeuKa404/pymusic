@@ -1,19 +1,9 @@
-"""Smooth playlist scrolling and compact title layout for the Android player.
-
-The playlist lives inside the main details ScrollView. Nested kinetic
-ScrollViews fight over the same drag gesture on Android, so this patch turns
-the inner playlist viewport into a non-scrolling content container and lets
-the outer ScrollView handle the movement. Playlist rows stay clickable and
-are still rendered in small chunks.
-
-It also removes the fixed empty space below short titles: the title viewport
-uses one-line height for short text and grows up to two lines only when needed.
-"""
-
+"""Android playlist/title hotfix v7."""
 from __future__ import annotations
 
 import sys
 import threading
+import types
 
 _PATCHED = False
 _PATCH_LOCK = threading.RLock()
@@ -21,29 +11,25 @@ _PATCH_LOCK = threading.RLock()
 
 def _patch_playlist_scroll() -> bool:
     global _PATCHED
-
     with _PATCH_LOCK:
         if _PATCHED:
             return True
-
         module = sys.modules.get("audio_screen")
         if module is None:
             return False
-
         player_cls = getattr(module, "AudioPlayerScreen", None)
-        if player_cls is None:
+        playlist_cls = getattr(module, "Playlist", None)
+        if player_cls is None or playlist_cls is None:
             return False
         if not getattr(player_cls, "_pymusic_hotfix_v4", False):
-            # Apply only after sitecustomize has installed the main player fix.
             return False
-        if getattr(player_cls, "_pymusic_playlist_scroll_v6", False):
+        if getattr(player_cls, "_pymusic_playlist_scroll_v7", False):
             _PATCHED = True
             return True
 
-        Clock = module.Clock
-        dp = module.dp
+        Clock, dp = module.Clock, module.dp
 
-        def stop_effect(scroll) -> None:
+        def stop(scroll):
             try:
                 effect = getattr(scroll, "effect_y", None)
                 if effect is not None:
@@ -55,310 +41,347 @@ def _patch_playlist_scroll() -> bool:
                         effect.is_manual = False
                     except Exception:
                         pass
+                scroll.scroll_y = max(0.0, min(1.0, float(scroll.scroll_y)))
             except Exception:
                 pass
 
-        def bind_compact_title(self) -> None:
-            """Shrink the title area to one line unless more height is needed."""
+        def outer_ready(self, top=False):
             try:
-                title_scroll = self.ids.get("title_scroll")
-                title_label = self.ids.get("audio_title")
-                if title_scroll is None or title_label is None:
+                outer = self.ids.get("player_details_scroll")
+                if outer is None:
+                    return
+                outer.do_scroll_x = False
+                outer.do_scroll_y = True
+                try:
+                    outer.always_overscroll = False
+                except Exception:
+                    pass
+                if top:
+                    outer.scroll_y = 1.0
+                stop(outer)
+            except Exception:
+                pass
+
+        def bind_title(self):
+            try:
+                view = self.ids.get("title_scroll")
+                label = self.ids.get("audio_title")
+                if view is None or label is None:
                     return
 
-                def update_title_height(*_args):
+                def apply(_dt=0):
                     try:
-                        texture_h = float(
-                            (getattr(title_label, "texture_size", (0, 0)) or (0, 0))[1]
-                            or 0
-                        )
-                        one_line = dp(26)
-                        max_height = dp(52)
-                        wanted = max(one_line, min(max_height, texture_h or one_line))
-                        title_scroll.height = wanted
-                        title_scroll.do_scroll_x = False
-                        title_scroll.do_scroll_y = texture_h > wanted + dp(1)
+                        width = max(dp(1), float(view.width or 0))
+                        target_size = (width, None)
+                        if tuple(label.text_size) != target_size:
+                            label.text_size = target_size
+                        text = str(label.text or "").strip()
+                        texture_h = float((label.texture_size or (0, 0))[1] or 0)
+                        if text:
+                            content_h = max(dp(27), texture_h)
+                            view_h = min(dp(54), content_h)
+                        else:
+                            content_h = 0
+                            view_h = 0
+                        view.height = view_h
+                        label.height = max(content_h, view_h)
+                        view.do_scroll_x = False
+                        view.do_scroll_y = content_h > view_h + dp(1)
+                        view.scroll_y = 1.0
                         try:
-                            title_scroll.bar_width = 0
+                            view.always_overscroll = False
+                            view.bar_width = 0
                         except Exception:
                             pass
-                        if not title_scroll.do_scroll_y:
-                            try:
-                                title_scroll.scroll_y = 1
-                            except Exception:
-                                pass
-                            stop_effect(title_scroll)
+                        stop(view)
+                        Clock.schedule_once(lambda _x: outer_ready(self), 0)
+                    except Exception as exc:
+                        print("[TITLE] layout failed:", exc)
+
+                def queue(*_args):
+                    try:
+                        ev = getattr(self, "_pymusic_title_ev", None)
+                        if ev is not None:
+                            ev.cancel()
                     except Exception:
                         pass
+                    self._pymusic_title_ev = Clock.schedule_once(apply, 0)
 
-                if not getattr(title_scroll, "_pymusic_compact_title_bound", False):
-                    title_label.bind(texture_size=update_title_height)
-                    title_label.bind(width=update_title_height)
-                    title_scroll.bind(width=update_title_height)
-                    title_scroll._pymusic_compact_title_bound = True
-
-                update_title_height()
-                Clock.schedule_once(lambda _dt: update_title_height(), 0)
-                Clock.schedule_once(lambda _dt: update_title_height(), 0.08)
+                if not getattr(view, "_pymusic_title_v7", False):
+                    label.bind(text=queue, texture_size=queue)
+                    view.bind(width=queue)
+                    view._pymusic_title_v7 = True
+                queue()
+                Clock.schedule_once(apply, 0.06)
             except Exception as exc:
-                print("[TITLE] compact height binding failed:", exc)
+                print("[TITLE] bind failed:", exc)
 
-        def playlist_signature(self):
+        def release_outer(self, *_args):
+            Clock.schedule_once(lambda _dt: outer_ready(self), 0.01)
+
+        def bind_guard(self):
+            try:
+                inner = self.ids.get("playlist_scroll")
+                outer = self.ids.get("player_details_scroll")
+                if inner is None or outer is None:
+                    return
+                if getattr(inner, "_pymusic_guard_v7", False):
+                    return
+                old_down, old_up = outer.on_touch_down, outer.on_touch_up
+
+                def on_down(widget, touch):
+                    try:
+                        expanded = (
+                            not bool(getattr(self, "_playlist_collapsed", False))
+                            and inner.height > 0 and inner.opacity > 0
+                        )
+                        if expanded and inner.collide_point(*touch.pos):
+                            widget.do_scroll_y = False
+                            stop(widget)
+                    except Exception:
+                        pass
+                    return old_down(touch)
+
+                def on_up(widget, touch):
+                    try:
+                        return old_up(touch)
+                    finally:
+                        release_outer(self)
+
+                outer.on_touch_down = types.MethodType(on_down, outer)
+                outer.on_touch_up = types.MethodType(on_up, outer)
+                try:
+                    inner.bind(
+                        on_scroll_start=lambda *_a: setattr(outer, "do_scroll_y", False),
+                        on_scroll_stop=lambda *_a: release_outer(self),
+                    )
+                except Exception:
+                    pass
+                inner._pymusic_guard_v7 = True
+            except Exception as exc:
+                print("[PLAYLIST] guard failed:", exc)
+
+        def geometry(self, expanded=None):
+            try:
+                inner = self.ids.get("playlist_scroll")
+                listing = self.ids.get("playlist_list")
+                if inner is None or listing is None:
+                    return
+                visible = bool(self.playlist and self.playlist.tracks)
+                collapsed = bool(getattr(self, "_playlist_collapsed", False))
+                if expanded is None:
+                    expanded = visible and not collapsed
+                try:
+                    inner.disabled = False
+                    inner.always_overscroll = False
+                except Exception:
+                    pass
+                inner.do_scroll_x = False
+                if expanded:
+                    content_h = float(getattr(listing, "minimum_height", 0) or 0)
+                    view_h = min(dp(240), max(dp(82), content_h))
+                    inner.height = view_h
+                    inner.opacity = 1
+                    inner.do_scroll_y = content_h > view_h + dp(1)
+                    inner.scroll_y = max(0.0, min(1.0, float(
+                        getattr(self, "_pymusic_playlist_y", inner.scroll_y)
+                    )))
+                else:
+                    try:
+                        self._pymusic_playlist_y = float(inner.scroll_y)
+                    except Exception:
+                        self._pymusic_playlist_y = 1.0
+                    inner.height = 0
+                    inner.opacity = 0
+                    inner.do_scroll_y = False
+                stop(inner)
+                bind_guard(self)
+                outer_ready(self)
+            except Exception as exc:
+                print("[PLAYLIST] geometry failed:", exc)
+
+        def signature(self):
             try:
                 return tuple(
-                    (
-                        str(item.get("url") or ""),
-                        str(item.get("video_id") or ""),
-                        str(item.get("thumb") or ""),
-                        str(item.get("duration") or ""),
-                        str(item.get("title") or ""),
-                        str(item.get("channel") or ""),
-                    )
-                    for item in (
-                        self.playlist.tracks if self.playlist else []
-                    )
+                    (str(x.get("url") or ""), str(x.get("video_id") or ""),
+                     str(x.get("thumb") or ""), str(x.get("duration") or ""),
+                     str(x.get("title") or ""), str(x.get("channel") or ""))
+                    for x in (self.playlist.tracks if self.playlist else [])
                 )
             except Exception:
                 return None
 
-        def sync_playlist_height(self, expanded: bool | None = None) -> None:
-            """Use one ScrollView only: the outer details view owns scrolling."""
-            try:
-                scroll = self.ids.get("playlist_scroll")
-                listing = self.ids.get("playlist_list")
-                if scroll is None or listing is None:
-                    return
-
-                visible = bool(self.playlist and self.playlist.tracks)
-                collapsed = bool(
-                    getattr(self, "_playlist_collapsed", False)
-                )
-                if expanded is None:
-                    expanded = bool(visible and not collapsed)
-
-                stop_effect(scroll)
-                try:
-                    scroll.disabled = False
-                except Exception:
-                    pass
-
-                scroll.do_scroll_x = False
-                scroll.do_scroll_y = False
-                try:
-                    scroll.bar_width = 0
-                except Exception:
-                    pass
-                try:
-                    scroll.scroll_y = 1
-                except Exception:
-                    pass
-
-                if expanded:
-                    content_height = float(
-                        getattr(listing, "minimum_height", 0) or 0
-                    )
-                    scroll.height = max(dp(1), content_height)
-                    scroll.opacity = 1
-                else:
-                    scroll.height = 0
-                    scroll.opacity = 0
-            except Exception as exc:
-                print("[PLAYLIST] single-scroll geometry failed:", exc)
-
-        def bind_playlist_height(self) -> None:
-            try:
-                listing = self.ids.get("playlist_list")
-                scroll = self.ids.get("playlist_scroll")
-                if listing is None or scroll is None:
-                    return
-                if getattr(listing, "_pymusic_height_bound_v6", False):
-                    return
-
-                def on_minimum_height(*_args):
-                    Clock.schedule_once(
-                        lambda _dt: sync_playlist_height(self), 0
-                    )
-
-                listing.bind(minimum_height=on_minimum_height)
-                listing._pymusic_height_bound_v6 = True
-            except Exception as exc:
-                print("[PLAYLIST] height binding failed:", exc)
-
-        def update_header(self) -> None:
+        def header(self):
             try:
                 visible = bool(self.playlist and self.playlist.tracks)
-                collapsed = bool(
-                    getattr(self, "_playlist_collapsed", False)
-                )
+                collapsed = bool(getattr(self, "_playlist_collapsed", False))
                 title = self.playlist.name or "Черга"
-                start, end = getattr(
-                    self, "_hotfix_playlist_window", (0, 0)
-                )
+                start, end = getattr(self, "_hotfix_playlist_window", (0, 0))
                 total = len(self.playlist.tracks) if visible else 0
-                if total > 72 and end > start:
+                if total > 36 and end > start:
                     title = f"{title} · {start + 1}–{end} / {total}"
-
                 self._set_collapsible_header(
                     self.ids.get("playlist_header_row"),
                     self.ids.get("playlist_header"),
                     self.ids.get("playlist_toggle_btn"),
-                    visible,
-                    title,
-                    collapsed,
+                    visible, title, collapsed,
                 )
-                bind_playlist_height(self)
-                sync_playlist_height(
-                    self, bool(visible and not collapsed)
-                )
+                geometry(self, visible and not collapsed)
             except Exception as exc:
-                print("[PLAYLIST] header update failed:", exc)
+                print("[PLAYLIST] header failed:", exc)
 
-        def render_playlist_single_scroll(self, force=False):
+        def thumb_url(item):
+            thumb = str(item.get("thumb") or "")
+            try:
+                vid = playlist_cls._normalize_video_id(str(item.get("url") or ""))
+                vid = vid or playlist_cls._normalize_video_id(str(item.get("video_id") or ""))
+                vid = vid or playlist_cls._video_id_from_thumb_url(thumb)
+                if vid:
+                    return f"https://i.ytimg.com/vi/{vid}/default.jpg"
+            except Exception:
+                pass
+            return thumb
+
+        def queue_thumbs(self, delay=0.05):
+            try:
+                ev = getattr(self, "_pymusic_thumb_ev", None)
+                if ev is not None:
+                    ev.cancel()
+            except Exception:
+                pass
+
+            def load(_dt):
+                try:
+                    inner = self.ids.get("playlist_scroll")
+                    rows = getattr(self, "_pymusic_rows", {}) or {}
+                    order = list(getattr(self, "_pymusic_order", []) or [])
+                    loader = getattr(self, "_pymusic_thumb_loader", None)
+                    if inner is None or not rows or not order or loader is None:
+                        return
+                    first = int(round((1.0 - max(0.0, min(1.0, float(inner.scroll_y))))
+                                      * max(0, len(order) - 5)))
+                    for pos in range(max(0, first - 3), min(len(order), first + 10)):
+                        row = rows.get(order[pos])
+                        if row is None or getattr(row, "_pymusic_thumb_started", False):
+                            continue
+                        url = str(getattr(row, "_pymusic_thumb_url", "") or "")
+                        if url:
+                            row._pymusic_thumb_started = True
+                            loader(row.ids.pt_thumb, url)
+                except Exception as exc:
+                    print("[PLAYLIST] thumb failed:", exc)
+
+            self._pymusic_thumb_ev = Clock.schedule_once(load, delay)
+
+        def bind_thumb_scroll(self):
+            try:
+                inner = self.ids.get("playlist_scroll")
+                if inner is not None and not getattr(inner, "_pymusic_thumb_v7", False):
+                    inner.bind(scroll_y=lambda *_a: queue_thumbs(self, 0.08))
+                    inner._pymusic_thumb_v7 = True
+            except Exception:
+                pass
+
+        def render(self, force=False):
             listing = self.ids.get("playlist_list")
             if listing is None:
                 return None
-
-            bind_compact_title(self)
-            bind_playlist_height(self)
-
-            tracks = list(
-                self.playlist.tracks
-                if self.playlist and self.playlist.tracks
-                else []
-            )
-            signature = playlist_signature(self)
-            current_index = int(
-                getattr(self.playlist, "index", 0) or 0
-            )
-            win_start, win_end = getattr(
-                self, "_hotfix_playlist_window", (0, 0)
-            )
-            current_in_window = win_start <= current_index < win_end
-            has_rows = bool(getattr(listing, "children", None))
-
-            if (
-                not force
-                and signature == getattr(
-                    self, "_hotfix_playlist_sig", None
-                )
-                and has_rows
-                and (current_in_window or len(tracks) <= 72)
-            ):
-                update_header(self)
+            bind_title(self)
+            bind_thumb_scroll(self)
+            tracks = list(self.playlist.tracks if self.playlist and self.playlist.tracks else [])
+            sig = signature(self)
+            current = int(getattr(self.playlist, "index", 0) or 0)
+            start0, end0 = getattr(self, "_hotfix_playlist_window", (0, 0))
+            if (not force and sig == getattr(self, "_hotfix_playlist_sig", None)
+                    and listing.children and start0 <= current < end0):
+                header(self)
+                queue_thumbs(self)
                 return None
 
-            self._playlist_render_gen = int(
-                getattr(self, "_playlist_render_gen", 0)
-            ) + 1
-            render_gen = self._playlist_render_gen
+            self._playlist_render_gen = int(getattr(self, "_playlist_render_gen", 0)) + 1
+            generation = self._playlist_render_gen
             listing.clear_widgets()
-
+            self._pymusic_rows, self._pymusic_order = {}, []
             if not tracks:
                 self._hotfix_playlist_window = (0, 0)
-                self._hotfix_playlist_sig = signature
-                update_header(self)
+                self._hotfix_playlist_sig = sig
+                header(self)
                 return None
 
-            if len(tracks) <= 72:
-                start = 0
-                end = len(tracks)
+            size = 36
+            if len(tracks) <= size:
+                start, end = 0, len(tracks)
             else:
-                start = max(0, current_index - 14)
-                end = min(len(tracks), start + 54)
-                start = max(0, end - 54)
-
+                start = max(0, current - 10)
+                end = min(len(tracks), start + size)
+                start = max(0, end - size)
             self._hotfix_playlist_window = (start, end)
-            self._hotfix_playlist_sig = signature
-            update_header(self)
-
+            self._hotfix_playlist_sig = sig
+            header(self)
             if bool(getattr(self, "_playlist_collapsed", False)):
                 return None
 
             indices = list(range(start, end))
-            chunk_size = 4
+            self._pymusic_order = indices
+            self._pymusic_thumb_loader = getattr(self, "_set_playlist_thumb", None)
 
-            def add_chunk(offset):
-                if render_gen != int(
-                    getattr(self, "_playlist_render_gen", -1)
-                ):
+            def make_row(idx):
+                previous = getattr(self, "_set_playlist_thumb", None)
+                try:
+                    self._set_playlist_thumb = lambda *_a, **_k: None
+                    row = self._make_playlist_row(idx, tracks[idx])
+                finally:
+                    if previous is not None:
+                        self._set_playlist_thumb = previous
+                row._pymusic_thumb_url = thumb_url(tracks[idx])
+                row._pymusic_thumb_started = False
+                return row
+
+            def chunk(offset):
+                if generation != int(getattr(self, "_playlist_render_gen", -1)):
                     return
-
-                stop = min(len(indices), offset + chunk_size)
-                for position in range(offset, stop):
-                    actual_index = indices[position]
-                    row = self._make_playlist_row(
-                        actual_index, tracks[actual_index]
-                    )
+                stop_at = min(len(indices), offset + 2)
+                for pos in range(offset, stop_at):
+                    idx = indices[pos]
+                    row = make_row(idx)
+                    self._pymusic_rows[idx] = row
                     listing.add_widget(row)
-
-                sync_playlist_height(self, True)
-                if stop < len(indices):
-                    Clock.schedule_once(
-                        lambda _dt, next_offset=stop: add_chunk(
-                            next_offset
-                        ),
-                        0.016,
-                    )
+                geometry(self, True)
+                queue_thumbs(self, 0.02)
+                if stop_at < len(indices):
+                    Clock.schedule_once(lambda _dt: chunk(stop_at), 0.016)
                 else:
-                    Clock.schedule_once(
-                        lambda _dt: sync_playlist_height(self, True),
-                        0,
-                    )
-                    Clock.schedule_once(
-                        lambda _dt: sync_playlist_height(self, True),
-                        0.06,
-                    )
+                    Clock.schedule_once(lambda _dt: geometry(self, True), 0.05)
 
-            Clock.schedule_once(lambda _dt: add_chunk(0), 0)
+            Clock.schedule_once(lambda _dt: chunk(0), 0)
             return None
 
-        def toggle_playlist_smooth(self):
-            collapsed = not bool(
-                getattr(self, "_playlist_collapsed", False)
-            )
-            self._playlist_collapsed = collapsed
-
-            listing = self.ids.get("playlist_list")
-            if (
-                not collapsed
-                and listing is not None
-                and not bool(getattr(listing, "children", None))
-                and bool(self.playlist and self.playlist.tracks)
-            ):
-                # The playlist may have changed while collapsed. Render it on
-                # open instead of showing an empty container.
-                render_playlist_single_scroll(self, force=True)
-                return
-
-            update_header(self)
-            if not collapsed:
-                Clock.schedule_once(
-                    lambda _dt: sync_playlist_height(self, True), 0
-                )
-                Clock.schedule_once(
-                    lambda _dt: sync_playlist_height(self, True), 0.06
-                )
+        def toggle(self):
+            self._playlist_collapsed = not bool(getattr(self, "_playlist_collapsed", False))
+            header(self)
+            if not self._playlist_collapsed:
+                listing = self.ids.get("playlist_list")
+                if listing is not None and not listing.children and self.playlist.tracks:
+                    render(self, force=True)
+                else:
+                    queue_thumbs(self)
 
         old_init = player_cls.__init__
 
-        def init_with_smooth_layout(self, *args, **kwargs):
+        def init(self, *args, **kwargs):
             old_init(self, *args, **kwargs)
-            Clock.schedule_once(
-                lambda _dt: bind_compact_title(self), 0
-            )
-            Clock.schedule_once(
-                lambda _dt: bind_compact_title(self), 0.12
-            )
-            Clock.schedule_once(
-                lambda _dt: bind_playlist_height(self), 0
-            )
+            self._pymusic_rows, self._pymusic_order = {}, []
+            Clock.schedule_once(lambda _dt: bind_title(self), 0)
+            Clock.schedule_once(lambda _dt: bind_title(self), 0.1)
+            Clock.schedule_once(lambda _dt: bind_guard(self), 0)
+            Clock.schedule_once(lambda _dt: outer_ready(self, True), 0.1)
 
-        player_cls.__init__ = init_with_smooth_layout
-        player_cls.toggle_playlist_collapsed = toggle_playlist_smooth
-        player_cls._render_playlist_ui = render_playlist_single_scroll
-        player_cls._pymusic_playlist_scroll_v6 = True
+        player_cls.__init__ = init
+        player_cls.toggle_playlist_collapsed = toggle
+        player_cls._render_playlist_ui = render
+        player_cls._pymusic_playlist_scroll_v7 = True
         _PATCHED = True
-        print("[HOTFIX] single-scroll playlist + compact title v6 enabled")
+        print("[HOTFIX] stable playlist + compact title v7 enabled")
         return True
 
 
