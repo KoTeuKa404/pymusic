@@ -13,6 +13,7 @@ try:
     import sitecustomize as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
     import video_sync_fix as _video_sync_fix
+    import startup_sync_barrier as _startup_sync_barrier
     import resume_ui_fix as _resume_ui_fix
     import runtime_stability_fix as _runtime_stability_fix
     import scroll_bounds_fix as _scroll_bounds_fix
@@ -26,6 +27,7 @@ try:
                 )
                 scroll_ready = False
                 video_ready = False
+                barrier_ready = False
                 resume_ready = False
                 stability_ready = False
                 bounds_ready = False
@@ -38,11 +40,23 @@ try:
                     video_ready = bool(
                         _video_sync_fix._patch_video_sync()
                     )
+                # The startup barrier must replace video _on_prepared after the
+                # normal drift synchronizer has installed its v3 hooks.
                 if player_ready and scroll_ready and video_ready:
+                    barrier_ready = bool(
+                        _startup_sync_barrier._patch_startup_sync_barrier()
+                    )
+                if player_ready and scroll_ready and video_ready and barrier_ready:
                     resume_ready = bool(
                         _resume_ui_fix._patch_resume_ui()
                     )
-                if player_ready and scroll_ready and video_ready and resume_ready:
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and barrier_ready
+                    and resume_ready
+                ):
                     stability_ready = bool(
                         _runtime_stability_fix._patch_runtime_stability()
                     )
@@ -50,6 +64,7 @@ try:
                     player_ready
                     and scroll_ready
                     and video_ready
+                    and barrier_ready
                     and resume_ready
                     and stability_ready
                 ):
@@ -60,6 +75,7 @@ try:
                     player_ready
                     and scroll_ready
                     and video_ready
+                    and barrier_ready
                     and resume_ready
                     and stability_ready
                     and bounds_ready
@@ -71,6 +87,7 @@ try:
                     player_ready
                     and scroll_ready
                     and video_ready
+                    and barrier_ready
                     and resume_ready
                     and stability_ready
                     and bounds_ready
