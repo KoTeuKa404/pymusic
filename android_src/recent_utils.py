@@ -5,136 +5,62 @@ import json
 import threading
 import time
 
-# Runtime player patches are imported from a module that audio_screen always
-# loads. Python-for-Android does not guarantee that the app directory is ready
-# during the interpreter's automatic sitecustomize lookup, so a short poll waits
-# until AudioPlayerScreen has finished being defined before applying the fixes.
+# AudioPlayerScreen imports this module while its class is still being defined.
+# Patch modules therefore poll sys.modules until the class exists.  Each patch
+# is attempted independently: one optional failure must never prevent the final
+# video/layout/sync fix from loading.
 try:
     import sitecustomize as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
     import video_sync_fix as _video_sync_fix
-    import startup_sync_barrier as _startup_sync_barrier
     import resume_ui_fix as _resume_ui_fix
     import runtime_stability_fix as _runtime_stability_fix
     import scroll_bounds_fix as _scroll_bounds_fix
     import player_polish_fix as _player_polish_fix
-    import visual_fill_fix as _visual_fill_fix
-    import startup_dual_seek_fix as _startup_dual_seek_fix
+    import final_player_fix as _final_player_fix
+
+    _PATCHERS = (
+        ("base", _player_hotfix._patch_audio_screen),
+        ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
+        ("video-sync", _video_sync_fix._patch_video_sync),
+        ("resume", _resume_ui_fix._patch_resume_ui),
+        ("runtime", _runtime_stability_fix._patch_runtime_stability),
+        ("scroll-bounds", _scroll_bounds_fix._patch_scroll_bounds),
+        ("polish", _player_polish_fix._patch_player_polish),
+        # Always last. This patch has no dependency on the optional wrapper
+        # flags and directly owns final video bounds, metadata geometry and the
+        # manual-equivalent dual-player startup seek.
+        ("final", _final_player_fix._patch_final_player),
+    )
 
     def _install_player_hotfix_when_ready():
-        for _ in range(200):
-            try:
-                player_ready = bool(
-                    _player_hotfix._patch_audio_screen()
-                )
-                scroll_ready = False
-                video_ready = False
-                barrier_ready = False
-                resume_ready = False
-                stability_ready = False
-                bounds_ready = False
-                polish_ready = False
-                visual_ready = False
-                dual_seek_ready = False
-                if player_ready:
-                    scroll_ready = bool(
-                        _playlist_scroll_fix._patch_playlist_scroll()
-                    )
-                if player_ready and scroll_ready:
-                    video_ready = bool(
-                        _video_sync_fix._patch_video_sync()
-                    )
-                # The startup barrier must replace video _on_prepared after the
-                # normal drift synchronizer has installed its v3 hooks.
-                if player_ready and scroll_ready and video_ready:
-                    barrier_ready = bool(
-                        _startup_sync_barrier._patch_startup_sync_barrier()
-                    )
-                if player_ready and scroll_ready and video_ready and barrier_ready:
-                    resume_ready = bool(
-                        _resume_ui_fix._patch_resume_ui()
-                    )
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                ):
-                    stability_ready = bool(
-                        _runtime_stability_fix._patch_runtime_stability()
-                    )
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                    and stability_ready
-                ):
-                    bounds_ready = bool(
-                        _scroll_bounds_fix._patch_scroll_bounds()
-                    )
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                    and stability_ready
-                    and bounds_ready
-                ):
-                    polish_ready = bool(
-                        _player_polish_fix._patch_player_polish()
-                    )
-                # This must remain after the older layout wrappers. It overrides
-                # thumbnail-based SurfaceView bounds and title-height estimates.
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                    and stability_ready
-                    and bounds_ready
-                    and polish_ready
-                ):
-                    visual_ready = bool(
-                        _visual_fill_fix._patch_visual_fill()
-                    )
-                # Final sync layer: repeat the exact dual-player seek operation
-                # that the native slider/buttons use and that is known to sync
-                # perfectly on the user's phone.
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                    and stability_ready
-                    and bounds_ready
-                    and polish_ready
-                    and visual_ready
-                ):
-                    dual_seek_ready = bool(
-                        _startup_dual_seek_fix._patch_startup_dual_seek()
-                    )
-                if (
-                    player_ready
-                    and scroll_ready
-                    and video_ready
-                    and barrier_ready
-                    and resume_ready
-                    and stability_ready
-                    and bounds_ready
-                    and polish_ready
-                    and visual_ready
-                    and dual_seek_ready
-                ):
-                    return
-            except Exception:
-                pass
+        statuses = {name: False for name, _fn in _PATCHERS}
+        last_errors = {}
+
+        for attempt in range(300):
+            for name, patch_fn in _PATCHERS:
+                if statuses.get(name):
+                    continue
+                try:
+                    statuses[name] = bool(patch_fn())
+                    if statuses[name]:
+                        print(f"[HOTFIX] loader installed: {name}")
+                except Exception as exc:
+                    text = f"{type(exc).__name__}: {exc}"
+                    if last_errors.get(name) != text:
+                        last_errors[name] = text
+                        print(f"[HOTFIX] loader patch failed: {name}: {text}")
+
+            # The four patches below are the hard requirements for the current
+            # player. Optional lifecycle/scroll wrappers may continue retrying,
+            # but they can no longer block the visible fixes.
+            required = ("base", "playlist", "video-sync", "final")
+            if all(statuses.get(name, False) for name in required):
+                print(f"[HOTFIX] loader ready statuses={statuses}")
+                return
             time.sleep(0.05)
+
+        print(f"[HOTFIX] loader timeout statuses={statuses} errors={last_errors}")
 
     threading.Thread(
         target=_install_player_hotfix_when_ready,
