@@ -19,6 +19,7 @@ try:
     import scroll_bounds_fix as _scroll_bounds_fix
     import player_polish_fix as _player_polish_fix
     import visual_fill_fix as _visual_fill_fix
+    import startup_dual_seek_fix as _startup_dual_seek_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -34,6 +35,7 @@ try:
                 bounds_ready = False
                 polish_ready = False
                 visual_ready = False
+                dual_seek_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
@@ -85,9 +87,8 @@ try:
                     polish_ready = bool(
                         _player_polish_fix._patch_player_polish()
                     )
-                # This must remain the final class wrapper. It intentionally
-                # overrides the old thumbnail-based SurfaceView bounds and all
-                # earlier title-height estimates.
+                # This must remain after the older layout wrappers. It overrides
+                # thumbnail-based SurfaceView bounds and title-height estimates.
                 if (
                     player_ready
                     and scroll_ready
@@ -101,6 +102,9 @@ try:
                     visual_ready = bool(
                         _visual_fill_fix._patch_visual_fill()
                     )
+                # Final sync layer: repeat the exact dual-player seek operation
+                # that the native slider/buttons use and that is known to sync
+                # perfectly on the user's phone.
                 if (
                     player_ready
                     and scroll_ready
@@ -111,6 +115,21 @@ try:
                     and bounds_ready
                     and polish_ready
                     and visual_ready
+                ):
+                    dual_seek_ready = bool(
+                        _startup_dual_seek_fix._patch_startup_dual_seek()
+                    )
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and barrier_ready
+                    and resume_ready
+                    and stability_ready
+                    and bounds_ready
+                    and polish_ready
+                    and visual_ready
+                    and dual_seek_ready
                 ):
                     return
             except Exception:
