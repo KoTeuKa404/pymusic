@@ -18,6 +18,7 @@ try:
     import runtime_stability_fix as _runtime_stability_fix
     import scroll_bounds_fix as _scroll_bounds_fix
     import player_polish_fix as _player_polish_fix
+    import visual_fill_fix as _visual_fill_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -32,6 +33,7 @@ try:
                 stability_ready = False
                 bounds_ready = False
                 polish_ready = False
+                visual_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
@@ -83,6 +85,9 @@ try:
                     polish_ready = bool(
                         _player_polish_fix._patch_player_polish()
                     )
+                # This must remain the final class wrapper. It intentionally
+                # overrides the old thumbnail-based SurfaceView bounds and all
+                # earlier title-height estimates.
                 if (
                     player_ready
                     and scroll_ready
@@ -92,6 +97,20 @@ try:
                     and stability_ready
                     and bounds_ready
                     and polish_ready
+                ):
+                    visual_ready = bool(
+                        _visual_fill_fix._patch_visual_fill()
+                    )
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and barrier_ready
+                    and resume_ready
+                    and stability_ready
+                    and bounds_ready
+                    and polish_ready
+                    and visual_ready
                 ):
                     return
             except Exception:
