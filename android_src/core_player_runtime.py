@@ -1,7 +1,7 @@
 """Core player fix installed synchronously from search_utils.
 
 When a progressive YouTube format contains both audio and video, that single
-Android MediaPlayer becomes the audible foreground source.  The old audio-only
+Android MediaPlayer becomes the audible foreground source. The old audio-only
 MediaPlayer keeps running muted for notifications/progress/background handoff.
 This removes the impossible-to-perfectly-sync pair of independent audible/video
 clocks while the video is visible.
@@ -9,7 +9,6 @@ clocks while the video is visible.
 from __future__ import annotations
 
 import threading
-import time
 
 _INSTALLED = False
 _LOCK = threading.RLock()
@@ -57,7 +56,11 @@ def install_core_player_fix() -> bool:
                     "best[vcodec!=none][acodec!=none]"
                 ),
                 "http_headers": {
-                    "User-Agent": getattr(ydlh, "_ANDROID_YT_UA", "com.google.android.youtube/19.20.0 (Linux; U; Android 12) gzip"),
+                    "User-Agent": getattr(
+                        ydlh,
+                        "_ANDROID_YT_UA",
+                        "com.google.android.youtube/19.20.0 (Linux; U; Android 12) gzip",
+                    ),
                     "Accept-Language": "en-US,en;q=0.9",
                     "Referer": "https://www.youtube.com",
                     "Connection": "keep-alive",
@@ -114,7 +117,11 @@ def install_core_player_fix() -> bool:
                         opts["http_headers"],
                     )
                 else:
-                    headers = dict(chosen.get("http_headers") or info.get("http_headers") or opts["http_headers"])
+                    headers = dict(
+                        chosen.get("http_headers")
+                        or info.get("http_headers")
+                        or opts["http_headers"]
+                    )
 
                 _MUXED_URLS.add(url)
                 print(
@@ -131,10 +138,14 @@ def install_core_player_fix() -> bool:
                 }
             except Exception as exc:
                 print("[CORE-V2] muxed extraction fallback:", exc)
+                # Keep ytdlp_helpers.extract_video_info untouched so this call
+                # cannot recurse back into extract_muxed_video.
                 return old_safe_video(video_url)
 
+        # audio_screen calls safe_extract_video_info. Do not replace the lower
+        # level extract_video_info function because old_safe_video resolves it
+        # dynamically during a fallback.
         ydlh.safe_extract_video_info = extract_muxed_video
-        ydlh.extract_video_info = extract_muxed_video
 
         @video_player.run_on_ui_thread
         def start_muxed_master(screen, target: int) -> None:
@@ -185,8 +196,9 @@ def install_core_player_fix() -> bool:
                             return
                         if getattr(screen, "_user_paused", False) or not getattr(screen, "_playback_desired", False):
                             return
-                        # Video is the audible source. Its own audio and frames
-                        # share one MediaPlayer clock and therefore cannot drift.
+                        # The visible video and audible track now share this
+                        # one MediaPlayer clock. The old player is only a muted
+                        # progress/background handoff clock.
                         native_video.start()
                         audio.start()
                         old_set_video_mode(screen, True)
@@ -208,8 +220,6 @@ def install_core_player_fix() -> bool:
 
             is_muxed = str(vurl or "") in _MUXED_URLS
             if not is_muxed:
-                # Old silent-video path remains as fallback when YouTube does
-                # not expose a progressive format for this item.
                 def show_fallback():
                     Clock.schedule_once(lambda _dt: old_set_video_mode(self, True), 0)
                 vp.play(
@@ -230,7 +240,6 @@ def install_core_player_fix() -> bool:
                     target = 0
                 start_muxed_master(self, target)
 
-            # Keep the native player paused until both clocks have been sought.
             vp.play(
                 vurl,
                 headers=(vheaders or {}),
@@ -247,7 +256,11 @@ def install_core_player_fix() -> bool:
                 native_video = getattr(vp, "player", None) if vp is not None else None
                 audio = getattr(media, "android_player", None)
                 try:
-                    pos = int(native_video.getCurrentPosition() or 0) if native_video is not None else self._audio_pos_ms()
+                    pos = (
+                        int(native_video.getCurrentPosition() or 0)
+                        if native_video is not None
+                        else self._audio_pos_ms()
+                    )
                 except Exception:
                     pos = self._audio_pos_ms()
                 try:
@@ -259,7 +272,6 @@ def install_core_player_fix() -> bool:
                             audio.seekTo(pos)
                         audio.setVolume(1.0, 1.0)
                         if self._playback_desired and not self._user_paused:
-                            # Small delay lets Android complete the transfer seek.
                             Clock.schedule_once(lambda _dt: media._mp_start(), 0.12)
                 except Exception:
                     try:
