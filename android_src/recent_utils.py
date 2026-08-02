@@ -14,6 +14,7 @@ try:
     import playlist_scroll_fix as _playlist_scroll_fix
     import video_sync_fix as _video_sync_fix
     import resume_ui_fix as _resume_ui_fix
+    import runtime_stability_fix as _runtime_stability_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -24,22 +25,32 @@ try:
                 scroll_ready = False
                 video_ready = False
                 resume_ready = False
+                stability_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
                     )
-                # Apply video sync after the layout patch so its __init__
-                # wrapper is the final wrapper installed on AudioPlayerScreen.
                 if player_ready and scroll_ready:
                     video_ready = bool(
                         _video_sync_fix._patch_video_sync()
                     )
-                # Resume restoration needs the final playlist and video patches.
                 if player_ready and scroll_ready and video_ready:
                     resume_ready = bool(
                         _resume_ui_fix._patch_resume_ui()
                     )
+                # This final layer moves AV checks off Kivy Clock and applies
+                # the compact title/views geometry after every UI refresh.
                 if player_ready and scroll_ready and video_ready and resume_ready:
+                    stability_ready = bool(
+                        _runtime_stability_fix._patch_runtime_stability()
+                    )
+                if (
+                    player_ready
+                    and scroll_ready
+                    and video_ready
+                    and resume_ready
+                    and stability_ready
+                ):
                     return
             except Exception:
                 pass
