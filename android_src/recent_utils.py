@@ -6,30 +6,21 @@ import threading
 import time
 
 # AudioPlayerScreen imports this module while its class is still being defined.
-# Patch modules therefore poll sys.modules until the class exists.  Each patch
-# is attempted independently: one optional failure must never prevent the final
-# video/layout/sync fix from loading.
+# Patch modules therefore poll sys.modules until the class exists.  Keep the
+# patch chain intentionally small: aggressive AV synchronizers used to seek
+# both Android MediaPlayers during startup and could freeze audio and video.
 try:
     import sitecustomize as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
-    import video_sync_fix as _video_sync_fix
     import resume_ui_fix as _resume_ui_fix
-    import runtime_stability_fix as _runtime_stability_fix
-    import scroll_bounds_fix as _scroll_bounds_fix
-    import player_polish_fix as _player_polish_fix
     import final_player_fix as _final_player_fix
 
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
         ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
-        ("video-sync", _video_sync_fix._patch_video_sync),
         ("resume", _resume_ui_fix._patch_resume_ui),
-        ("runtime", _runtime_stability_fix._patch_runtime_stability),
-        ("scroll-bounds", _scroll_bounds_fix._patch_scroll_bounds),
-        ("polish", _player_polish_fix._patch_player_polish),
-        # Always last. This patch has no dependency on the optional wrapper
-        # flags and directly owns final video bounds, metadata geometry and the
-        # manual-equivalent dual-player startup seek.
+        # Always last. It owns visible geometry and explicitly forces an
+        # audio-first, non-blocking video startup without dual-player seeks.
         ("final", _final_player_fix._patch_final_player),
     )
 
@@ -51,10 +42,7 @@ try:
                         last_errors[name] = text
                         print(f"[HOTFIX] loader patch failed: {name}: {text}")
 
-            # The four patches below are the hard requirements for the current
-            # player. Optional lifecycle/scroll wrappers may continue retrying,
-            # but they can no longer block the visible fixes.
-            required = ("base", "playlist", "video-sync", "final")
+            required = ("base", "playlist", "final")
             if all(statuses.get(name, False) for name in required):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
                 return
