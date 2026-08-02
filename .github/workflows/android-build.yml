@@ -61,10 +61,20 @@ jobs:
       - name: Build debug APK
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          PYTHONUNBUFFERED: "1"
         run: |
-          set -o pipefail
           sed -i 's/-Xmx6144m/-Xmx4096m/g' buildozer.spec
-          buildozer -v android debug 2>&1 | tee buildozer-build.log
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
+
+          # Buildozer invokes sdkmanager interactively on a clean runner.
+          # Feed "yes" to every Android SDK licence prompt, while preserving
+          # Buildozer's real exit code instead of the exit code from tee/yes.
+          set +e
+          yes | buildozer -v android debug 2>&1 | tee buildozer-build.log
+          BUILD_STATUS=${PIPESTATUS[1]}
+          set -e
+          exit "$BUILD_STATUS"
 
       - name: Prepare artifact
         shell: bash
