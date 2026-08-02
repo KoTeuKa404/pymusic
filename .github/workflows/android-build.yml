@@ -55,8 +55,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             .buildozer/android/platform
-          key: pymusic-android-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: pymusic-android-${{ runner.os }}-
+          key: pymusic-android-p4a-v2024.01.21-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Build debug APK
         env:
