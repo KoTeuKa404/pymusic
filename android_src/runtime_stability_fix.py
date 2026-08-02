@@ -75,7 +75,7 @@ def _patch_runtime_stability() -> bool:
                 title_h = float((title.texture_size or (0, 0))[1] or 0)
                 if title_text:
                     # Exact texture height for one line; up to two lines for a
-                    # long title.  No artificial 27/52dp reserve remains.
+                    # long title. No artificial 27/52dp reserve remains.
                     viewport_h = max(dp(22), min(dp(50), title_h or dp(22)))
                     content_h = max(viewport_h, title_h)
                 else:
@@ -163,12 +163,14 @@ def _patch_runtime_stability() -> bool:
         def start_sync_watchdog(self) -> None:
             """Run sync decisions outside Kivy's render/scroll event loop."""
             stop_old_clock_sync(self)
-            generation = int(getattr(self, "_pymusic_sync_thread_generation", 0)) + 1
-            self._pymusic_sync_thread_generation = generation
             current = getattr(self, "_pymusic_sync_thread", None)
             if current is not None and current.is_alive():
                 return
 
+            generation = int(
+                getattr(self, "_pymusic_sync_thread_generation", 0)
+            ) + 1
+            self._pymusic_sync_thread_generation = generation
             owner_ref = weakref.ref(self)
 
             def worker() -> None:
@@ -184,7 +186,8 @@ def _patch_runtime_stability() -> bool:
                     try:
                         tick = getattr(owner, "_pymusic_video_sync_tick", None)
                         if callable(tick):
-                            tick(owner, 0)
+                            # Access through the instance returns a bound method.
+                            tick(0)
                     except Exception as exc:
                         now = time.monotonic()
                         last = float(
@@ -194,7 +197,7 @@ def _patch_runtime_stability() -> bool:
                             print("[VIDEO] independent sync watchdog failed:", exc)
                             owner._pymusic_sync_watchdog_log = now
 
-                    # 25 Hz.  Use an absolute deadline so a slow iteration does
+                    # 25 Hz. Use an absolute deadline so a slow iteration does
                     # not permanently lower the sampling rate.
                     next_tick += 0.04
                     now = time.monotonic()
