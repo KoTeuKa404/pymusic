@@ -1,9 +1,9 @@
 """Start audio and video from one first-frame barrier.
 
 A video MediaPlayer can report the requested position before that frame is
-actually visible on SurfaceView.  Seeking only the video therefore leaves the
+actually visible on SurfaceView. Seeking only the video therefore leaves the
 picture roughly one decoder buffer behind, while a manual slider seek appears
-perfect because it flushes both players.  This patch reproduces that successful
+perfect because it flushes both players. This patch reproduces that successful
 manual operation during startup:
 
 1. pause audio only when video is ready;
@@ -88,7 +88,7 @@ def _patch_startup_sync_barrier() -> bool:
 
         class AudioSeekListener(video_module.PythonJavaClass):
             __javainterfaces__ = [
-                "android.media.MediaPlayer$OnSeekCompleteListener"
+                "android/media/MediaPlayer$OnSeekCompleteListener"
             ]
             __javacontext__ = "app"
 
@@ -168,6 +168,35 @@ def _patch_startup_sync_barrier() -> bool:
             timer.daemon = True
             setattr(self, name, timer)
             timer.start()
+
+        def hold_drift_watchdog(owner) -> None:
+            if owner is None:
+                return
+            try:
+                if not bool(
+                    getattr(owner, "_pymusic_startup_barrier_active", False)
+                ):
+                    owner._pymusic_barrier_previous_scrubbing = bool(
+                        getattr(owner, "_is_scrubbing", False)
+                    )
+                owner._pymusic_startup_barrier_active = True
+                # The regular sync watchdog treats scrubbing as an intentional
+                # synchronization hold, so it cannot seek either player while
+                # the first-frame barrier owns them.
+                owner._is_scrubbing = True
+            except Exception:
+                pass
+
+        def release_drift_watchdog(owner) -> None:
+            if owner is None:
+                return
+            try:
+                owner._is_scrubbing = bool(
+                    getattr(owner, "_pymusic_barrier_previous_scrubbing", False)
+                )
+                owner._pymusic_startup_barrier_active = False
+            except Exception:
+                pass
 
         @video_module.run_on_ui_thread
         def start_video_preroll(
@@ -348,6 +377,7 @@ def _patch_startup_sync_barrier() -> bool:
                     owner._pymusic_sync_bias_ms = 25.0
             except Exception:
                 pass
+            release_drift_watchdog(owner)
 
             try:
                 video_pos = int(mp.getCurrentPosition() or 0)
@@ -374,6 +404,7 @@ def _patch_startup_sync_barrier() -> bool:
             self._pymusic_barrier_owner = bound_audio_owner(self)
 
             owner = self._pymusic_barrier_owner
+            hold_drift_watchdog(owner)
             audio_player = getattr(media, "android_player", None)
             fallback = 0
             try:
