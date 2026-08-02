@@ -25,6 +25,7 @@ def install_core_player_fix() -> bool:
             import audio_screen
             import video_player
             import ytdlp_helpers as ydlh
+            from jnius import PythonJavaClass, java_method
         except Exception as exc:
             print("[CORE-V2] import failed:", exc)
             return False
@@ -41,6 +42,21 @@ def install_core_player_fix() -> bool:
         media = audio_screen.ma
         old_safe_video = ydlh.safe_extract_video_info
         old_set_video_mode = screen_cls._set_video_mode
+
+        class _MuxedSeekCompleteListener(PythonJavaClass):
+            __javainterfaces__ = ["android/media/MediaPlayer$OnSeekCompleteListener"]
+            __javacontext__ = "app"
+
+            def __init__(self, callback):
+                super().__init__()
+                self._callback = callback
+
+            @java_method("(Landroid/media/MediaPlayer;)V")
+            def onSeekComplete(self, _mp):
+                try:
+                    self._callback()
+                except Exception as exc:
+                    print("[CORE-V2] seek callback failed:", exc)
 
         def extract_muxed_video(video_url: str):
             """Prefer a progressive format whose one URL contains audio+video."""
@@ -158,6 +174,10 @@ def install_core_player_fix() -> bool:
                 if not getattr(screen, "_playback_desired", False) or getattr(screen, "_user_paused", False):
                     return
 
+                sync_gen = int(getattr(screen, "_pymusic_muxed_sync_gen", 0) or 0) + 1
+                screen._pymusic_muxed_sync_gen = sync_gen
+                screen._pymusic_muxed_sync_done_gen = -1
+
                 try:
                     native_video.pause()
                 except Exception:
@@ -179,34 +199,130 @@ def install_core_player_fix() -> bool:
                     except Exception:
                         pass
 
-                try:
-                    native_video.seekTo(int(target), 3)
-                except Exception:
-                    native_video.seekTo(int(target))
-                try:
-                    audio.seekTo(int(target), 3)
-                except Exception:
-                    audio.seekTo(int(target))
-
                 screen._pymusic_muxed_video_master = True
 
-                def release(_dt=0):
+                @video_player.run_on_ui_thread
+                def release(reason: str) -> None:
                     try:
+                        if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                            return
+                        if int(getattr(screen, "_pymusic_muxed_sync_done_gen", -1)) == sync_gen:
+                            return
+                        screen._pymusic_muxed_sync_done_gen = sync_gen
+
+                        try:
+                            current_listener = getattr(screen, "_pymusic_muxed_seek_listener", None)
+                            if current_listener is not None:
+                                native_video.setOnSeekCompleteListener(None)
+                        except Exception:
+                            pass
+                        screen._pymusic_muxed_seek_listener = None
+
                         if not getattr(screen, "_pymusic_muxed_video_master", False):
                             return
                         if getattr(screen, "_user_paused", False) or not getattr(screen, "_playback_desired", False):
                             return
-                        # The visible video and audible track now share this
-                        # one MediaPlayer clock. The old player is only a muted
-                        # progress/background handoff clock.
+
+                        try:
+                            video_pos = int(native_video.getCurrentPosition() or target)
+                        except Exception:
+                            video_pos = int(target)
+                        try:
+                            audio_pos = int(audio.getCurrentPosition() or 0)
+                        except Exception:
+                            audio_pos = 0
+
+                        # The audio-only player is muted while video is visible,
+                        # but keep its clock close because the rest of the app
+                        # still reads it for progress/notification/background state.
+                        if abs(audio_pos - video_pos) > 120:
+                            try:
+                                audio.seekTo(video_pos, 3)
+                            except Exception:
+                                try:
+                                    audio.seekTo(video_pos)
+                                except Exception:
+                                    pass
+
+                        old_set_video_mode(screen, True)
                         native_video.start()
                         audio.start()
-                        old_set_video_mode(screen, True)
-                        print(f"[CORE-V2] muxed AV master started target={target}")
+                        print(
+                            "[CORE-V2] muxed AV master started "
+                            f"target={target} video={video_pos} audio={audio_pos} reason={reason}"
+                        )
+
+                        def align_shadow_clock(_dt=0):
+                            try:
+                                if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                                    return
+                                if not getattr(screen, "_pymusic_muxed_video_master", False):
+                                    return
+                                if getattr(screen, "_user_paused", False) or not getattr(screen, "_playback_desired", False):
+                                    return
+                                vpos = int(native_video.getCurrentPosition() or 0)
+                                apos = int(audio.getCurrentPosition() or 0)
+                                if abs(apos - vpos) > 220:
+                                    try:
+                                        audio.seekTo(vpos, 3)
+                                    except Exception:
+                                        audio.seekTo(vpos)
+                                    print(
+                                        "[CORE-V2] shadow audio realigned "
+                                        f"video={vpos} audio={apos}"
+                                    )
+                            except Exception as exc:
+                                print("[CORE-V2] shadow realign failed:", exc)
+
+                        Clock.schedule_once(align_shadow_clock, 0.35)
                     except Exception as exc:
                         print("[CORE-V2] master release failed:", exc)
 
-                Clock.schedule_once(release, 0.18)
+                def on_video_seek_complete() -> None:
+                    release("seek_complete")
+
+                try:
+                    listener = _MuxedSeekCompleteListener(on_video_seek_complete)
+                    screen._pymusic_muxed_seek_listener = listener
+                    native_video.setOnSeekCompleteListener(listener)
+                except Exception as exc:
+                    screen._pymusic_muxed_seek_listener = None
+                    print("[CORE-V2] seek listener install failed:", exc)
+
+                try:
+                    audio.seekTo(int(target), 3)
+                except Exception:
+                    try:
+                        audio.seekTo(int(target))
+                    except Exception:
+                        pass
+
+                try:
+                    native_video.seekTo(int(target), 3)
+                except Exception:
+                    native_video.seekTo(int(target))
+
+                # Some vendor MediaPlayer implementations fail to emit
+                # OnSeekComplete. Poll the actual position as a second signal
+                # and keep a bounded timeout so neither player can stay paused.
+                def poll_seek(attempt: int = 0):
+                    try:
+                        if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                            return
+                        if int(getattr(screen, "_pymusic_muxed_sync_done_gen", -1)) == sync_gen:
+                            return
+                        current = int(native_video.getCurrentPosition() or 0)
+                        if int(target) <= 0 or abs(current - int(target)) <= 120:
+                            release("position_ready")
+                            return
+                        if attempt >= 23:
+                            release("timeout")
+                            return
+                        Clock.schedule_once(lambda _dt: poll_seek(attempt + 1), 0.05)
+                    except Exception:
+                        release("poll_error")
+
+                Clock.schedule_once(lambda _dt: poll_seek(0), 0.08)
             except Exception as exc:
                 print("[CORE-V2] start master failed:", exc)
 
@@ -252,6 +368,23 @@ def install_core_player_fix() -> bool:
         def set_video_mode_core(self, video_on: bool):
             was_master = bool(getattr(self, "_pymusic_muxed_video_master", False))
             if not video_on and was_master:
+                self._pymusic_muxed_sync_gen = int(
+                    getattr(self, "_pymusic_muxed_sync_gen", 0) or 0
+                ) + 1
+                try:
+                    listener = getattr(self, "_pymusic_muxed_seek_listener", None)
+                    vp_for_listener = getattr(self, "_video_player", None)
+                    native_for_listener = (
+                        getattr(vp_for_listener, "player", None)
+                        if vp_for_listener is not None
+                        else None
+                    )
+                    if listener is not None and native_for_listener is not None:
+                        native_for_listener.setOnSeekCompleteListener(None)
+                except Exception:
+                    pass
+                self._pymusic_muxed_seek_listener = None
+
                 vp = getattr(self, "_video_player", None)
                 native_video = getattr(vp, "player", None) if vp is not None else None
                 audio = getattr(media, "android_player", None)
