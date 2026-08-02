@@ -1,18 +1,14 @@
-"""Direct final player fixes, independent from the older patch chain.
+"""Final non-destructive player fixes.
 
-This module intentionally applies without waiting for any previous hotfix flag.
-It fixes three device-visible issues:
-- no black frame around the thumbnail/native SurfaceView;
-- no phantom gap between title and view count;
-- initial A/V sync uses one Android UI-thread dual seek, matching the manual
-  seek operation that is known to synchronize perfectly on the target phone.
+This patch owns only visible player geometry and a safe audio-first startup.
+It deliberately never seeks the Android audio MediaPlayer while video is
+preparing.  Audio is the master stream; video starts independently and may be
+realigned later by the normal player code.
 """
 from __future__ import annotations
 
 import sys
 import threading
-import time
-import weakref
 
 _PATCHED = False
 _PATCH_LOCK = threading.RLock()
@@ -34,7 +30,7 @@ def _patch_final_player() -> bool:
         video_cls = getattr(video_module, "AndroidVideoPlayer", None)
         if screen_cls is None or video_cls is None:
             return False
-        if getattr(screen_cls, "_pymusic_final_player_v1", False):
+        if getattr(screen_cls, "_pymusic_final_player_v2", False):
             _PATCHED = True
             return True
 
@@ -44,8 +40,7 @@ def _patch_final_player() -> bool:
         media = audio_module.ma
 
         # ------------------------------------------------------------------
-        # Native video: use the entire Kivy video block, without letterbox
-        # geometry added by AndroidVideoPlayer._fit_rect_to_video().
+        # Video geometry: fill the Kivy 16:9 block without the old black frame.
         # ------------------------------------------------------------------
         def fill_entire_frame(self, left, top, width, height):
             return int(left), int(top), max(1, int(width)), max(1, int(height))
@@ -56,7 +51,7 @@ def _patch_final_player() -> bool:
         def apply_bounds_without_frame(self):
             try:
                 if self.player is not None:
-                    # SCALE_TO_FIT_WITH_CROPPING: preserve aspect ratio and fill.
+                    # Preserve aspect ratio while filling the complete viewport.
                     self.player.setVideoScalingMode(2)
             except Exception:
                 pass
@@ -97,7 +92,7 @@ def _patch_final_player() -> bool:
                     thumb.size_hint = (1, 1)
                     thumb.pos_hint = {"x": 0, "y": 0}
                     thumb.allow_stretch = True
-                    thumb.keep_ratio = True
+                    thumb.keep_ratio = False
                 except Exception:
                     pass
             request_layout(block)
@@ -145,8 +140,7 @@ def _patch_final_player() -> bool:
                 width = int(round(ww * kx))
                 height = int(round(wh * ky))
 
-                # Two physical pixels hide both Kivy rounding and SurfaceView
-                # compositor seams. Clamp so neighbouring UI is not covered.
+                # Hide one-pixel compositor seams without covering nearby UI.
                 left -= 2
                 top -= 2
                 width += 4
@@ -164,8 +158,7 @@ def _patch_final_player() -> bool:
                 print("[FINAL] video block alignment failed:", exc)
 
         # ------------------------------------------------------------------
-        # Metadata: real texture heights, no fixed 52dp title viewport and no
-        # spacing between title and views.
+        # Metadata geometry: title and views use their real texture heights.
         # ------------------------------------------------------------------
         def apply_metadata_layout(self, _dt=0) -> None:
             if bool(getattr(self, "_pymusic_final_layout_busy", False)):
@@ -253,7 +246,7 @@ def _patch_final_player() -> bool:
                 views = self.ids.get("audio_views")
                 block = self.ids.get("video_block")
                 if title_view is not None and not getattr(
-                    title_view, "_pymusic_final_bound_v1", False
+                    title_view, "_pymusic_final_bound_v2", False
                 ):
                     if title is not None:
                         title.bind(text=lambda *_a: queue_metadata_layout(self, 0.025))
@@ -262,9 +255,9 @@ def _patch_final_player() -> bool:
                         views.bind(text=lambda *_a: queue_metadata_layout(self, 0.025))
                         views.bind(texture_size=lambda *_a: queue_metadata_layout(self, 0.025))
                     title_view.bind(width=lambda *_a: queue_metadata_layout(self, 0.025))
-                    title_view._pymusic_final_bound_v1 = True
+                    title_view._pymusic_final_bound_v2 = True
                 if block is not None and not getattr(
-                    block, "_pymusic_final_bound_v1", False
+                    block, "_pymusic_final_bound_v2", False
                 ):
                     block.bind(
                         width=lambda *_a: Clock.schedule_once(
@@ -275,7 +268,7 @@ def _patch_final_player() -> bool:
                             0,
                         )
                     )
-                    block._pymusic_final_bound_v1 = True
+                    block._pymusic_final_bound_v2 = True
             except Exception as exc:
                 print("[FINAL] layout binding failed:", exc)
 
@@ -284,129 +277,37 @@ def _patch_final_player() -> bool:
             Clock.schedule_once(lambda _dt: align_video_to_block(self), 0)
 
         # ------------------------------------------------------------------
-        # Startup sync: perform the exact two-player seek in ONE Android UI
-        # turn. This clears the video decoder buffer like the working manual
-        # slider/buttons do.
+        # Playback safety: audio never waits for video and no startup code seeks
+        # the audio player.  This prevents both streams freezing during sync.
         # ------------------------------------------------------------------
-        @video_module.run_on_ui_thread
-        def native_dual_seek(self, token: int, load_gen: int, video_url: str, stage: str):
-            try:
-                if int(token) != int(getattr(self, "_pymusic_final_sync_token", -1)):
-                    return
-                if int(load_gen) != int(getattr(self, "_load_gen", -1)):
-                    return
-                if str(video_url or "") != str(getattr(self, "_last_video_url", "") or ""):
-                    return
-                if (
-                    not getattr(self, "_playback_desired", False)
-                    or getattr(self, "_user_paused", False)
-                    or getattr(self, "_app_in_background", False)
-                    or getattr(self, "_is_scrubbing", False)
-                ):
-                    return
-
-                audio_player = getattr(media, "android_player", None)
-                vp = getattr(self, "_video_player", None)
-                video_player = getattr(vp, "player", None) if vp is not None else None
-                if (
-                    audio_player is None
-                    or vp is None
-                    or video_player is None
-                    or not getattr(vp, "_prepared", False)
-                ):
-                    return
-
-                target = max(0, int(audio_player.getCurrentPosition() or 0))
-                try:
-                    params = video_player.getPlaybackParams()
-                    params.setSpeed(1.0)
-                    video_player.setPlaybackParams(params)
-                except Exception:
-                    pass
-
-                try:
-                    audio_player.seekTo(target, 3)
-                except Exception:
-                    audio_player.seekTo(target)
-                try:
-                    video_player.seekTo(target, 3)
-                except Exception:
-                    video_player.seekTo(target)
-
-                now = time.monotonic()
-                self._resume_pos_ms = target
-                self._pymusic_sync_player_id = id(video_player)
-                self._pymusic_sync_last_seek = now
-                self._pymusic_sync_settle_until = now + 0.22
-                self._pymusic_sync_outside_since = 0.0
-                self._pymusic_sync_bias_ms = 0.0
-                print(
-                    "[FINAL] native dual seek "
-                    f"stage={stage} target={target} gen={load_gen}"
-                )
-            except Exception as exc:
-                print("[FINAL] native dual seek failed:", exc)
-
-        def start_sync_worker(self, video_url: str) -> None:
-            self._pymusic_final_sync_token = int(
-                getattr(self, "_pymusic_final_sync_token", 0)
-            ) + 1
-            token = int(self._pymusic_final_sync_token)
-            load_gen = int(getattr(self, "_load_gen", 0))
-            owner_ref = weakref.ref(self)
-
-            def worker() -> None:
-                deadline = time.monotonic() + 12.0
-                while time.monotonic() < deadline:
-                    owner = owner_ref()
-                    if owner is None:
-                        return
-                    if (
-                        token != int(getattr(owner, "_pymusic_final_sync_token", -1))
-                        or load_gen != int(getattr(owner, "_load_gen", -1))
-                        or video_url != str(getattr(owner, "_last_video_url", "") or "")
-                    ):
-                        return
-                    vp = getattr(owner, "_video_player", None)
-                    if (
-                        vp is not None
-                        and getattr(vp, "player", None) is not None
-                        and getattr(vp, "_prepared", False)
-                    ):
-                        break
-                    time.sleep(0.025)
-                else:
-                    print("[FINAL] startup sync timed out")
-                    return
-
-                # First flush after preparation, then two warm-decoder flushes.
-                schedule = ((0.08, "prepared"), (0.48, "warm"), (1.05, "final"))
-                previous = 0.0
-                for delay, stage in schedule:
-                    time.sleep(max(0.0, delay - previous))
-                    previous = delay
-                    owner = owner_ref()
-                    if owner is None:
-                        return
-                    native_dual_seek(owner, token, load_gen, video_url, stage)
-
-            threading.Thread(
-                target=worker,
-                name="pymusic-final-startup-sync",
-                daemon=True,
-            ).start()
-
-        old_play_video = screen_cls._play_video_if_screen_active
+        old_auto_video = screen_cls._auto_video_for_current
+        old_synced_start = screen_cls._start_synced_audio_and_video
         old_init = screen_cls.__init__
         old_sync_loaded = screen_cls._sync_ui_loaded
         old_sync_loading = screen_cls._sync_ui_loading
         old_pre_enter = screen_cls.on_pre_enter
         old_resume = screen_cls.handle_app_resume
 
-        def play_video_final(self, vurl: str, vheaders: dict):
-            result = old_play_video(self, vurl, vheaders)
-            start_sync_worker(self, str(getattr(self, "_last_video_url", "") or ""))
-            return result
+        def auto_video_nonblocking(self, gen: int, sync_start: bool = False):
+            return old_auto_video(self, gen, sync_start=False)
+
+        def safe_synced_start(self, gen: int, vurl: str, vheaders: dict):
+            # Defensive fallback for any old caller: start audio immediately,
+            # then schedule muted video independently. Never dual-seek.
+            try:
+                playing = bool(media.android_player and media.android_player.isPlaying())
+            except Exception:
+                playing = False
+            if not playing:
+                threading.Thread(
+                    target=lambda: self._start_audio_only_after_prepared(gen),
+                    name="pymusic-audio-first-start",
+                    daemon=True,
+                ).start()
+            Clock.schedule_once(
+                lambda _dt: self._play_video_if_screen_active(vurl, vheaders or {}),
+                0,
+            )
 
         def init_final(self, *args, **kwargs):
             old_init(self, *args, **kwargs)
@@ -435,17 +336,18 @@ def _patch_final_player() -> bool:
                 Clock.schedule_once(lambda _dt: bind_layout(self), delay)
             return result
 
-        screen_cls._play_video_if_screen_active = play_video_final
+        screen_cls._auto_video_for_current = auto_video_nonblocking
+        screen_cls._start_synced_audio_and_video = safe_synced_start
         screen_cls.__init__ = init_final
         screen_cls._sync_ui_loaded = sync_loaded_final
         screen_cls._sync_ui_loading = sync_loading_final
         screen_cls.on_pre_enter = pre_enter_final
         screen_cls.handle_app_resume = resume_final
         screen_cls._align_video_to_thumb = align_video_to_block
-        screen_cls._pymusic_final_player_v1 = True
+        screen_cls._pymusic_final_player_v2 = True
 
         _PATCHED = True
-        print("[HOTFIX] direct final player fix v1 enabled")
+        print("[HOTFIX] final layout v2 enabled; destructive startup sync disabled")
         return True
 
 
