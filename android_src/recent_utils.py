@@ -13,6 +13,7 @@ try:
     import sitecustomize as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
     import video_sync_fix as _video_sync_fix
+    import resume_ui_fix as _resume_ui_fix
 
     def _install_player_hotfix_when_ready():
         for _ in range(200):
@@ -22,6 +23,7 @@ try:
                 )
                 scroll_ready = False
                 video_ready = False
+                resume_ready = False
                 if player_ready:
                     scroll_ready = bool(
                         _playlist_scroll_fix._patch_playlist_scroll()
@@ -32,7 +34,12 @@ try:
                     video_ready = bool(
                         _video_sync_fix._patch_video_sync()
                     )
+                # Resume restoration needs the final playlist and video patches.
                 if player_ready and scroll_ready and video_ready:
+                    resume_ready = bool(
+                        _resume_ui_fix._patch_resume_ui()
+                    )
+                if player_ready and scroll_ready and video_ready and resume_ready:
                     return
             except Exception:
                 pass
