@@ -1,6 +1,17 @@
 import os
 import json
 
+# main.py imports search_utils only after audio_screen.AudioPlayerScreen has
+# finished being defined.  Install the core player changes here synchronously,
+# before Builder creates the screen instance.  This avoids the old background
+# polling/monkeypatch race in recent_utils.
+try:
+    from core_player_runtime import install_core_player_fix
+    if not install_core_player_fix():
+        print("[CORE-V2] synchronous install returned false")
+except Exception as exc:
+    print("[CORE-V2] synchronous install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
