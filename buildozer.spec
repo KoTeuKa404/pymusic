@@ -24,7 +24,7 @@ android.permissions = INTERNET,WAKE_LOCK,FOREGROUND_SERVICE,MODIFY_AUDIO_SETTING
 
 android.api = 33
 android.minapi = 21
-android.ndk = 25c
+android.ndk = 25b
 android.ndk_api = 21
 android.kivy_version = 2.3.1
 
@@ -37,7 +37,8 @@ android.apptheme = @android:style/Theme.NoTitleBar
 android.add_src = java_src
 
 android.archs = arm64-v8a
-android.bootstrap = sdl2
+p4a.bootstrap = sdl2
+p4a.branch = v2024.01.21
 android.gradle_options = -Xmx6144m -XX:MaxMetaspaceSize=2048m -Dfile.encoding=UTF-8 -XX:+UseG1GC
 
 log_level = 2
