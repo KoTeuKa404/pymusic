@@ -273,11 +273,12 @@
         BoxLayout:
             id: video_block
             size_hint_y: None
-            height: dp(236)
-            padding: dp(8), dp(10), dp(8), dp(6)
+            height: self.width * 9.0 / 16.0
+            padding: 0, 0, 0, 0
+            spacing: 0
             canvas.before:
                 Color:
-                    rgba: 0, 0, 0, 1
+                    rgba: 1, 1, 1, 1
                 Rectangle:
                     pos: self.pos
                     size: self.size
@@ -290,7 +291,7 @@
                     size_hint: 1, 1
                     pos_hint: {'x': 0, 'y': 0}
                     allow_stretch: True
-                    keep_ratio: True
+                    keep_ratio: False
 
                 VideoTapArea:
                     on_release: root.toggle_video_controls()
@@ -395,15 +396,16 @@
                     orientation: 'vertical'
                     size_hint_y: None
                     height: self.minimum_height
-                    padding: dp(16), dp(8), dp(16), dp(4)
-                    spacing: dp(6)
+                    padding: dp(16), dp(4), dp(16), dp(2)
+                    spacing: 0
 
                     ScrollView:
                         id: title_scroll
                         size_hint_y: None
-                        height: dp(52)
+                        height: min(audio_title.texture_size[1], dp(50)) if audio_title.text else 0
                         do_scroll_x: False
-                        do_scroll_y: True
+                        do_scroll_y: audio_title.texture_size[1] > self.height
+                        bar_width: 0
 
                         Label:
                             id: audio_title
@@ -415,16 +417,19 @@
                             color: 0, 0, 0, 1
                             size_hint_y: None
                             height: self.texture_size[1]
+                            padding: 0, 0
 
                     Label:
                         id: audio_views
                         text: ''
                         font_size: '14sp'
                         halign: 'left'
+                        valign: 'top'
                         text_size: self.width, None
                         color: 0.35, 0.35, 0.35, 1
                         size_hint_y: None
-                        height: dp(18)
+                        height: self.texture_size[1] if self.text else 0
+                        padding: 0, 0
 
                     BoxLayout:
                         size_hint_y: None
