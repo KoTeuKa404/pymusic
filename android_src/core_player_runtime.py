@@ -1,16 +1,21 @@
-"""Install a non-blocking muxed audio/video handoff for Android playback.
+"""Install a fast non-blocking muxed audio/video handoff for Android playback.
 
 Audio-only playback remains audible while progressive video prepares muted.
-The app switches sound to the muxed video only after both clocks are aligned,
-so a failed synchronization can never remove the thumbnail or silence playback.
+The next progressive video is prefetched in the background, and sound switches
+to it after one bounded alignment step. A failed handoff can never silence
+playback or hide the thumbnail.
 """
 from __future__ import annotations
 
 import threading
+import time
 
 _INSTALLED = False
 _LOCK = threading.RLock()
 _MUXED_URLS: set[str] = set()
+_MUXED_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_MUXED_PREFETCH_INFLIGHT: set[str] = set()
+_MUXED_CACHE_TTL_SEC = 15 * 60
 
 
 def install_core_player_fix() -> bool:
@@ -24,14 +29,14 @@ def install_core_player_fix() -> bool:
             import video_player
             import ytdlp_helpers as ydlh
         except Exception as exc:
-            print("[CORE-V3] import failed:", exc)
+            print("[CORE-V4] import failed:", exc)
             return False
 
         screen_cls = getattr(audio_screen, "AudioPlayerScreen", None)
         video_cls = getattr(video_player, "AndroidVideoPlayer", None)
         if screen_cls is None or video_cls is None:
             return False
-        if getattr(screen_cls, "_pymusic_core_av_master_v3", False):
+        if getattr(screen_cls, "_pymusic_core_av_master_v4", False):
             _INSTALLED = True
             return True
 
@@ -39,8 +44,34 @@ def install_core_player_fix() -> bool:
         media = audio_screen.ma
         old_safe_video = ydlh.safe_extract_video_info
         old_set_video_mode = screen_cls._set_video_mode
+        old_prefetch_next = getattr(screen_cls, "_prefetch_next_track_audio", None)
+
+        def get_cached_muxed(video_url: str):
+            try:
+                key = str(video_url or "")
+                cached = _MUXED_INFO_CACHE.get(key)
+                if not cached:
+                    return None
+                created_at, info = cached
+                if (time.monotonic() - float(created_at)) > _MUXED_CACHE_TTL_SEC:
+                    _MUXED_INFO_CACHE.pop(key, None)
+                    return None
+                result = dict(info or {})
+                direct_url = str(result.get("video_url") or "")
+                if direct_url:
+                    _MUXED_URLS.add(direct_url)
+                    return result
+            except Exception:
+                pass
+            return None
 
         def extract_muxed_video(video_url: str):
+            source_url = str(video_url or "")
+            cached = get_cached_muxed(source_url)
+            if cached:
+                print("[CORE-V4] muxed cache hit")
+                return cached
+
             opts = {
                 "quiet": True,
                 "skip_download": True,
@@ -69,7 +100,7 @@ def install_core_player_fix() -> bool:
                 extract = getattr(ydlh, "_extract_info_with_clients", None)
                 if not callable(extract):
                     raise RuntimeError("yt-dlp client helper missing")
-                info, err = extract(video_url, opts, ("android",))
+                info, err = extract(source_url, opts, ("android",))
                 if not info:
                     raise RuntimeError(repr(err))
 
@@ -121,21 +152,23 @@ def install_core_player_fix() -> bool:
                         or opts["http_headers"]
                     )
 
-                _MUXED_URLS.add(url)
-                print(
-                    "[CORE-V3] muxed format "
-                    f"id={chosen.get('format_id')} ext={chosen.get('ext')} "
-                    f"height={chosen.get('height')}"
-                )
-                return {
+                result = {
                     "video_url": url,
                     "http_headers": headers,
                     "thumb": info.get("thumbnail", "") or "",
                     "muxed_av": True,
                 }
+                _MUXED_URLS.add(url)
+                _MUXED_INFO_CACHE[source_url] = (time.monotonic(), dict(result))
+                print(
+                    "[CORE-V4] muxed format "
+                    f"id={chosen.get('format_id')} ext={chosen.get('ext')} "
+                    f"height={chosen.get('height')}"
+                )
+                return result
             except Exception as exc:
-                print("[CORE-V3] muxed extraction fallback:", exc)
-                return old_safe_video(video_url)
+                print("[CORE-V4] muxed extraction fallback:", exc)
+                return old_safe_video(source_url)
 
         ydlh.safe_extract_video_info = extract_muxed_video
 
@@ -163,24 +196,26 @@ def install_core_player_fix() -> bool:
                     pass
 
         @video_player.run_on_ui_thread
-        def begin_muxed_handoff(screen) -> None:
+        def begin_muxed_handoff(screen, sync_gen: int, expected_load_gen: int) -> None:
             try:
+                if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                    return
+                if int(getattr(screen, "_load_gen", -1)) != expected_load_gen:
+                    return
+
                 vp = getattr(screen, "_video_player", None)
                 native_video = getattr(vp, "player", None) if vp is not None else None
                 audio = getattr(media, "android_player", None)
-                if native_video is None or audio is None:
-                    return
-                if not getattr(vp, "_prepared", False):
+                if native_video is None or audio is None or not getattr(vp, "_prepared", False):
+                    screen._pymusic_muxed_handoff_pending = False
+                    set_audio_volume(audio, 1.0)
                     return
                 if not getattr(screen, "_playback_desired", False):
+                    screen._pymusic_muxed_handoff_pending = False
                     return
                 if getattr(screen, "_user_paused", False):
+                    screen._pymusic_muxed_handoff_pending = False
                     return
-
-                sync_gen = int(getattr(screen, "_pymusic_muxed_sync_gen", 0) or 0) + 1
-                screen._pymusic_muxed_sync_gen = sync_gen
-                screen._pymusic_muxed_video_master = False
-                screen._pymusic_muxed_handoff_pending = True
 
                 set_audio_volume(audio, 1.0)
                 try:
@@ -196,6 +231,12 @@ def install_core_player_fix() -> bool:
                     except Exception:
                         pass
 
+                try:
+                    initial_audio_pos = int(audio.getCurrentPosition() or 0)
+                except Exception:
+                    initial_audio_pos = 0
+                seek_player(native_video, initial_audio_pos)
+
                 def cancel(reason: str) -> None:
                     if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
                         return
@@ -206,10 +247,12 @@ def install_core_player_fix() -> bool:
                         native_video.setVolume(0.0, 0.0)
                     except Exception:
                         pass
-                    print(f"[CORE-V3] handoff fallback: {reason}")
+                    print(f"[CORE-V4] handoff fallback: {reason}")
 
-                def complete(audio_pos: int, video_pos: int) -> None:
+                def complete(audio_pos: int, video_pos: int, reason: str) -> None:
                     if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                        return
+                    if int(getattr(screen, "_load_gen", -1)) != expected_load_gen:
                         return
                     if getattr(screen, "_user_paused", False):
                         cancel("paused")
@@ -228,29 +271,33 @@ def install_core_player_fix() -> bool:
                     screen._pymusic_muxed_handoff_pending = False
                     screen._pymusic_muxed_video_master = True
                     print(
-                        "[CORE-V3] handoff complete "
+                        "[CORE-V4] handoff complete "
                         f"audio={audio_pos} video={video_pos} "
-                        f"drift={video_pos - audio_pos}"
+                        f"drift={video_pos - audio_pos} reason={reason}"
                     )
 
                     def align_shadow(_dt=0):
                         try:
                             if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
                                 return
+                            if int(getattr(screen, "_load_gen", -1)) != expected_load_gen:
+                                return
                             if not getattr(screen, "_pymusic_muxed_video_master", False):
                                 return
                             vpos = int(native_video.getCurrentPosition() or 0)
                             apos = int(audio.getCurrentPosition() or 0)
-                            if abs(apos - vpos) > 250:
+                            if abs(apos - vpos) > 300:
                                 seek_player(audio, vpos)
                         except Exception as exc:
-                            print("[CORE-V3] shadow align failed:", exc)
+                            print("[CORE-V4] shadow align failed:", exc)
 
-                    Clock.schedule_once(align_shadow, 0.4)
+                    Clock.schedule_once(align_shadow, 0.35)
 
                 def poll(attempt: int = 0):
                     try:
                         if int(getattr(screen, "_pymusic_muxed_sync_gen", -1)) != sync_gen:
+                            return
+                        if int(getattr(screen, "_load_gen", -1)) != expected_load_gen:
                             return
                         if not getattr(screen, "_pymusic_muxed_handoff_pending", False):
                             return
@@ -269,25 +316,27 @@ def install_core_player_fix() -> bool:
                             video_playing = video_pos > 0
                         drift = video_pos - audio_pos
 
-                        if video_playing and abs(drift) <= 100:
-                            complete(audio_pos, video_pos)
+                        if video_playing and abs(drift) <= 220:
+                            complete(audio_pos, video_pos, "aligned")
                             return
-
-                        if attempt in (0, 8, 16, 24) and abs(drift) > 140:
-                            seek_player(native_video, audio_pos)
-
-                        if attempt >= 32:
-                            cancel(
-                                f"timeout audio={audio_pos} video={video_pos} drift={drift}"
-                            )
+                        if video_playing and attempt >= 5:
+                            complete(audio_pos, video_pos, "fast-forced")
                             return
-                        Clock.schedule_once(lambda _dt: poll(attempt + 1), 0.05)
+                        if attempt >= 12:
+                            if video_playing:
+                                complete(audio_pos, video_pos, "timeout-forced")
+                            else:
+                                cancel(
+                                    f"timeout audio={audio_pos} video={video_pos} drift={drift}"
+                                )
+                            return
+                        Clock.schedule_once(lambda _dt: poll(attempt + 1), 0.04)
                     except Exception as exc:
                         cancel(f"poll error: {exc}")
 
-                Clock.schedule_once(lambda _dt: poll(0), 0.05)
+                Clock.schedule_once(lambda _dt: poll(0), 0.04)
             except Exception as exc:
-                print("[CORE-V3] begin handoff failed:", exc)
+                print("[CORE-V4] begin handoff failed:", exc)
                 try:
                     set_audio_volume(getattr(media, "android_player", None), 1.0)
                 except Exception:
@@ -312,9 +361,12 @@ def install_core_player_fix() -> bool:
                     start_pos_provider=self._audio_pos_ms,
                     on_prepared=show_fallback,
                 )
-                print("[CORE-V3] separate-stream fallback")
+                print("[CORE-V4] separate-stream fallback")
                 return
 
+            sync_gen = int(getattr(self, "_pymusic_muxed_sync_gen", 0) or 0) + 1
+            expected_load_gen = int(getattr(self, "_load_gen", 0) or 0)
+            self._pymusic_muxed_sync_gen = sync_gen
             self._pymusic_muxed_video_master = False
             self._pymusic_muxed_handoff_pending = True
             set_audio_volume(getattr(media, "android_player", None), 1.0)
@@ -325,7 +377,9 @@ def install_core_player_fix() -> bool:
                 loop=False,
                 start_pos_provider=self._audio_pos_ms,
                 start_paused=False,
-                on_prepared=lambda: begin_muxed_handoff(self),
+                on_prepared=lambda: begin_muxed_handoff(
+                    self, sync_gen, expected_load_gen
+                ),
             )
 
         def set_video_mode_core(self, video_on: bool):
@@ -371,13 +425,52 @@ def install_core_player_fix() -> bool:
                     pass
 
                 self._pymusic_muxed_video_master = False
-                print("[CORE-V3] returned audio master")
+                print("[CORE-V4] returned audio master")
 
             return old_set_video_mode(self, video_on)
 
+        def prefetch_next_with_muxed(self):
+            result = None
+            if callable(old_prefetch_next):
+                result = old_prefetch_next(self)
+
+            try:
+                playlist = getattr(self, "playlist", None)
+                tracks = getattr(playlist, "tracks", None) if playlist is not None else None
+                if not tracks or len(tracks) < 2:
+                    return result
+                current_index = int(getattr(playlist, "index", 0) or 0)
+                next_index = (current_index + 1) % len(tracks)
+                next_item = tracks[next_index]
+                next_url = str((next_item or {}).get("url") or "")
+                if not next_url or next_url == str(getattr(self, "_last_video_url", "") or ""):
+                    return result
+                if get_cached_muxed(next_url):
+                    return result
+                if next_url in _MUXED_PREFETCH_INFLIGHT:
+                    return result
+
+                _MUXED_PREFETCH_INFLIGHT.add(next_url)
+
+                def job():
+                    try:
+                        extract_muxed_video(next_url)
+                        print("[CORE-V4] next muxed video prefetched")
+                    except Exception as exc:
+                        print("[CORE-V4] next muxed prefetch failed:", exc)
+                    finally:
+                        _MUXED_PREFETCH_INFLIGHT.discard(next_url)
+
+                threading.Thread(target=job, daemon=True).start()
+            except Exception as exc:
+                print("[CORE-V4] next muxed prefetch setup failed:", exc)
+            return result
+
         screen_cls._play_video_if_screen_active = play_video_core
         screen_cls._set_video_mode = set_video_mode_core
-        screen_cls._pymusic_core_av_master_v3 = True
+        if callable(old_prefetch_next):
+            screen_cls._prefetch_next_track_audio = prefetch_next_with_muxed
+        screen_cls._pymusic_core_av_master_v4 = True
         _INSTALLED = True
-        print("[CORE-V3] non-blocking muxed AV handoff installed")
+        print("[CORE-V4] fast muxed AV handoff installed")
         return True
