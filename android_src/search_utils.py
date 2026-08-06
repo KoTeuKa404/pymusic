@@ -21,6 +21,31 @@ try:
 except Exception as exc:
     print("[PLAYBACK-V5] synchronous install failed:", exc)
 
+# Kivy Clock stores bound callbacks through WeakMethod and resolves them later
+# using the function's __name__. The runtime patch assigns the function named
+# "background_tick_with_shadow_sync" to the class attribute "_background_tick".
+# Without this alias WeakMethod later looks up the original function name and
+# crashes during the first scheduled tick. Register both names before Builder
+# creates AudioPlayerScreen instances.
+try:
+    import audio_screen as _audio_screen
+
+    _player_cls = getattr(_audio_screen, "AudioPlayerScreen", None)
+    _patched_tick = (
+        getattr(_player_cls, "_background_tick", None)
+        if _player_cls is not None
+        else None
+    )
+    if callable(_patched_tick):
+        _callback_name = str(
+            getattr(_patched_tick, "__name__", "_background_tick")
+            or "_background_tick"
+        )
+        setattr(_player_cls, _callback_name, _patched_tick)
+        print(f"[PLAYBACK-V5] Clock callback alias installed: {_callback_name}")
+except Exception as exc:
+    print("[PLAYBACK-V5] Clock callback alias failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
