@@ -3,10 +3,10 @@
 Adds a compact like counter to the right of the favorite button, shows the
 like/dislike percentage underneath, and makes the channel name bold.
 
-The percentage uses Return YouTube Dislike's public HTTPS API because YouTube
-does not expose public dislike counts anymore. Failures are intentionally
-isolated from playback. Requests run off the Kivy UI thread, use certifi-backed
-TLS verification, are cached, and can retry after transient network failures.
+The data comes from Return YouTube Dislike's public HTTPS API because YouTube
+no longer exposes public dislike counts. Failures are isolated from playback:
+requests run off the Kivy UI thread, use certifi-backed TLS verification,
+are cached, and can retry after transient network failures.
 """
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ import re
 import threading
 import time
 import urllib.parse
-import webbrowser
 from typing import Any
 
 import certifi
 import requests
 from kivy.clock import Clock
 from kivy.metrics import dp
+from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 from kivymd.uix.label import MDIcon
@@ -85,7 +85,7 @@ def _format_compact_count(value: int) -> str:
     try:
         number = max(0, int(value))
     except Exception:
-        return "—"
+        return ""
 
     units = (
         (1_000_000_000, "млрд"),
@@ -202,73 +202,69 @@ def _make_stats_widget(owner) -> BoxLayout:
     holder = BoxLayout(
         orientation="vertical",
         size_hint=(None, None),
-        size=(dp(96), dp(40)),
+        size=(dp(94), dp(38)),
         spacing=0,
-        padding=(0, dp(2), 0, 0),
+        padding=(0, dp(1), 0, 0),
     )
 
     top = BoxLayout(
         orientation="horizontal",
         size_hint=(1, None),
-        height=dp(23),
-        spacing=dp(3),
+        height=dp(22),
+        spacing=dp(2),
         padding=(0, 0, 0, 0),
     )
 
-    # MDIcon is used instead of MDIconButton because MDIconButton keeps a
-    # large internal touch layout and looks vertically shifted in this row.
+    icon_holder = AnchorLayout(
+        size_hint=(None, None),
+        size=(dp(22), dp(22)),
+        anchor_x="center",
+        anchor_y="center",
+    )
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
-        size=(dp(20), dp(20)),
-        font_size="18sp",
+        size=(dp(18), dp(18)),
+        font_size="17sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
         halign="center",
         valign="middle",
     )
+    icon_holder.add_widget(icon)
 
     count_label = Label(
         text="",
         size_hint=(1, None),
-        height=dp(23),
+        height=dp(22),
         font_size="13sp",
         color=(0.15, 0.15, 0.15, 1),
         halign="left",
         valign="middle",
         shorten=True,
         shorten_from="right",
-        text_size=(dp(71), dp(23)),
+        text_size=(dp(70), dp(22)),
     )
 
     ratio_label = Label(
         text="",
         size_hint=(1, None),
-        height=dp(15),
+        height=dp(14),
         font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
         halign="left",
         valign="top",
-        text_size=(dp(96), dp(15)),
-        markup=True,
+        text_size=(dp(94), dp(14)),
     )
 
-    def _open_ryd(_label, ref):
-        if ref != "ryd":
-            return
-        try:
-            webbrowser.open("https://returnyoutubedislike.com")
-        except Exception:
-            pass
-
-    ratio_label.bind(on_ref_press=_open_ryd)
-
-    top.add_widget(icon)
+    top.add_widget(icon_holder)
     top.add_widget(count_label)
     holder.add_widget(top)
     holder.add_widget(ratio_label)
 
     holder._pymusic_like_stats = True
+    holder._pymusic_count_label = count_label
+    holder._pymusic_ratio_label = ratio_label
     owner._likes_holder = holder
     owner._likes_count_label = count_label
     owner._likes_ratio_label = ratio_label
@@ -306,8 +302,6 @@ def _ensure_stats_widget(owner) -> None:
             pass
 
         widget = _make_stats_widget(owner)
-        widget._pymusic_count_label = owner._likes_count_label
-        widget._pymusic_ratio_label = owner._likes_ratio_label
         parent.add_widget(widget)
     except Exception as exc:
         _log(f"[LIKES-UI] widget creation failed: {exc}")
@@ -329,12 +323,7 @@ def _set_stats_ui(owner, likes: int | None, dislikes: int | None) -> None:
         safe_likes = max(0, int(likes))
         safe_dislikes = max(0, int(dislikes or 0))
         count_label.text = _format_compact_count(safe_likes)
-        ratio = _format_ratio(safe_likes, safe_dislikes)
-        ratio_label.text = (
-            f"{ratio} · [ref=ryd][u]RYD[/u][/ref]"
-            if ratio
-            else ""
-        )
+        ratio_label.text = _format_ratio(safe_likes, safe_dislikes)
     except Exception as exc:
         _log(f"[LIKES-UI] render failed: {exc}")
 
@@ -397,7 +386,7 @@ def install_likes_ui_patch() -> bool:
         screen_cls = getattr(audio_screen, "AudioPlayerScreen", None)
         if screen_cls is None:
             return False
-        if bool(getattr(screen_cls, "_pymusic_likes_ui_v2", False)):
+        if bool(getattr(screen_cls, "_pymusic_likes_ui_v3", False)):
             _PATCHED = True
             return True
 
@@ -451,10 +440,10 @@ def install_likes_ui_patch() -> bool:
         screen_cls._ensure_metadata_async = ensure_metadata_with_likes
         screen_cls._sync_ui_loaded = sync_loaded_with_likes
         screen_cls._sync_ui_loading = sync_loading_with_likes
-        screen_cls._pymusic_likes_ui_v2 = True
+        screen_cls._pymusic_likes_ui_v3 = True
 
         _PATCHED = True
-        print("[LIKES-UI] like counter + ratio patch v2 enabled")
+        print("[LIKES-UI] like counter + ratio patch v3 enabled")
         return True
     except Exception as exc:
         print("[LIKES-UI] patch install failed:", exc)
