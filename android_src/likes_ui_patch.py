@@ -20,8 +20,8 @@ import certifi
 import requests
 from kivy.clock import Clock
 from kivy.metrics import dp
-from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 from kivymd.uix.label import MDIcon
 
@@ -199,20 +199,20 @@ def _fetch_votes(video_id: str) -> tuple[int, int] | None:
 
 
 def _make_stats_widget(owner) -> FloatLayout:
-    # Match the exact 46dp height of the channel/action row. The like icon gets
-    # the same 28x28 box and vertical center as repeat/favorite, while the small
-    # ratio label is positioned underneath without shifting the icon upward.
+    # Keep the like icon on the same visual baseline as the 28dp repeat/favorite
+    # PNG buttons. Material font glyphs sit high inside their label box, so the
+    # glyph itself is enlarged and its 28dp box is shifted down slightly.
     holder = FloatLayout(
         size_hint=(None, None),
-        size=(dp(98), dp(46)),
+        size=(dp(100), dp(46)),
     )
 
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
         size=(dp(28), dp(28)),
-        pos_hint={"x": 0.0, "center_y": 0.5},
-        font_size="18sp",
+        pos_hint={"x": 0.0, "center_y": 0.43},
+        font_size="24sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
         halign="center",
@@ -223,27 +223,27 @@ def _make_stats_widget(owner) -> FloatLayout:
     count_label = Label(
         text="",
         size_hint=(None, None),
-        size=(dp(70), dp(28)),
-        pos_hint={"x": 28.0 / 98.0, "center_y": 0.5},
+        size=(dp(72), dp(28)),
+        pos_hint={"x": 28.0 / 100.0, "center_y": 0.50},
         font_size="13sp",
         color=(0.15, 0.15, 0.15, 1),
         halign="left",
         valign="middle",
         shorten=True,
         shorten_from="right",
-        text_size=(dp(70), dp(28)),
+        text_size=(dp(72), dp(28)),
     )
 
     ratio_label = Label(
         text="",
         size_hint=(None, None),
-        size=(dp(70), dp(11)),
-        pos_hint={"x": 28.0 / 98.0, "y": 0.01},
+        size=(dp(72), dp(12)),
+        pos_hint={"x": 28.0 / 100.0, "y": 0.01},
         font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
         halign="left",
         valign="middle",
-        text_size=(dp(70), dp(11)),
+        text_size=(dp(72), dp(12)),
     )
 
     holder.add_widget(icon)
