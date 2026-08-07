@@ -46,6 +46,16 @@ try:
 except Exception as exc:
     print("[PLAYBACK-V5] Clock callback alias failed:", exc)
 
+# Add the like counter/like-dislike ratio next to Favorites and make the channel
+# name bold. This is a non-critical UI layer: any failure must not affect
+# playback or the existing player patch chain.
+try:
+    from likes_ui_patch import install_likes_ui_patch
+    if not install_likes_ui_patch():
+        print("[LIKES-UI] synchronous install returned false")
+except Exception as exc:
+    print("[LIKES-UI] synchronous install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
