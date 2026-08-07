@@ -5,30 +5,31 @@ like/dislike percentage underneath, and makes the channel name bold.
 
 The percentage uses Return YouTube Dislike's public HTTPS API because YouTube
 does not expose public dislike counts anymore. Failures are intentionally
-silent in the UI: playback and the rest of the player must keep working even
-when the stats service is unavailable.
+isolated from playback. Requests run off the Kivy UI thread, use certifi-backed
+TLS verification, are cached, and can retry after transient network failures.
 """
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from typing import Any
 
+import certifi
+import requests
 from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
-from kivymd.uix.button import MDIconButton
+from kivymd.uix.label import MDIcon
 
 
 _PATCHED = False
 _CACHE_TTL_SECONDS = 30 * 60
 _REQUEST_TIMEOUT_SECONDS = 6
+_RETRY_AFTER_SECONDS = 15
 _VOTES_ENDPOINT = "https://returnyoutubedislikeapi.com/votes"
 _stats_cache: dict[str, tuple[float, int, int]] = {}
 _cache_lock = threading.RLock()
@@ -96,8 +97,6 @@ def _format_compact_count(value: int) -> str:
             compact = number / float(divider)
             if compact >= 100:
                 text = f"{compact:.0f}"
-            elif compact >= 10:
-                text = f"{compact:.1f}"
             else:
                 text = f"{compact:.1f}"
             text = text.rstrip("0").rstrip(".").replace(".", ",")
@@ -114,6 +113,18 @@ def _format_ratio(likes: int, dislikes: int) -> str:
     left = f"{like_pct:.1f}".replace(".", ",")
     right = f"{dislike_pct:.1f}".replace(".", ",")
     return f"{left}% / {right}%"
+
+
+def _log(message: str) -> None:
+    try:
+        import media_android as ma
+
+        ma.log(message)
+    except Exception:
+        try:
+            print(message)
+        except Exception:
+            pass
 
 
 def _read_cached(video_id: str) -> tuple[int, int] | None:
@@ -150,32 +161,37 @@ def _fetch_votes(video_id: str) -> tuple[int, int] | None:
     if cached is not None:
         return cached
 
-    query = urllib.parse.urlencode({"videoId": video_id})
-    request = urllib.request.Request(
-        f"{_VOTES_ENDPOINT}?{query}",
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "PyMusic/1.0 (+Android)",
-        },
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(
-            request,
+        response = requests.get(
+            _VOTES_ENDPOINT,
+            params={"videoId": video_id},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Pragma": "no-cache",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "User-Agent": "PyMusic/1.0 (Android)",
+            },
             timeout=_REQUEST_TIMEOUT_SECONDS,
-        ) as response:
-            if getattr(response, "status", 200) != 200:
-                return None
-            payload = json.loads(response.read(128 * 1024).decode("utf-8", "replace"))
-    except Exception:
+            verify=certifi.where(),
+        )
+        if response.status_code == 429:
+            _log(f"[LIKES-UI] RYD rate limited video={video_id}")
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        _log(f"[LIKES-UI] RYD request failed video={video_id}: {exc}")
         return None
 
     if not isinstance(payload, dict):
+        _log(f"[LIKES-UI] invalid RYD response video={video_id}")
         return None
 
     likes = _to_non_negative_int(payload.get("likes"))
     dislikes = _to_non_negative_int(payload.get("dislikes"))
     if likes <= 0 and dislikes <= 0:
+        _log(f"[LIKES-UI] empty RYD votes video={video_id}")
         return None
 
     _write_cached(video_id, likes, dislikes)
@@ -186,50 +202,54 @@ def _make_stats_widget(owner) -> BoxLayout:
     holder = BoxLayout(
         orientation="vertical",
         size_hint=(None, None),
-        size=(dp(82), dp(42)),
+        size=(dp(96), dp(40)),
         spacing=0,
-        padding=(0, 0, 0, 0),
+        padding=(0, dp(2), 0, 0),
     )
 
     top = BoxLayout(
         orientation="horizontal",
         size_hint=(1, None),
-        height=dp(27),
-        spacing=0,
+        height=dp(23),
+        spacing=dp(3),
         padding=(0, 0, 0, 0),
     )
 
-    icon = MDIconButton(
+    # MDIcon is used instead of MDIconButton because MDIconButton keeps a
+    # large internal touch layout and looks vertically shifted in this row.
+    icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
-        size=(dp(27), dp(27)),
-        user_font_size="20sp",
+        size=(dp(20), dp(20)),
+        font_size="18sp",
         theme_text_color="Custom",
-        text_color=(0.16, 0.16, 0.16, 1),
+        text_color=(0.15, 0.15, 0.15, 1),
+        halign="center",
+        valign="middle",
     )
 
     count_label = Label(
-        text="—",
+        text="",
         size_hint=(1, None),
-        height=dp(27),
-        font_size="11sp",
-        color=(0.16, 0.16, 0.16, 1),
+        height=dp(23),
+        font_size="13sp",
+        color=(0.15, 0.15, 0.15, 1),
         halign="left",
         valign="middle",
         shorten=True,
         shorten_from="right",
-        text_size=(dp(55), dp(27)),
+        text_size=(dp(71), dp(23)),
     )
 
     ratio_label = Label(
         text="",
         size_hint=(1, None),
         height=dp(15),
-        font_size="7.5sp",
+        font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
-        halign="center",
+        halign="left",
         valign="top",
-        text_size=(dp(82), dp(15)),
+        text_size=(dp(96), dp(15)),
         markup=True,
     )
 
@@ -276,16 +296,21 @@ def _ensure_stats_widget(owner) -> None:
         for child in list(getattr(parent, "children", []) or []):
             if bool(getattr(child, "_pymusic_like_stats", False)):
                 owner._likes_holder = child
+                owner._likes_count_label = getattr(child, "_pymusic_count_label", None)
+                owner._likes_ratio_label = getattr(child, "_pymusic_ratio_label", None)
                 return
 
         try:
-            parent.spacing = dp(7)
+            parent.spacing = dp(8)
         except Exception:
             pass
 
-        parent.add_widget(_make_stats_widget(owner))
-    except Exception:
-        pass
+        widget = _make_stats_widget(owner)
+        widget._pymusic_count_label = owner._likes_count_label
+        widget._pymusic_ratio_label = owner._likes_ratio_label
+        parent.add_widget(widget)
+    except Exception as exc:
+        _log(f"[LIKES-UI] widget creation failed: {exc}")
 
 
 def _set_stats_ui(owner, likes: int | None, dislikes: int | None) -> None:
@@ -297,7 +322,7 @@ def _set_stats_ui(owner, likes: int | None, dislikes: int | None) -> None:
             return
 
         if likes is None:
-            count_label.text = "—"
+            count_label.text = ""
             ratio_label.text = ""
             return
 
@@ -305,9 +330,13 @@ def _set_stats_ui(owner, likes: int | None, dislikes: int | None) -> None:
         safe_dislikes = max(0, int(dislikes or 0))
         count_label.text = _format_compact_count(safe_likes)
         ratio = _format_ratio(safe_likes, safe_dislikes)
-        ratio_label.text = f"[ref=ryd][u]RYD[/u][/ref] · {ratio}" if ratio else ""
-    except Exception:
-        pass
+        ratio_label.text = (
+            f"{ratio} · [ref=ryd][u]RYD[/u][/ref]"
+            if ratio
+            else ""
+        )
+    except Exception as exc:
+        _log(f"[LIKES-UI] render failed: {exc}")
 
 
 def _ensure_likes_async(owner, video_url: str) -> None:
@@ -316,10 +345,16 @@ def _ensure_likes_async(owner, video_url: str) -> None:
         Clock.schedule_once(lambda _dt: _set_stats_ui(owner, None, None), 0)
         return
 
-    if str(getattr(owner, "_likes_video_id", "") or "") == video_id:
-        return
+    current_video_id = str(getattr(owner, "_likes_video_id", "") or "")
+    if current_video_id == video_id:
+        failed_at = float(getattr(owner, "_likes_failed_at", 0.0) or 0.0)
+        if failed_at <= 0.0:
+            return
+        if time.monotonic() - failed_at < _RETRY_AFTER_SECONDS:
+            return
 
     owner._likes_video_id = video_id
+    owner._likes_failed_at = 0.0
     owner._likes_request_token = int(getattr(owner, "_likes_request_token", 0)) + 1
     token = int(owner._likes_request_token)
 
@@ -333,9 +368,11 @@ def _ensure_likes_async(owner, video_url: str) -> None:
             return
 
         if result is None:
+            owner._likes_failed_at = time.monotonic()
             Clock.schedule_once(lambda _dt: _set_stats_ui(owner, None, None), 0)
             return
 
+        owner._likes_failed_at = 0.0
         likes, dislikes = result
         Clock.schedule_once(
             lambda _dt, l=likes, d=dislikes: _set_stats_ui(owner, l, d),
@@ -360,7 +397,7 @@ def install_likes_ui_patch() -> bool:
         screen_cls = getattr(audio_screen, "AudioPlayerScreen", None)
         if screen_cls is None:
             return False
-        if bool(getattr(screen_cls, "_pymusic_likes_ui_v1", False)):
+        if bool(getattr(screen_cls, "_pymusic_likes_ui_v2", False)):
             _PATCHED = True
             return True
 
@@ -373,6 +410,7 @@ def install_likes_ui_patch() -> bool:
         def init_with_likes(self, *args, **kwargs):
             old_init(self, *args, **kwargs)
             self._likes_video_id = ""
+            self._likes_failed_at = 0.0
             self._likes_request_token = 0
             self._likes_holder = None
             self._likes_count_label = None
@@ -403,6 +441,7 @@ def install_likes_ui_patch() -> bool:
             current_id = _video_id_from_url(current)
             if current_id and current_id != str(getattr(self, "_likes_video_id", "") or ""):
                 self._likes_video_id = ""
+                self._likes_failed_at = 0.0
                 self._likes_request_token = int(getattr(self, "_likes_request_token", 0)) + 1
                 Clock.schedule_once(lambda _dt: _set_stats_ui(self, None, None), 0)
             return result
@@ -412,10 +451,10 @@ def install_likes_ui_patch() -> bool:
         screen_cls._ensure_metadata_async = ensure_metadata_with_likes
         screen_cls._sync_ui_loaded = sync_loaded_with_likes
         screen_cls._sync_ui_loading = sync_loading_with_likes
-        screen_cls._pymusic_likes_ui_v1 = True
+        screen_cls._pymusic_likes_ui_v2 = True
 
         _PATCHED = True
-        print("[LIKES-UI] like counter + ratio patch enabled")
+        print("[LIKES-UI] like counter + ratio patch v2 enabled")
         return True
     except Exception as exc:
         print("[LIKES-UI] patch install failed:", exc)
