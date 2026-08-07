@@ -20,8 +20,8 @@ import certifi
 import requests
 from kivy.clock import Clock
 from kivy.metrics import dp
-from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivymd.uix.label import MDIcon
 
@@ -198,68 +198,56 @@ def _fetch_votes(video_id: str) -> tuple[int, int] | None:
     return likes, dislikes
 
 
-def _make_stats_widget(owner) -> BoxLayout:
-    holder = BoxLayout(
-        orientation="vertical",
+def _make_stats_widget(owner) -> FloatLayout:
+    # Match the exact 46dp height of the channel/action row. The like icon gets
+    # the same 28x28 box and vertical center as repeat/favorite, while the small
+    # ratio label is positioned underneath without shifting the icon upward.
+    holder = FloatLayout(
         size_hint=(None, None),
-        size=(dp(94), dp(38)),
-        spacing=0,
-        padding=(0, dp(1), 0, 0),
+        size=(dp(98), dp(46)),
     )
 
-    top = BoxLayout(
-        orientation="horizontal",
-        size_hint=(1, None),
-        height=dp(22),
-        spacing=dp(2),
-        padding=(0, 0, 0, 0),
-    )
-
-    icon_holder = AnchorLayout(
-        size_hint=(None, None),
-        size=(dp(22), dp(22)),
-        anchor_x="center",
-        anchor_y="center",
-    )
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
-        size=(dp(18), dp(18)),
-        font_size="17sp",
+        size=(dp(28), dp(28)),
+        pos_hint={"x": 0.0, "center_y": 0.5},
+        font_size="18sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
         halign="center",
         valign="middle",
+        text_size=(dp(28), dp(28)),
     )
-    icon_holder.add_widget(icon)
 
     count_label = Label(
         text="",
-        size_hint=(1, None),
-        height=dp(22),
+        size_hint=(None, None),
+        size=(dp(70), dp(28)),
+        pos_hint={"x": 28.0 / 98.0, "center_y": 0.5},
         font_size="13sp",
         color=(0.15, 0.15, 0.15, 1),
         halign="left",
         valign="middle",
         shorten=True,
         shorten_from="right",
-        text_size=(dp(70), dp(22)),
+        text_size=(dp(70), dp(28)),
     )
 
     ratio_label = Label(
         text="",
-        size_hint=(1, None),
-        height=dp(14),
+        size_hint=(None, None),
+        size=(dp(70), dp(11)),
+        pos_hint={"x": 28.0 / 98.0, "y": 0.01},
         font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
         halign="left",
-        valign="top",
-        text_size=(dp(94), dp(14)),
+        valign="middle",
+        text_size=(dp(70), dp(11)),
     )
 
-    top.add_widget(icon_holder)
-    top.add_widget(count_label)
-    holder.add_widget(top)
+    holder.add_widget(icon)
+    holder.add_widget(count_label)
     holder.add_widget(ratio_label)
 
     holder._pymusic_like_stats = True
@@ -386,7 +374,7 @@ def install_likes_ui_patch() -> bool:
         screen_cls = getattr(audio_screen, "AudioPlayerScreen", None)
         if screen_cls is None:
             return False
-        if bool(getattr(screen_cls, "_pymusic_likes_ui_v3", False)):
+        if bool(getattr(screen_cls, "_pymusic_likes_ui_v4", False)):
             _PATCHED = True
             return True
 
@@ -440,10 +428,10 @@ def install_likes_ui_patch() -> bool:
         screen_cls._ensure_metadata_async = ensure_metadata_with_likes
         screen_cls._sync_ui_loaded = sync_loaded_with_likes
         screen_cls._sync_ui_loading = sync_loading_with_likes
-        screen_cls._pymusic_likes_ui_v3 = True
+        screen_cls._pymusic_likes_ui_v4 = True
 
         _PATCHED = True
-        print("[LIKES-UI] like counter + ratio patch v3 enabled")
+        print("[LIKES-UI] like counter + ratio patch v4 enabled")
         return True
     except Exception as exc:
         print("[LIKES-UI] patch install failed:", exc)
