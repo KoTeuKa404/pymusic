@@ -14,9 +14,9 @@ from kivymd.uix.label import MDIcon
 
 def _make_stats_widget(owner) -> FloatLayout:
     # The fixed PNG action buttons in youtube_gui.kv are 28x28 and BoxLayout
-    # places them at the bottom of the 46dp row. Put the Material thumb glyph on
-    # that same bottom baseline, then enlarge it because the font glyph has more
-    # internal whitespace than the PNG assets.
+    # places them at the bottom of the 46dp row. The Material thumb glyph has
+    # substantially more internal whitespace than those PNGs, so give the glyph
+    # a deliberately larger texture box while keeping the counters untouched.
     holder = FloatLayout(
         size_hint=(None, None),
         size=(dp(108), dp(46)),
@@ -25,14 +25,14 @@ def _make_stats_widget(owner) -> FloatLayout:
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
-        size=(dp(34), dp(34)),
-        pos_hint={"x": 0.0, "y": -0.05},
-        font_size="33sp",
+        size=(dp(42), dp(42)),
+        pos_hint={"x": -0.04, "y": -0.12},
+        font_size="42sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
         halign="center",
         valign="middle",
-        text_size=(dp(34), dp(34)),
+        text_size=(dp(42), dp(42)),
     )
 
     count_label = Label(
