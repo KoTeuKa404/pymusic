@@ -5,8 +5,8 @@ package.name = pymusic
 package.domain = org.koteuka404
 
 source.dir = android_src
-source.include_exts = py,kv,png,jpg,jpeg,ttf,json,txt
-source.include_patterns = images/*.png, ico/*.png, *.kv, *.py, *.json
+source.include_exts = py,kv,png,jpg,jpeg,svg,ttf,json,txt
+source.include_patterns = images/*.png, ico/*.png, ico/*.svg, *.kv, *.py, *.json
 source.exclude_patterns = *.so, *.pyd, *.pyc
 source.exclude_dirs = __pycache__, .git, .idea, .vscode, venv, venv311, .venv, build, bin
 
