@@ -19,27 +19,27 @@ def _make_stats_widget(owner) -> FloatLayout:
     # internal whitespace than the PNG assets.
     holder = FloatLayout(
         size_hint=(None, None),
-        size=(dp(104), dp(46)),
+        size=(dp(108), dp(46)),
     )
 
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
-        size=(dp(30), dp(30)),
-        pos_hint={"x": 0.0, "y": -0.03},
-        font_size="29sp",
+        size=(dp(34), dp(34)),
+        pos_hint={"x": 0.0, "y": -0.05},
+        font_size="33sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
         halign="center",
         valign="middle",
-        text_size=(dp(30), dp(30)),
+        text_size=(dp(34), dp(34)),
     )
 
     count_label = Label(
         text="",
         size_hint=(None, None),
         size=(dp(74), dp(28)),
-        pos_hint={"x": 30.0 / 104.0, "center_y": 0.50},
+        pos_hint={"x": 34.0 / 108.0, "center_y": 0.50},
         font_size="13sp",
         color=(0.15, 0.15, 0.15, 1),
         halign="left",
@@ -53,7 +53,7 @@ def _make_stats_widget(owner) -> FloatLayout:
         text="",
         size_hint=(None, None),
         size=(dp(74), dp(12)),
-        pos_hint={"x": 30.0 / 104.0, "y": 0.01},
+        pos_hint={"x": 34.0 / 108.0, "y": 0.01},
         font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
         halign="left",
