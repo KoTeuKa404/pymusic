@@ -4,10 +4,13 @@ from pythonforandroid.recipe import PyProjectRecipe, Recipe
 
 
 class FFPyPlayerRecipe(PyProjectRecipe):
-    version = "v4.5.1"
+    # ffpyplayer 4.5.3 switched its build to Cython 3, which is required for
+    # current CPython. Its stock Cython 3.0.x pin predates Python 3.14, so the
+    # local pyproject patch below raises that to a Python-3.14-compatible Cython.
+    version = "v4.5.3"
     url = "https://github.com/matham/ffpyplayer/archive/{version}.zip"
     depends = ["python3", "sdl2", "ffmpeg"]
-    patches = ["setup.py.patch"]
+    patches = ["setup.py.patch", "pyproject-cython.patch"]
     opt_depends = ["openssl", "ffpyplayer_codecs"]
 
     def get_recipe_env(self, arch, with_flags_in_cc=True):
@@ -33,10 +36,9 @@ class FFPyPlayerRecipe(PyProjectRecipe):
         env["NDKPLATFORM"] = "NOTNONE"
         env["LIBLINK"] = "NOTNONE"
 
-        # p4a develop currently builds FFmpeg 8 without libpostproc, while
-        # ffpyplayer enables postproc whenever ffpyplayer_codecs is present.
-        # Keep the extra codecs, but prevent ffpyplayer from including/linking
-        # the removed libpostproc API.
+        # Keep postproc disabled in the ffpyplayer wrapper. This avoids relying
+        # on that legacy API and remains compatible with both the local FFmpeg
+        # 6.1.2 recipe and newer p4a FFmpeg recipes.
         env["CONFIG_POSTPROC"] = "0"
 
         return env
