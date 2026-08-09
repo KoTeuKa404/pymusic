@@ -1,0 +1,8 @@
+--- ffpyplayer/pyproject.toml
++++ ffpyplayer.mod/pyproject.toml
+@@ -1,4 +1,4 @@
+ [build-system]
+ requires = [
+-    "setuptools", "wheel", "cython~=3.0.11",
++    "setuptools", "wheel", "cython>=3.1.4,<3.2",
+ ]
