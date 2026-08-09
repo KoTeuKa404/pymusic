@@ -27,7 +27,9 @@ android.permissions = INTERNET,WAKE_LOCK,FOREGROUND_SERVICE,MODIFY_AUDIO_SETTING
 
 android.api = 33
 android.minapi = 21
-android.ndk = 25b
+# Current p4a develop recommends NDK 28c. NDK 25b uses an older LLVM runtime
+# layout that breaks the libthorvg recipe while locating libomp.so.
+android.ndk = 28c
 android.ndk_api = 21
 android.kivy_version = 2.3.1
 
