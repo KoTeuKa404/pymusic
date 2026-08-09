@@ -6,6 +6,7 @@ on:
     paths:
       - "android_src/**"
       - "java_src/**"
+      - "p4a-recipes/**"
       - "buildozer.spec"
       - ".github/workflows/android-build.yml"
   workflow_dispatch:
@@ -55,7 +56,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             .buildozer/android/platform
-          key: pymusic-android-p4a-develop-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: pymusic-android-p4a-develop-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'p4a-recipes/**') }}
 
       - name: Build debug APK
         env:
