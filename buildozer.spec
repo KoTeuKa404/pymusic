@@ -12,7 +12,10 @@ source.exclude_dirs = __pycache__, .git, .idea, .vscode, venv, venv311, .venv, b
 
 version = 1.0
 
-requirements = python3, kivy, kivymd, ffpyplayer, yt_dlp>=2025.10.0, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi, idna, httpcore, cryptography, h11, requests,typing_extensions,pyjnius, ffpyplayer_codecs,filetype
+# python-for-android builds requirements with dependencies disabled, so KivyMD's
+# runtime dependencies must be listed explicitly. KivyMD 2.x imports these at
+# startup; without them Android exits with ModuleNotFoundError before the app UI.
+requirements = python3, kivy, kivymd, pillow, materialyoucolor==3.0.3, materialshapes==0.3, asynckivy==0.6.4, ffpyplayer, yt_dlp>=2025.10.0, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi, idna, httpcore, cryptography, h11, requests, typing_extensions, pyjnius, ffpyplayer_codecs, filetype
 
 
 orientation = portrait
@@ -38,7 +41,8 @@ android.add_src = java_src
 
 android.archs = arm64-v8a
 p4a.bootstrap = sdl2
-p4a.branch = v2024.01.21
+# materialyoucolor 3.x Android support is provided by the current p4a recipe.
+p4a.branch = develop
 android.gradle_options = -Xmx6144m -XX:MaxMetaspaceSize=2048m -Dfile.encoding=UTF-8 -XX:+UseG1GC
 
 log_level = 2
