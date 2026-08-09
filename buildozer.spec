@@ -12,10 +12,10 @@ source.exclude_dirs = __pycache__, .git, .idea, .vscode, venv, venv311, .venv, b
 
 version = 1.0
 
-# python-for-android builds requirements with dependencies disabled, so KivyMD's
-# runtime dependencies must be listed explicitly. KivyMD 2.x imports these at
-# startup; without them Android exits with ModuleNotFoundError before the app UI.
-requirements = python3, kivy, kivymd, pillow, materialyoucolor==3.0.3, materialshapes==0.3, asynckivy==0.6.4, ffpyplayer, yt_dlp>=2025.10.0, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi, idna, httpcore, cryptography, h11, requests, typing_extensions, pyjnius, ffpyplayer_codecs, filetype
+# The current UI still uses KivyMD 1.2 APIs such as OneLineListItem,
+# MDRaisedButton and MDRoundFlatButton. KivyMD 2.x removed/reworked those APIs,
+# so keep the Android package on the compatible 1.2 release until the UI is migrated.
+requirements = python3, kivy, kivymd==1.2.0, pillow, ffpyplayer, yt_dlp>=2025.10.0, pycryptodome, httpx, beautifulsoup4, urllib3, charset-normalizer, certifi, idna, httpcore, cryptography, h11, requests, typing_extensions, pyjnius, ffpyplayer_codecs, filetype
 
 
 orientation = portrait
@@ -43,7 +43,6 @@ android.add_src = java_src
 
 android.archs = arm64-v8a
 p4a.bootstrap = sdl2
-# materialyoucolor 3.x Android support is provided by the current p4a recipe.
 p4a.branch = develop
 # p4a develop currently pairs FFmpeg 8 with ffpyplayer 4.5.1. The upstream
 # ffpyplayer recipe still enables removed libpostproc when ffpyplayer_codecs is
