@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-apk-${{ github.ref }}
@@ -55,7 +55,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             .buildozer/android/platform
-          key: pymusic-android-p4a-v2024.01.21-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: pymusic-android-p4a-develop-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Build debug APK
         env:
@@ -75,22 +75,29 @@ jobs:
           set -e
           exit "$BUILD_STATUS"
 
-      - name: Prepare artifact
+      - name: Prepare APK
         shell: bash
         run: |
           mkdir -p dist
           APK_PATH="$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)"
           test -n "$APK_PATH"
-          cp "$APK_PATH" "dist/PyMusic-debug-${GITHUB_SHA::7}.apk"
-          sha256sum dist/*.apk > dist/PyMusic-debug.sha256
+          cp "$APK_PATH" "dist/PyMusic-debug.apk"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: PyMusic-debug-${{ github.sha }}
-          path: dist/
-          retention-days: 14
-          compression-level: 0
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # GitHub Actions artifacts are always downloaded as ZIP archives.
+          # Keep one moving prerelease instead, so the asset itself downloads
+          # directly as PyMusic-debug.apk with no ZIP wrapper or hash filename.
+          gh release delete latest-debug --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create latest-debug \
+            "dist/PyMusic-debug.apk#PyMusic-debug.apk" \
+            --target "$GITHUB_SHA" \
+            --title "PyMusic latest debug APK" \
+            --notes "Latest debug APK built from commit $GITHUB_SHA." \
+            --prerelease
 
       - name: Upload log on failure
         if: failure()
