@@ -45,6 +45,10 @@ android.archs = arm64-v8a
 p4a.bootstrap = sdl2
 # materialyoucolor 3.x Android support is provided by the current p4a recipe.
 p4a.branch = develop
+# p4a develop currently pairs FFmpeg 8 with ffpyplayer 4.5.1. The upstream
+# ffpyplayer recipe still enables removed libpostproc when ffpyplayer_codecs is
+# requested, so use the local compatibility recipe until upstream is fixed.
+p4a.local_recipes = p4a-recipes
 android.gradle_options = -Xmx6144m -XX:MaxMetaspaceSize=2048m -Dfile.encoding=UTF-8 -XX:+UseG1GC
 
 log_level = 2
