@@ -71,9 +71,9 @@ try:
 except Exception as exc:
     print("[VIDEO-CTRL] synchronous install failed:", exc)
 
-# The controls actually visible above Android SurfaceView are native
-# ImageButtons. Give them a low-latency ACTION_DOWN transport path so playback
-# no longer waits for ACTION_UP + a Kivy Clock hop before pausing/seeking.
+# Keep the previous Python native path as a fallback for taps on the transparent
+# video surface itself. The actual three ImageButtons are rebound below to a
+# Java-only transport path, so Python/GIL latency cannot delay pause/seek.
 try:
     from native_video_controls_fast_fix import install_native_video_controls_fast_fix
 
@@ -81,6 +81,17 @@ try:
         print("[VIDEO-CTRL-FAST] synchronous install returned false")
 except Exception as exc:
     print("[VIDEO-CTRL-FAST] synchronous install failed:", exc)
+
+# Final transport layer: the visible rewind/play/forward ImageButtons execute
+# MediaPlayer commands directly inside Java on ACTION_DOWN. Python only mirrors
+# state later for notifications and the rest of the Kivy UI.
+try:
+    from native_java_transport_fix import install_native_java_transport_fix
+
+    if not install_native_java_transport_fix():
+        print("[JAVA-CTRL] synchronous install returned false")
+except Exception as exc:
+    print("[JAVA-CTRL] synchronous install failed:", exc)
 
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
