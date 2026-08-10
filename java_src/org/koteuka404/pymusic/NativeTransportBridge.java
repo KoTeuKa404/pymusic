@@ -6,12 +6,17 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.ImageButton;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 /**
  * Direct native transport control for the three buttons drawn over SurfaceView.
  *
- * The important rule here is that ACTION_DOWN never crosses PyJNIus/Python
- * before pause/start/seekTo is issued.  Python only mirrors the resulting state
- * afterwards, so a busy Kivy/GIL cannot delay the user's transport command.
+ * The touch hot path must never wait for MediaPlayer. Some Android/Qualcomm
+ * MediaPlayer implementations can block pause/start/seekTo for hundreds of ms
+ * or even >1 s on remote streams. Therefore ACTION_DOWN updates visible/logical
+ * state immediately and the potentially blocking MediaPlayer commands run on a
+ * dedicated serial worker.
  */
 public final class NativeTransportBridge {
     public static final int ACTION_REWIND = -1;
@@ -30,12 +35,25 @@ public final class NativeTransportBridge {
     private static volatile long stateVersion = 0L;
     private static volatile int lastEvent = EVENT_NONE;
     private static volatile long lastTargetMs = -1L;
+    private static volatile long logicalPositionMs = -1L;
+
+    /** One worker preserves transport command ordering without blocking touch/UI. */
+    private static final ExecutorService TRANSPORT_EXECUTOR =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "PyMusic-NativeTransport");
+                t.setDaemon(true);
+                return t;
+            });
 
     private NativeTransportBridge() {
     }
 
     public static void setAudioPlayer(MediaPlayer player) {
         audioPlayer = player;
+        if (player != null) {
+            int pos = safePosition(player);
+            if (pos >= 0) logicalPositionMs = pos;
+        }
     }
 
     public static void setVideoPlayer(MediaPlayer player) {
@@ -122,48 +140,44 @@ public final class NativeTransportBridge {
     }
 
     private static void safePause(MediaPlayer player) {
-        if (player == null) {
-            return;
-        }
+        if (player == null) return;
         try {
-            if (player.isPlaying()) {
-                player.pause();
-            }
+            if (player.isPlaying()) player.pause();
         } catch (Throwable ignored) {
         }
     }
 
     private static void safeStart(MediaPlayer player) {
-        if (player == null) {
-            return;
-        }
+        if (player == null) return;
         try {
-            if (!player.isPlaying()) {
-                player.start();
-            }
+            if (!player.isPlaying()) player.start();
         } catch (Throwable ignored) {
         }
     }
 
-    private static void safeSeekAudio(MediaPlayer player, long targetMs) {
-        if (player == null) {
-            return;
-        }
+    private static void safeMute(MediaPlayer player) {
+        if (player == null) return;
         try {
-            player.seekTo((int) Math.max(0L, targetMs));
+            player.setVolume(0.0f, 0.0f);
         } catch (Throwable ignored) {
         }
     }
 
-    private static void safeSeekVideo(MediaPlayer player, long targetMs) {
-        if (player == null) {
-            return;
+    private static void safeUnmute(MediaPlayer player) {
+        if (player == null) return;
+        try {
+            player.setVolume(1.0f, 1.0f);
+        } catch (Throwable ignored) {
         }
+    }
+
+    private static void safeSeekFast(MediaPlayer player, long targetMs) {
+        if (player == null) return;
         final int target = (int) Math.max(0L, targetMs);
         try {
             if (Build.VERSION.SDK_INT >= 26) {
-                // A sync frame lands much faster for interactive +/-10s seeking
-                // than SEEK_CLOSEST, which may wait for exact decoder output.
+                // For interactive +/-10 s controls a nearby sync frame responds
+                // much faster than an exact decoder seek on remote YouTube media.
                 player.seekTo(target, MediaPlayer.SEEK_CLOSEST_SYNC);
             } else {
                 player.seekTo(target);
@@ -176,14 +190,24 @@ public final class NativeTransportBridge {
         }
     }
 
-    private static synchronized void toggle(ImageButton sourceButton) {
-        // Video is the audible master after the muxed handoff; pause it first.
-        final boolean playing = safeIsPlaying(videoPlayer) || safeIsPlaying(audioPlayer);
+    private static synchronized void toggle(final ImageButton sourceButton) {
+        final MediaPlayer audio = audioPlayer;
+        final MediaPlayer video = videoPlayer;
+        final boolean playing = safeIsPlaying(audio) || safeIsPlaying(video);
+
         if (playing) {
-            safePause(videoPlayer);
-            safePause(audioPlayer);
+            // Capture the logical pause point before the worker can be delayed.
+            int pos = safePosition(audio);
+            if (pos < 0) pos = safePosition(video);
+            final long pauseAt = Math.max(0L, pos);
+            logicalPositionMs = pauseAt;
+
+            // Immediate perceived response: icon + mute happen before any possibly
+            // blocking pause() call. Video is already muted by the Python player.
             userPaused = true;
             lastEvent = EVENT_PAUSE;
+            lastTargetMs = pauseAt;
+            stateVersion++;
             try {
                 if (sourceButton != null) {
                     sourceButton.setImageResource(android.R.drawable.ic_media_play);
@@ -191,13 +215,21 @@ public final class NativeTransportBridge {
                 }
             } catch (Throwable ignored) {
             }
+            safeMute(audio);
+
+            TRANSPORT_EXECUTOR.execute(() -> {
+                safePause(video);
+                safePause(audio);
+                // If pause() itself took time, return both players to the point
+                // where the user actually touched the button.
+                safeSeekFast(audio, pauseAt);
+                safeSeekFast(video, pauseAt);
+            });
         } else {
-            // Start the shadow audio first, then video.  If one player is not in
-            // a startable state its exception is isolated and the other still runs.
-            safeStart(audioPlayer);
-            safeStart(videoPlayer);
             userPaused = false;
             lastEvent = EVENT_PLAY;
+            lastTargetMs = logicalPositionMs;
+            stateVersion++;
             try {
                 if (sourceButton != null) {
                     sourceButton.setImageResource(android.R.drawable.ic_media_pause);
@@ -205,29 +237,41 @@ public final class NativeTransportBridge {
                 }
             } catch (Throwable ignored) {
             }
+
+            TRANSPORT_EXECUTOR.execute(() -> {
+                long resumeAt = logicalPositionMs;
+                if (resumeAt >= 0) {
+                    safeSeekFast(audio, resumeAt);
+                    safeSeekFast(video, resumeAt);
+                }
+                safeStart(audio);
+                safeStart(video);
+                safeUnmute(audio);
+            });
         }
-        lastTargetMs = -1L;
-        stateVersion++;
     }
 
     private static synchronized void seekBy(long deltaMs) {
-        // The visible muxed video is normally the master clock.  Prefer its
-        // position; fall back to audio when video is not available/prepared.
-        int base = safePosition(videoPlayer);
-        if (base < 0) {
-            base = safePosition(audioPlayer);
-        }
-        if (base < 0) {
-            base = 0;
-        }
+        final MediaPlayer audio = audioPlayer;
+        final MediaPlayer video = videoPlayer;
+
+        int base = safePosition(audio);
+        if (base < 0) base = safePosition(video);
+        if (base < 0 && logicalPositionMs >= 0) base = (int) logicalPositionMs;
+        if (base < 0) base = 0;
+
         final long target = Math.max(0L, ((long) base) + deltaMs);
+        logicalPositionMs = target;
 
-        // Move the visible/audible player first so feedback is immediate.
-        safeSeekVideo(videoPlayer, target);
-        safeSeekAudio(audioPlayer, target);
-
+        // Publish target immediately so Python/native progress UI can jump now;
+        // the decoder seek itself is allowed to finish asynchronously.
         lastTargetMs = target;
         lastEvent = deltaMs < 0 ? EVENT_REWIND : EVENT_FORWARD;
         stateVersion++;
+
+        TRANSPORT_EXECUTOR.execute(() -> {
+            safeSeekFast(audio, target);
+            safeSeekFast(video, target);
+        });
     }
 }
