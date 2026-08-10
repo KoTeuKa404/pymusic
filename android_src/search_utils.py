@@ -61,9 +61,8 @@ try:
 except Exception as exc:
     print("[LIKES-UI] synchronous install failed:", exc)
 
-# Make the overlay rewind/play/forward buttons react on press instead of waiting
-# for release, and keep the seek targets farther from the central play/pause
-# target to reduce accidental rewinds/fast-forwards on phones.
+# Tune the hidden Kivy controls too. This is useful as a fallback when the
+# SurfaceView/native overlay is not active on a particular device.
 try:
     from video_controls_ui_fix import install_video_controls_ui_fix
 
@@ -71,6 +70,17 @@ try:
         print("[VIDEO-CTRL] synchronous install returned false")
 except Exception as exc:
     print("[VIDEO-CTRL] synchronous install failed:", exc)
+
+# The controls actually visible above Android SurfaceView are native
+# ImageButtons. Give them a low-latency ACTION_DOWN transport path so playback
+# no longer waits for ACTION_UP + a Kivy Clock hop before pausing/seeking.
+try:
+    from native_video_controls_fast_fix import install_native_video_controls_fast_fix
+
+    if not install_native_video_controls_fast_fix():
+        print("[VIDEO-CTRL-FAST] synchronous install returned false")
+except Exception as exc:
+    print("[VIDEO-CTRL-FAST] synchronous install failed:", exc)
 
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
