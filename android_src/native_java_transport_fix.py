@@ -285,6 +285,10 @@ def install_native_java_transport_fix() -> bool:
         screen_cls.play_audio = play_audio_with_java_state
         screen_cls.stop_audio = stop_audio_with_java_state
         screen_cls._background_tick = background_tick_java_guard
+        # Kivy Clock's WeakMethod resolves bound callbacks by __name__.  The
+        # scheduled method lives under _background_tick, so expose the function
+        # name as an alias too; otherwise the first 1s tick can fail lookup.
+        screen_cls.background_tick_java_guard = background_tick_java_guard
         screen_cls._pymusic_native_java_transport_v1 = True
         video_cls._pymusic_native_java_transport_v1 = True
 
