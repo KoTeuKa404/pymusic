@@ -93,6 +93,17 @@ try:
 except Exception as exc:
     print("[JAVA-CTRL] synchronous install failed:", exc)
 
+# Narrow stable-regression fixes only: clamp the outer player scroll to real
+# bounds and treat YouTube RD/start_radio watch URLs as a single video so the
+# lower section is recommendations instead of a fake playlist queue.
+try:
+    from latest_regression_fix import install_latest_regression_fix
+
+    if not install_latest_regression_fix():
+        print("[LATEST-FIX] synchronous install returned false")
+except Exception as exc:
+    print("[LATEST-FIX] synchronous install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
