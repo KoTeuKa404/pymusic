@@ -33,9 +33,9 @@ def _tune_like_widget(owner) -> None:
             like_icon.size = (dp(34), dp(34))
             like_icon.font_size = "30sp"
             like_icon.text_size = (dp(34), dp(34))
-            # Material glyph sits visually high in its label box. Lowering the
-            # box as well as enlarging it aligns the thumb with the other icons.
-            like_icon.pos_hint = {"x": 0.0, "center_y": 0.39}
+            # Material glyph sits visually high in its label box. Lower it a
+            # further ~2dp so the thumb aligns with the neighboring star icon.
+            like_icon.pos_hint = {"x": 0.0, "center_y": 0.34}
             like_icon.halign = "center"
             like_icon.valign = "middle"
 
