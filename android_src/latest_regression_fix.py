@@ -3,7 +3,7 @@
 1. Prevent the outer player details ScrollView from elastically moving beyond
    its real bounds (the large white gap above the metadata).
 2. Treat YouTube `RD...` / `start_radio=1` watch URLs as a single video rather
-   than a real playlist.  The normal related-video loader then owns the lower
+   than a real playlist. The normal related-video loader then owns the lower
    section and shows `Схожі відео`.
 
 This module deliberately does not rebuild the KV/UI tree.
@@ -190,7 +190,7 @@ def _patch_player() -> bool:
                 mix = _mix_video_url(video_url)
                 if mix is not None:
                     video_url = mix[0]
-                    # A radio/mix URL is a single video in PyMusic.  Ensure a
+                    # A radio/mix URL is a single video in PyMusic. Ensure a
                     # previously opened queue cannot remain visible underneath.
                     kwargs["clear_playlist"] = True
                 return old_play_audio(self, video_url, *args, **kwargs)
@@ -227,17 +227,28 @@ def _open_audio_screen(screen) -> None:
         pass
 
 
+def _find_main_classes():
+    """Find the app classes whether p4a runs main.py as __main__ or as main."""
+    seen = set()
+    for module_name in ("main", "__main__"):
+        module = sys.modules.get(module_name)
+        if module is None or id(module) in seen:
+            continue
+        seen.add(id(module))
+        search_cls = getattr(module, "YoutubeSearchScreen", None)
+        web_cls = getattr(module, "YoutubeWebScreen", None)
+        if search_cls is not None and web_cls is not None:
+            return search_cls, web_cls
+    return None, None
+
+
 def _patch_main_classes() -> bool:
     global _MAIN_PATCHED
     with _LOCK:
         if _MAIN_PATCHED:
             return True
 
-        main_module = sys.modules.get("__main__") or sys.modules.get("main")
-        if main_module is None:
-            return False
-        search_cls = getattr(main_module, "YoutubeSearchScreen", None)
-        web_cls = getattr(main_module, "YoutubeWebScreen", None)
+        search_cls, web_cls = _find_main_classes()
         if search_cls is None or web_cls is None:
             return False
         if bool(getattr(search_cls, "_pymusic_mix_single_v1", False)):
@@ -295,7 +306,7 @@ def install_latest_regression_fix() -> bool:
 
     # search_utils is imported before YoutubeSearchScreen/YoutubeWebScreen are
     # defined in main.py, so wait briefly and patch them once their class bodies
-    # exist.  No UI polling is performed after installation.
+    # exist. No UI polling is performed after installation.
     def waiter():
         for _attempt in range(400):
             if _patch_main_classes():
