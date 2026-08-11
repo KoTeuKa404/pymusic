@@ -93,6 +93,17 @@ try:
 except Exception as exc:
     print("[JAVA-CTRL] synchronous install failed:", exc)
 
+# Restyle only the native SurfaceView timeline after the Java transport layer is
+# installed. The seek callback itself is unchanged, so audio/video sync and the
+# low-latency transport path stay intact.
+try:
+    from youtube_timeline_fix import install_youtube_timeline_fix
+
+    if not install_youtube_timeline_fix():
+        print("[YT-TIMELINE] synchronous install returned false")
+except Exception as exc:
+    print("[YT-TIMELINE] synchronous install failed:", exc)
+
 # Narrow stable-regression fixes only: clamp the outer player scroll to real
 # bounds and treat YouTube RD/start_radio watch URLs as a single video so the
 # lower section is recommendations instead of a fake playlist queue.
