@@ -104,6 +104,17 @@ try:
 except Exception as exc:
     print("[LATEST-FIX] synchronous install failed:", exc)
 
+# The video SurfaceView already keeps the real aspect ratio. Keep the Kivy
+# thumbnail on the same rule too, even if final_player_fix tries to stretch it
+# to the 16:9 viewport while aligning the native video layer.
+try:
+    from thumbnail_aspect_fix import install_thumbnail_aspect_fix
+
+    if not install_thumbnail_aspect_fix():
+        print("[THUMB-ASPECT] synchronous install returned false")
+except Exception as exc:
+    print("[THUMB-ASPECT] synchronous install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
