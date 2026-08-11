@@ -1,0 +1,25 @@
+name: Publish Release 2
+
+on:
+  push:
+    branches: [release-2-publish]
+    paths:
+      - ".github/workflows/publish-release-2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish Release 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: a39c735011bb361d781512291989347641e226a0
+        run: |
+          gh release create v2.0 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "Release 2" \
+            --notes "PyMusic Release 2. Stable release based on commit $TARGET_SHA."
