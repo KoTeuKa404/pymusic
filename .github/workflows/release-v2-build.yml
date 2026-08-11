@@ -1,0 +1,91 @@
+name: Build Release 2 APK
+
+on:
+  push:
+    branches: [release2-actions]
+    paths:
+      - ".github/workflows/release-v2-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-2:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout exact Release 2 commit
+        uses: actions/checkout@v4
+        with:
+          ref: a39c735011bb361d781512291989347641e226a0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake build-essential ccache cmake gettext git libffi-dev libltdl-dev libncurses5-dev libncursesw5-dev libssl-dev libtool ninja-build patch pkg-config unzip zip zlib1g-dev
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip wheel virtualenv
+          python -m pip install "setuptools<72" "Cython<3" "buildozer==1.5.0"
+
+      - name: Cache build files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            .buildozer/android/platform
+          key: pymusic-release-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'p4a-recipes/**') }}
+
+      - name: Build exact v2.0 APK
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          PYTHONUNBUFFERED: "1"
+        run: |
+          sed -i 's/-Xmx6144m/-Xmx4096m/g' buildozer.spec
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
+          set +e
+          yes | buildozer -v android debug 2>&1 | tee buildozer-release-v2.log
+          BUILD_STATUS=${PIPESTATUS[1]}
+          set -e
+          exit "$BUILD_STATUS"
+
+      - name: Prepare release APK
+        shell: bash
+        run: |
+          mkdir -p dist
+          APK_PATH="$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK_PATH"
+          cp "$APK_PATH" "dist/PyMusic-v2.0.apk"
+
+      - name: Attach APK to Release 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload v2.0 "dist/PyMusic-v2.0.apk#PyMusic-v2.0.apk" --clobber
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyMusic-v2-build-log-${{ github.sha }}
+          path: buildozer-release-v2.log
+          if-no-files-found: ignore
+          retention-days: 7
