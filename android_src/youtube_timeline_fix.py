@@ -1,8 +1,7 @@
 """YouTube-style native video timeline for the Android SurfaceView overlay.
 
-This patch changes only the native timeline UI.  Audio remains the master
-MediaPlayer and the existing seek callback still performs the real seek, so the
-transport/sync fixes are left untouched.
+This patch owns only the native timeline UI. Audio remains the master
+MediaPlayer and the existing seek callback still performs the real seek.
 """
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ def install_youtube_timeline_fix() -> bool:
             cls = getattr(vpmod, "AndroidVideoPlayer", None)
             if cls is None:
                 return False
-            if bool(getattr(cls, "_pymusic_youtube_timeline_v1", False)):
+            if bool(getattr(cls, "_pymusic_youtube_timeline_v2", False)):
                 _PATCHED = True
                 return True
 
@@ -39,18 +38,30 @@ def install_youtube_timeline_fix() -> bool:
                     density = 1.0
                 return max(1, int(round(float(dp_value) * density)))
 
-            def style_seekbar(seek_bar):
-                """Thin YouTube-like track with a large finger hit area."""
+            def make_thumb(active: bool):
+                activity = vpmod.PythonActivity.mActivity
+                size = px(activity, 12 if active else 6)
+                thumb = vpmod.GradientDrawable()
+                thumb.setShape(vpmod.GradientDrawable.OVAL)
+                thumb.setColor(vpmod.Color.argb(255, 255, 0, 0))
+                try:
+                    thumb.setSize(size, size)
+                except Exception:
+                    pass
+                return thumb, size
+
+            def style_seekbar(seek_bar, active: bool = False):
+                """YouTube-like 2dp track + small idle thumb / large drag thumb."""
                 try:
                     activity = vpmod.PythonActivity.mActivity
-                    hit_h = px(activity, 30)
-                    track_h = px(activity, 3)
+                    hit_h = px(activity, 28)
+                    track_h = px(activity, 2)
                     radius = max(1, track_h // 2)
                     inset_y = max(0, (hit_h - track_h) // 2)
 
                     background = vpmod.GradientDrawable()
                     background.setShape(vpmod.GradientDrawable.RECTANGLE)
-                    background.setColor(vpmod.Color.argb(105, 255, 255, 255))
+                    background.setColor(vpmod.Color.argb(115, 255, 255, 255))
                     background.setCornerRadius(float(radius))
                     try:
                         background.setSize(1, track_h)
@@ -69,7 +80,7 @@ def install_youtube_timeline_fix() -> bool:
                     progress_clip = vpmod.ClipDrawable(
                         progress,
                         vpmod.Gravity.LEFT,
-                        1,  # ClipDrawable.HORIZONTAL
+                        1,
                     )
                     layers = vpmod.LayerDrawable([background, progress_clip])
                     try:
@@ -81,14 +92,7 @@ def install_youtube_timeline_fix() -> bool:
                         pass
                     seek_bar.setProgressDrawable(layers)
 
-                    thumb = vpmod.GradientDrawable()
-                    thumb.setShape(vpmod.GradientDrawable.OVAL)
-                    thumb.setColor(vpmod.Color.argb(255, 255, 0, 0))
-                    thumb_size = px(activity, 12)
-                    try:
-                        thumb.setSize(thumb_size, thumb_size)
-                    except Exception:
-                        pass
+                    thumb, thumb_size = make_thumb(active)
                     seek_bar.setThumb(thumb)
                     try:
                         seek_bar.setThumbOffset(thumb_size // 2)
@@ -97,9 +101,7 @@ def install_youtube_timeline_fix() -> bool:
                         seek_bar.setSplitTrack(False)
                     except Exception:
                         pass
-                    # The visible track is thin; this height remains a generous
-                    # touch target for a finger, like YouTube mobile.
-                    seek_bar.setPadding(px(activity, 2), 0, px(activity, 2), 0)
+                    seek_bar.setPadding(px(activity, 1), 0, px(activity, 1), 0)
                     seek_bar.setClickable(True)
                     seek_bar.setFocusable(False)
                     try:
@@ -107,8 +109,6 @@ def install_youtube_timeline_fix() -> bool:
                     except Exception:
                         pass
                 except Exception:
-                    # Safe fallback on vendor Android implementations that reject
-                    # custom LayerDrawable geometry.
                     try:
                         seek_bar.setProgressTintList(
                             vpmod.ColorStateList.valueOf(
@@ -117,7 +117,7 @@ def install_youtube_timeline_fix() -> bool:
                         )
                         seek_bar.setProgressBackgroundTintList(
                             vpmod.ColorStateList.valueOf(
-                                vpmod.Color.argb(105, 255, 255, 255)
+                                vpmod.Color.argb(115, 255, 255, 255)
                             )
                         )
                         seek_bar.setThumbTintList(
@@ -163,7 +163,65 @@ def install_youtube_timeline_fix() -> bool:
                 )
 
             cls._set_native_time_text = set_time_text
-            cls._style_youtube_seekbar = lambda self, seek_bar: style_seekbar(seek_bar)
+            cls._style_youtube_seekbar = (
+                lambda self, seek_bar: style_seekbar(
+                    seek_bar,
+                    bool(getattr(self, "_native_seek_dragging", False)),
+                )
+            )
+
+            class YoutubeSeekListener(vpmod.PythonJavaClass):
+                __javainterfaces__ = [
+                    "android/widget/SeekBar$OnSeekBarChangeListener"
+                ]
+                __javacontext__ = "app"
+
+                def __init__(self, owner):
+                    super().__init__()
+                    self._owner = owner
+
+                @vpmod.java_method("(Landroid/widget/SeekBar;IZ)V")
+                def onProgressChanged(self, seek_bar, progress, from_user):
+                    try:
+                        current = int(progress or 0)
+                        self._owner._pymusic_timeline_current_ms = current
+                        if from_user:
+                            self._owner._set_native_time_text(
+                                current_ms=current
+                            )
+                    except Exception:
+                        pass
+
+                @vpmod.java_method("(Landroid/widget/SeekBar;)V")
+                def onStartTrackingTouch(self, seek_bar):
+                    try:
+                        self._owner._native_seek_dragging = True
+                        style_seekbar(seek_bar, True)
+                        self._owner._set_native_time_text(
+                            current_ms=int(seek_bar.getProgress() or 0)
+                        )
+                    except Exception:
+                        pass
+
+                @vpmod.java_method("(Landroid/widget/SeekBar;)V")
+                def onStopTrackingTouch(self, seek_bar):
+                    try:
+                        position = int(seek_bar.getProgress() or 0)
+                    except Exception:
+                        position = 0
+                    try:
+                        self._owner._native_seek_dragging = False
+                        style_seekbar(seek_bar, False)
+                    except Exception:
+                        pass
+                    try:
+                        cb = self._owner._native_seek_callback
+                        if callable(cb):
+                            cb(position)
+                    except Exception:
+                        pass
+
+            cls._OnSeekBarChangeListener = YoutubeSeekListener
 
             @vpmod.run_on_ui_thread
             def apply_timeline(owner):
@@ -173,23 +231,37 @@ def install_youtube_timeline_fix() -> bool:
                     if overlay is None or seek_bar is None:
                         return
 
-                    # If the new container is still attached, only refresh the
-                    # seekbar style.  No repeated hierarchy rebuilds.
+                    activity = vpmod.PythonActivity.mActivity
+
+                    for attr in ("_native_current_time", "_native_total_time"):
+                        old_label = getattr(owner, attr, None)
+                        if old_label is not None:
+                            try:
+                                old_label.setVisibility(vpmod.View.GONE)
+                            except Exception:
+                                pass
+
                     container = getattr(
                         owner, "_pymusic_timeline_container", None
                     )
                     if container is not None:
                         try:
                             if container.getParent() is overlay:
-                                style_seekbar(seek_bar)
+                                style_seekbar(
+                                    seek_bar,
+                                    bool(
+                                        getattr(
+                                            owner,
+                                            "_native_seek_dragging",
+                                            False,
+                                        )
+                                    ),
+                                )
                                 owner._set_native_time_text()
                                 return
                         except Exception:
                             pass
 
-                    activity = vpmod.PythonActivity.mActivity
-
-                    # Detach the legacy "current | seekbar | total" row.
                     old_parent = None
                     try:
                         old_parent = seek_bar.getParent()
@@ -217,7 +289,7 @@ def install_youtube_timeline_fix() -> bool:
                     time_label = vpmod.TextView(activity)
                     time_label.setText(vpmod.String("0:00 / 0:00"))
                     time_label.setTextColor(
-                        vpmod.Color.argb(235, 255, 255, 255)
+                        vpmod.Color.argb(238, 255, 255, 255)
                     )
                     time_label.setTextSize(12.0)
                     time_label.setGravity(
@@ -225,11 +297,11 @@ def install_youtube_timeline_fix() -> bool:
                     )
                     try:
                         time_label.setShadowLayer(
-                            3.0, 0.0, 1.0, vpmod.Color.argb(210, 0, 0, 0)
+                            3.0,
+                            0.0,
+                            1.0,
+                            vpmod.Color.argb(210, 0, 0, 0),
                         )
-                    except Exception:
-                        pass
-                    try:
                         time_label.setClickable(False)
                         time_label.setFocusable(False)
                     except Exception:
@@ -237,27 +309,34 @@ def install_youtube_timeline_fix() -> bool:
 
                     label_params = vpmod.FrameLayoutLayoutParams(
                         vpmod.FrameLayoutLayoutParams.WRAP_CONTENT,
-                        px(activity, 22),
+                        px(activity, 20),
                     )
-                    label_params.gravity = vpmod.Gravity.LEFT | vpmod.Gravity.BOTTOM
+                    label_params.gravity = (
+                        vpmod.Gravity.LEFT | vpmod.Gravity.BOTTOM
+                    )
                     label_params.leftMargin = px(activity, 10)
-                    label_params.bottomMargin = px(activity, 18)
+                    label_params.bottomMargin = px(activity, 15)
                     timeline.addView(time_label, label_params)
 
-                    style_seekbar(seek_bar)
+                    owner._native_seek_listener = YoutubeSeekListener(owner)
+                    seek_bar.setOnSeekBarChangeListener(
+                        owner._native_seek_listener
+                    )
+                    style_seekbar(seek_bar, False)
+
                     seek_params = vpmod.FrameLayoutLayoutParams(
                         vpmod.FrameLayoutLayoutParams.MATCH_PARENT,
-                        px(activity, 30),
+                        px(activity, 28),
                     )
                     seek_params.gravity = vpmod.Gravity.BOTTOM
-                    seek_params.leftMargin = px(activity, 4)
-                    seek_params.rightMargin = px(activity, 4)
-                    seek_params.bottomMargin = 0
+                    seek_params.leftMargin = 0
+                    seek_params.rightMargin = 0
+                    seek_params.bottomMargin = -px(activity, 8)
                     timeline.addView(seek_bar, seek_params)
 
                     timeline_params = vpmod.FrameLayoutLayoutParams(
                         vpmod.FrameLayoutLayoutParams.MATCH_PARENT,
-                        px(activity, 46),
+                        px(activity, 38),
                     )
                     timeline_params.gravity = vpmod.Gravity.BOTTOM
                     timeline_params.bottomMargin = 0
@@ -271,9 +350,6 @@ def install_youtube_timeline_fix() -> bool:
                     owner._pymusic_timeline_total_ms = int(
                         getattr(owner, "_pymusic_timeline_total_ms", 0) or 0
                     )
-
-                    # Keep only the combined time label authoritative. The old
-                    # detached TextViews are intentionally no longer updated.
                     owner._native_current_time = None
                     owner._native_total_time = None
                     owner._set_native_time_text()
@@ -295,7 +371,7 @@ def install_youtube_timeline_fix() -> bool:
 
             def ensure_with_timeline(self, *args, **kwargs):
                 result = old_ensure(self, *args, **kwargs)
-                for delay in (0.01, 0.06, 0.18):
+                for delay in (0.0, 0.03, 0.10, 0.24):
                     Clock.schedule_once(
                         lambda _dt, owner=self: apply_timeline(owner), delay
                     )
@@ -304,18 +380,19 @@ def install_youtube_timeline_fix() -> bool:
             def visible_with_timeline(self, visible):
                 result = old_visible(self, visible)
                 if visible:
-                    for delay in (0.0, 0.05):
+                    for delay in (0.0, 0.03, 0.10):
                         Clock.schedule_once(
-                            lambda _dt, owner=self: apply_timeline(owner), delay
+                            lambda _dt, owner=self: apply_timeline(owner),
+                            delay,
                         )
                 return result
 
             cls._ensure_controls_overlay = ensure_with_timeline
             cls.set_native_controls_visible = visible_with_timeline
-            cls._pymusic_youtube_timeline_v1 = True
+            cls._pymusic_youtube_timeline_v2 = True
 
             _PATCHED = True
-            print("[YT-TIMELINE] YouTube-style native timeline v1 enabled")
+            print("[YT-TIMELINE] YouTube-style native timeline v2 enabled")
             return True
         except Exception as exc:
             try:
