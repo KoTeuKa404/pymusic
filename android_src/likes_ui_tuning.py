@@ -17,8 +17,6 @@ def _tune_like_widget(owner) -> None:
         if holder is None:
             return
 
-        # Give the enlarged thumb a little more horizontal room while keeping
-        # the whole action row compact on phones.
         holder.size_hint = (None, None)
         holder.size = (dp(106), dp(46))
 
@@ -33,9 +31,8 @@ def _tune_like_widget(owner) -> None:
             like_icon.size = (dp(34), dp(34))
             like_icon.font_size = "30sp"
             like_icon.text_size = (dp(34), dp(34))
-            # Material glyph sits visually high in its label box. Lower it a
-            # further ~2dp so the thumb aligns with the neighboring star icon.
-            like_icon.pos_hint = {"x": 0.0, "center_y": 0.34}
+            # One more tiny downward correction from the screenshot.
+            like_icon.pos_hint = {"x": 0.0, "center_y": 0.31}
             like_icon.halign = "center"
             like_icon.valign = "middle"
 
@@ -64,15 +61,28 @@ def _tune_channel_row(owner) -> None:
         avatar = owner.ids.get("channel_avatar")
         parent = getattr(favorite, "parent", None) if favorite is not None else None
 
+        # Keep the row geometry unchanged; only lower the avatar/channel content
+        # by ~2px on a typical phone so it visually aligns with the action icons.
+        if avatar is not None:
+            try:
+                avatar.pos_hint = {"center_y": 0.45}
+            except Exception:
+                pass
+
         if channel is not None:
             channel.bold = True
             channel.size_hint_x = 1
+            channel.size_hint_y = None
+            channel.height = dp(40)
+            channel.pos_hint = {"center_y": 0.45}
             channel.shorten = True
             channel.shorten_from = "right"
-            channel.text_size = (channel.width, dp(22))
+            channel.halign = "left"
+            channel.valign = "middle"
+            channel.text_size = (channel.width, dp(24))
             if not bool(getattr(channel, "_pymusic_width_bound", False)):
                 def _sync_text_width(instance, width):
-                    instance.text_size = (width, dp(22))
+                    instance.text_size = (width, dp(24))
 
                 channel.bind(width=_sync_text_width)
                 channel._pymusic_width_bound = True
@@ -86,9 +96,6 @@ def _tune_channel_row(owner) -> None:
         for child in list(getattr(parent, "children", []) or []):
             if child in known or bool(getattr(child, "_pymusic_like_stats", False)):
                 continue
-            # The KV row contains a flexible spacer. Collapse only anonymous
-            # plain Widgets so the action buttons and like-stat holder cannot
-            # overlap due to competing width hints.
             if type(child) is Widget:
                 child.size_hint_x = None
                 child.width = 0
@@ -100,7 +107,7 @@ def apply_likes_ui_tuning(likes_module) -> bool:
     """Apply layout/icon tuning without replacing the like renderer."""
     if likes_module is None:
         return False
-    if bool(getattr(likes_module, "_pymusic_visual_tuning_v5", False)):
+    if bool(getattr(likes_module, "_pymusic_visual_tuning_v6", False)):
         return True
 
     old_ensure = getattr(likes_module, "_ensure_stats_widget", None)
@@ -114,5 +121,5 @@ def apply_likes_ui_tuning(likes_module) -> bool:
         return result
 
     likes_module._ensure_stats_widget = ensure_stats_widget_tuned
-    likes_module._pymusic_visual_tuning_v5 = True
+    likes_module._pymusic_visual_tuning_v6 = True
     return True
