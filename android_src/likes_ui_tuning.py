@@ -31,8 +31,8 @@ def _tune_like_widget(owner) -> None:
             like_icon.size = (dp(34), dp(34))
             like_icon.font_size = "30sp"
             like_icon.text_size = (dp(34), dp(34))
-            # One more tiny downward correction from the screenshot.
-            like_icon.pos_hint = {"x": 0.0, "center_y": 0.31}
+            # Lower the thumb by another ~2dp inside the 46dp stats holder.
+            like_icon.pos_hint = {"x": 0.0, "center_y": 0.27}
             like_icon.halign = "center"
             like_icon.valign = "middle"
 
@@ -61,11 +61,11 @@ def _tune_channel_row(owner) -> None:
         avatar = owner.ids.get("channel_avatar")
         parent = getattr(favorite, "parent", None) if favorite is not None else None
 
-        # Keep the row geometry unchanged; only lower the avatar/channel content
-        # by ~2px on a typical phone so it visually aligns with the action icons.
+        # Lower both avatar and channel name by another ~2dp without changing
+        # the 46dp row height or the neighboring action-button geometry.
         if avatar is not None:
             try:
-                avatar.pos_hint = {"center_y": 0.45}
+                avatar.pos_hint = {"center_y": 0.41}
             except Exception:
                 pass
 
@@ -74,7 +74,7 @@ def _tune_channel_row(owner) -> None:
             channel.size_hint_x = 1
             channel.size_hint_y = None
             channel.height = dp(40)
-            channel.pos_hint = {"center_y": 0.45}
+            channel.pos_hint = {"center_y": 0.41}
             channel.shorten = True
             channel.shorten_from = "right"
             channel.halign = "left"
@@ -107,7 +107,7 @@ def apply_likes_ui_tuning(likes_module) -> bool:
     """Apply layout/icon tuning without replacing the like renderer."""
     if likes_module is None:
         return False
-    if bool(getattr(likes_module, "_pymusic_visual_tuning_v6", False)):
+    if bool(getattr(likes_module, "_pymusic_visual_tuning_v7", False)):
         return True
 
     old_ensure = getattr(likes_module, "_ensure_stats_widget", None)
@@ -121,5 +121,5 @@ def apply_likes_ui_tuning(likes_module) -> bool:
         return result
 
     likes_module._ensure_stats_widget = ensure_stats_widget_tuned
-    likes_module._pymusic_visual_tuning_v6 = True
+    likes_module._pymusic_visual_tuning_v7 = True
     return True
