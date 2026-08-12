@@ -1,7 +1,9 @@
-"""YouTube-style native video timeline for the Android SurfaceView overlay.
+"""Stable YouTube-style native timeline for the Android video overlay.
 
-This patch owns only the native timeline UI. Audio remains the master
-MediaPlayer and the existing seek callback still performs the real seek.
+Keep Android's original progress row intact.  Some vendor Android builds do not
+render our custom LayerDrawable track even though the SeekBar thumb is visible.
+Using the platform SeekBar drawable with tint keeps the track, progress and time
+labels reliable while preserving the existing audio-master seek callback.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ def install_youtube_timeline_fix() -> bool:
             cls = getattr(vpmod, "AndroidVideoPlayer", None)
             if cls is None:
                 return False
-            if bool(getattr(cls, "_pymusic_youtube_timeline_v2", False)):
+            if bool(getattr(cls, "_pymusic_youtube_timeline_v3", False)):
                 _PATCHED = True
                 return True
 
@@ -40,7 +42,7 @@ def install_youtube_timeline_fix() -> bool:
 
             def make_thumb(active: bool):
                 activity = vpmod.PythonActivity.mActivity
-                size = px(activity, 12 if active else 6)
+                size = px(activity, 13 if active else 7)
                 thumb = vpmod.GradientDrawable()
                 thumb.setShape(vpmod.GradientDrawable.OVAL)
                 thumb.setColor(vpmod.Color.argb(255, 255, 0, 0))
@@ -51,124 +53,57 @@ def install_youtube_timeline_fix() -> bool:
                 return thumb, size
 
             def style_seekbar(seek_bar, active: bool = False):
-                """YouTube-like 2dp track + small idle thumb / large drag thumb."""
+                """Reliable platform track + YouTube-like red thumb."""
                 try:
                     activity = vpmod.PythonActivity.mActivity
-                    hit_h = px(activity, 28)
-                    track_h = px(activity, 2)
-                    radius = max(1, track_h // 2)
-                    inset_y = max(0, (hit_h - track_h) // 2)
 
-                    background = vpmod.GradientDrawable()
-                    background.setShape(vpmod.GradientDrawable.RECTANGLE)
-                    background.setColor(vpmod.Color.argb(115, 255, 255, 255))
-                    background.setCornerRadius(float(radius))
-                    try:
-                        background.setSize(1, track_h)
-                    except Exception:
-                        pass
-
-                    progress = vpmod.GradientDrawable()
-                    progress.setShape(vpmod.GradientDrawable.RECTANGLE)
-                    progress.setColor(vpmod.Color.argb(255, 255, 0, 0))
-                    progress.setCornerRadius(float(radius))
-                    try:
-                        progress.setSize(1, track_h)
-                    except Exception:
-                        pass
-
-                    progress_clip = vpmod.ClipDrawable(
-                        progress,
-                        vpmod.Gravity.LEFT,
-                        1,
+                    # Do not replace progressDrawable.  The stock Android drawable
+                    # is reliable across MIUI/HyperOS/Samsung/etc.; tint only.
+                    seek_bar.setProgressTintList(
+                        vpmod.ColorStateList.valueOf(
+                            vpmod.Color.argb(255, 255, 0, 0)
+                        )
                     )
-                    layers = vpmod.LayerDrawable([background, progress_clip])
+                    seek_bar.setProgressBackgroundTintList(
+                        vpmod.ColorStateList.valueOf(
+                            vpmod.Color.argb(145, 225, 225, 225)
+                        )
+                    )
                     try:
-                        layers.setId(0, vpmod.R_id.background)
-                        layers.setId(1, vpmod.R_id.progress)
-                        layers.setLayerInset(0, 0, inset_y, 0, inset_y)
-                        layers.setLayerInset(1, 0, inset_y, 0, inset_y)
+                        seek_bar.setSecondaryProgressTintList(
+                            vpmod.ColorStateList.valueOf(
+                                vpmod.Color.argb(120, 255, 255, 255)
+                            )
+                        )
                     except Exception:
                         pass
-                    seek_bar.setProgressDrawable(layers)
 
                     thumb, thumb_size = make_thumb(active)
                     seek_bar.setThumb(thumb)
                     try:
                         seek_bar.setThumbOffset(thumb_size // 2)
+                        seek_bar.setSplitTrack(False)
+                        # Large hit box, small visual track/thumb.
+                        hit_h = px(activity, 32)
                         seek_bar.setMinHeight(hit_h)
                         seek_bar.setMaxHeight(hit_h)
-                        seek_bar.setSplitTrack(False)
                     except Exception:
                         pass
-                    seek_bar.setPadding(px(activity, 1), 0, px(activity, 1), 0)
+                    seek_bar.setPadding(0, 0, 0, 0)
                     seek_bar.setClickable(True)
                     seek_bar.setFocusable(False)
+                    seek_bar.setVisibility(vpmod.View.VISIBLE)
+                    seek_bar.setAlpha(1.0)
                     try:
+                        seek_bar.requestLayout()
                         seek_bar.invalidate()
                     except Exception:
                         pass
-                except Exception:
+                except Exception as exc:
                     try:
-                        seek_bar.setProgressTintList(
-                            vpmod.ColorStateList.valueOf(
-                                vpmod.Color.argb(255, 255, 0, 0)
-                            )
-                        )
-                        seek_bar.setProgressBackgroundTintList(
-                            vpmod.ColorStateList.valueOf(
-                                vpmod.Color.argb(115, 255, 255, 255)
-                            )
-                        )
-                        seek_bar.setThumbTintList(
-                            vpmod.ColorStateList.valueOf(
-                                vpmod.Color.argb(255, 255, 0, 0)
-                            )
-                        )
+                        print("[YT-TIMELINE] seek style failed:", exc)
                     except Exception:
                         pass
-
-            old_time_text = cls._set_native_time_text
-
-            def set_time_text(self, current_ms=None, total_ms=None):
-                try:
-                    if current_ms is not None:
-                        self._pymusic_timeline_current_ms = max(
-                            0, int(current_ms or 0)
-                        )
-                    if total_ms is not None:
-                        self._pymusic_timeline_total_ms = max(
-                            0, int(total_ms or 0)
-                        )
-
-                    label = getattr(self, "_pymusic_timeline_time_label", None)
-                    if label is not None:
-                        current = int(
-                            getattr(self, "_pymusic_timeline_current_ms", 0) or 0
-                        )
-                        total = int(
-                            getattr(self, "_pymusic_timeline_total_ms", 0) or 0
-                        )
-                        label.setText(
-                            vpmod.String(
-                                f"{self._format_time_ms(current)} / "
-                                f"{self._format_time_ms(total)}"
-                            )
-                        )
-                        return
-                except Exception:
-                    pass
-                return old_time_text(
-                    self, current_ms=current_ms, total_ms=total_ms
-                )
-
-            cls._set_native_time_text = set_time_text
-            cls._style_youtube_seekbar = (
-                lambda self, seek_bar: style_seekbar(
-                    seek_bar,
-                    bool(getattr(self, "_native_seek_dragging", False)),
-                )
-            )
 
             class YoutubeSeekListener(vpmod.PythonJavaClass):
                 __javainterfaces__ = [
@@ -182,13 +117,12 @@ def install_youtube_timeline_fix() -> bool:
 
                 @vpmod.java_method("(Landroid/widget/SeekBar;IZ)V")
                 def onProgressChanged(self, seek_bar, progress, from_user):
+                    if not from_user:
+                        return
                     try:
-                        current = int(progress or 0)
-                        self._owner._pymusic_timeline_current_ms = current
-                        if from_user:
-                            self._owner._set_native_time_text(
-                                current_ms=current
-                            )
+                        self._owner._set_native_time_text(
+                            current_ms=int(progress or 0)
+                        )
                     except Exception:
                         pass
 
@@ -222,140 +156,129 @@ def install_youtube_timeline_fix() -> bool:
                         pass
 
             cls._OnSeekBarChangeListener = YoutubeSeekListener
+            cls._style_youtube_seekbar = (
+                lambda self, seek_bar: style_seekbar(
+                    seek_bar,
+                    bool(getattr(self, "_native_seek_dragging", False)),
+                )
+            )
 
             @vpmod.run_on_ui_thread
             def apply_timeline(owner):
                 try:
                     overlay = getattr(owner, "controls_overlay", None)
                     seek_bar = getattr(owner, "_native_seek_bar", None)
+                    current = getattr(owner, "_native_current_time", None)
+                    total = getattr(owner, "_native_total_time", None)
                     if overlay is None or seek_bar is None:
                         return
 
                     activity = vpmod.PythonActivity.mActivity
+                    row = None
+                    try:
+                        row = seek_bar.getParent()
+                    except Exception:
+                        row = None
 
-                    for attr in ("_native_current_time", "_native_total_time"):
-                        old_label = getattr(owner, attr, None)
-                        if old_label is not None:
-                            try:
-                                old_label.setVisibility(vpmod.View.GONE)
-                            except Exception:
-                                pass
+                    # The base video_player creates exactly the layout we want:
+                    # current time | seek bar | total time.  Keep it instead of
+                    # replacing/removing it as v1/v2 did.
+                    if row is None:
+                        return
 
-                    container = getattr(
-                        owner, "_pymusic_timeline_container", None
-                    )
-                    if container is not None:
+                    for label, alpha in ((current, 245), (total, 220)):
+                        if label is None:
+                            continue
                         try:
-                            if container.getParent() is overlay:
-                                style_seekbar(
-                                    seek_bar,
-                                    bool(
-                                        getattr(
-                                            owner,
-                                            "_native_seek_dragging",
-                                            False,
-                                        )
-                                    ),
+                            label.setVisibility(vpmod.View.VISIBLE)
+                            label.setAlpha(1.0)
+                            label.setTextColor(
+                                vpmod.Color.argb(alpha, 255, 255, 255)
+                            )
+                            label.setTextSize(12.0)
+                            label.setGravity(vpmod.Gravity.CENTER)
+                            label.setShadowLayer(
+                                3.0,
+                                0.0,
+                                1.0,
+                                vpmod.Color.argb(220, 0, 0, 0),
+                            )
+                        except Exception:
+                            pass
+
+                    # Restore explicit child sizing.  The times remain readable
+                    # while the seekbar takes every remaining pixel.
+                    try:
+                        if current is not None:
+                            current.setLayoutParams(
+                                vpmod.LinearLayoutLayoutParams(
+                                    px(activity, 46), px(activity, 32)
                                 )
-                                owner._set_native_time_text()
-                                return
-                        except Exception:
-                            pass
-
-                    old_parent = None
-                    try:
-                        old_parent = seek_bar.getParent()
-                    except Exception:
-                        old_parent = None
-                    if old_parent is not None:
-                        try:
-                            old_parent.removeView(seek_bar)
-                        except Exception:
-                            pass
-                        try:
-                            if old_parent.getParent() is overlay:
-                                overlay.removeView(old_parent)
-                        except Exception:
-                            pass
-
-                    timeline = vpmod.FrameLayout(activity)
-                    try:
-                        timeline.setBackgroundColor(vpmod.Color.TRANSPARENT)
-                        timeline.setClickable(False)
-                        timeline.setFocusable(False)
-                    except Exception:
-                        pass
-
-                    time_label = vpmod.TextView(activity)
-                    time_label.setText(vpmod.String("0:00 / 0:00"))
-                    time_label.setTextColor(
-                        vpmod.Color.argb(238, 255, 255, 255)
-                    )
-                    time_label.setTextSize(12.0)
-                    time_label.setGravity(
-                        vpmod.Gravity.LEFT | vpmod.Gravity.CENTER_VERTICAL
-                    )
-                    try:
-                        time_label.setShadowLayer(
-                            3.0,
-                            0.0,
-                            1.0,
-                            vpmod.Color.argb(210, 0, 0, 0),
+                            )
+                        seek_bar.setLayoutParams(
+                            vpmod.LinearLayoutLayoutParams(
+                                0, px(activity, 32), 1.0
+                            )
                         )
-                        time_label.setClickable(False)
-                        time_label.setFocusable(False)
+                        if total is not None:
+                            total.setLayoutParams(
+                                vpmod.LinearLayoutLayoutParams(
+                                    px(activity, 46), px(activity, 32)
+                                )
+                            )
                     except Exception:
                         pass
 
-                    label_params = vpmod.FrameLayoutLayoutParams(
-                        vpmod.FrameLayoutLayoutParams.WRAP_CONTENT,
-                        px(activity, 20),
-                    )
-                    label_params.gravity = (
-                        vpmod.Gravity.LEFT | vpmod.Gravity.BOTTOM
-                    )
-                    label_params.leftMargin = px(activity, 10)
-                    label_params.bottomMargin = px(activity, 15)
-                    timeline.addView(time_label, label_params)
+                    try:
+                        row.setOrientation(vpmod.LinearLayout.HORIZONTAL)
+                        row.setGravity(vpmod.Gravity.CENTER_VERTICAL)
+                        row.setPadding(
+                            px(activity, 4), 0, px(activity, 4), 0
+                        )
+                        row.setVisibility(vpmod.View.VISIBLE)
+                        row.setAlpha(1.0)
+                    except Exception:
+                        pass
+
+                    try:
+                        params = row.getLayoutParams()
+                        if params is not None:
+                            params.width = vpmod.FrameLayoutLayoutParams.MATCH_PARENT
+                            params.height = px(activity, 36)
+                            params.gravity = vpmod.Gravity.BOTTOM
+                            params.bottomMargin = 0
+                            row.setLayoutParams(params)
+                    except Exception:
+                        pass
 
                     owner._native_seek_listener = YoutubeSeekListener(owner)
                     seek_bar.setOnSeekBarChangeListener(
                         owner._native_seek_listener
                     )
-                    style_seekbar(seek_bar, False)
-
-                    seek_params = vpmod.FrameLayoutLayoutParams(
-                        vpmod.FrameLayoutLayoutParams.MATCH_PARENT,
-                        px(activity, 28),
+                    style_seekbar(
+                        seek_bar,
+                        bool(getattr(owner, "_native_seek_dragging", False)),
                     )
-                    seek_params.gravity = vpmod.Gravity.BOTTOM
-                    seek_params.leftMargin = 0
-                    seek_params.rightMargin = 0
-                    seek_params.bottomMargin = -px(activity, 8)
-                    timeline.addView(seek_bar, seek_params)
-
-                    timeline_params = vpmod.FrameLayoutLayoutParams(
-                        vpmod.FrameLayoutLayoutParams.MATCH_PARENT,
-                        px(activity, 38),
-                    )
-                    timeline_params.gravity = vpmod.Gravity.BOTTOM
-                    timeline_params.bottomMargin = 0
-                    overlay.addView(timeline, timeline_params)
-
-                    owner._pymusic_timeline_container = timeline
-                    owner._pymusic_timeline_time_label = time_label
-                    owner._pymusic_timeline_current_ms = int(
-                        getattr(owner, "_pymusic_timeline_current_ms", 0) or 0
-                    )
-                    owner._pymusic_timeline_total_ms = int(
-                        getattr(owner, "_pymusic_timeline_total_ms", 0) or 0
-                    )
-                    owner._native_current_time = None
-                    owner._native_total_time = None
-                    owner._set_native_time_text()
 
                     try:
-                        timeline.bringToFront()
+                        owner._set_native_time_text(
+                            current_ms=int(
+                                getattr(owner, "_pymusic_timeline_current_ms", 0)
+                                or 0
+                            ),
+                            total_ms=int(
+                                getattr(owner, "_pymusic_timeline_total_ms", 0)
+                                or 0
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        row.bringToFront()
+                        overlay.bringToFront()
+                        row.requestLayout()
+                        row.invalidate()
                         overlay.requestLayout()
                         overlay.invalidate()
                     except Exception:
@@ -366,12 +289,32 @@ def install_youtube_timeline_fix() -> bool:
                     except Exception:
                         pass
 
+            # Remember latest times without replacing the original TextViews.
+            old_time_text = cls._set_native_time_text
+
+            def time_text_v3(self, current_ms=None, total_ms=None):
+                if current_ms is not None:
+                    self._pymusic_timeline_current_ms = max(
+                        0, int(current_ms or 0)
+                    )
+                if total_ms is not None:
+                    self._pymusic_timeline_total_ms = max(
+                        0, int(total_ms or 0)
+                    )
+                return old_time_text(
+                    self,
+                    current_ms=current_ms,
+                    total_ms=total_ms,
+                )
+
+            cls._set_native_time_text = time_text_v3
+
             old_ensure = cls._ensure_controls_overlay
             old_visible = cls.set_native_controls_visible
 
             def ensure_with_timeline(self, *args, **kwargs):
                 result = old_ensure(self, *args, **kwargs)
-                for delay in (0.0, 0.03, 0.10, 0.24):
+                for delay in (0.0, 0.03, 0.10, 0.25):
                     Clock.schedule_once(
                         lambda _dt, owner=self: apply_timeline(owner), delay
                     )
@@ -382,17 +325,16 @@ def install_youtube_timeline_fix() -> bool:
                 if visible:
                     for delay in (0.0, 0.03, 0.10):
                         Clock.schedule_once(
-                            lambda _dt, owner=self: apply_timeline(owner),
-                            delay,
+                            lambda _dt, owner=self: apply_timeline(owner), delay
                         )
                 return result
 
             cls._ensure_controls_overlay = ensure_with_timeline
             cls.set_native_controls_visible = visible_with_timeline
-            cls._pymusic_youtube_timeline_v2 = True
+            cls._pymusic_youtube_timeline_v3 = True
 
             _PATCHED = True
-            print("[YT-TIMELINE] YouTube-style native timeline v2 enabled")
+            print("[YT-TIMELINE] stable native timeline v3 enabled")
             return True
         except Exception as exc:
             try:
