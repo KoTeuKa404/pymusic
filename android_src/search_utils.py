@@ -21,6 +21,16 @@ try:
 except Exception as exc:
     print("[PLAYBACK-V5] synchronous install failed:", exc)
 
+# Screen-off playlist transitions must not depend on Kivy Clock. Install this
+# after PLAYBACK-V5 because that layer replaces _prefetch_next_track_audio.
+try:
+    from background_playlist_transition_fix import install_background_playlist_transition_fix
+
+    if not install_background_playlist_transition_fix():
+        print("[BG-NEXT] synchronous install returned false")
+except Exception as exc:
+    print("[BG-NEXT] synchronous install failed:", exc)
+
 # Kivy Clock stores bound callbacks through WeakMethod and resolves them later
 # using the function's __name__. The runtime patch assigns the function named
 # "background_tick_with_shadow_sync" to the class attribute "_background_tick".
