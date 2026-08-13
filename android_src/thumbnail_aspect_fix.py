@@ -18,6 +18,20 @@ _STARTED = False
 _LOCK = threading.RLock()
 
 
+def _start_lower_panel() -> None:
+    """Install the final lower-player UI only after legacy player patches."""
+    try:
+        from youtube_lower_panel_fix import install_youtube_lower_panel_fix
+
+        if not install_youtube_lower_panel_fix():
+            print("[YT-LOWER] install returned false")
+    except Exception as exc:
+        try:
+            print("[YT-LOWER] install failed:", exc)
+        except Exception:
+            pass
+
+
 def _apply_thumb_ratio(owner) -> None:
     try:
         thumb = owner.ids.get("audio_thumbnail")
@@ -68,6 +82,7 @@ def _install_now() -> bool:
     global _PATCHED
     with _LOCK:
         if _PATCHED:
+            _start_lower_panel()
             return True
         try:
             import audio_screen
@@ -82,6 +97,7 @@ def _install_now() -> bool:
                 return False
             if bool(getattr(cls, "_pymusic_thumb_aspect_v1", False)):
                 _PATCHED = True
+                _start_lower_panel()
                 return True
 
             old_init = cls.__init__
@@ -137,6 +153,7 @@ def _install_now() -> bool:
 
             _PATCHED = True
             print("[THUMB-ASPECT] original preview proportions enabled")
+            _start_lower_panel()
             return True
         except Exception as exc:
             try:
