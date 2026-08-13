@@ -19,7 +19,7 @@ _LOCK = threading.RLock()
 
 
 def _start_lower_panel() -> None:
-    """Install the final lower-player UI only after legacy player patches."""
+    """Install the lower-player UI and its final zero-height guard."""
     try:
         from youtube_lower_panel_fix import install_youtube_lower_panel_fix
 
@@ -28,6 +28,20 @@ def _start_lower_panel() -> None:
     except Exception as exc:
         try:
             print("[YT-LOWER] install failed:", exc)
+        except Exception:
+            pass
+        return
+
+    try:
+        from youtube_lower_panel_visibility_fix import (
+            install_youtube_lower_panel_visibility_fix,
+        )
+
+        if not install_youtube_lower_panel_visibility_fix():
+            print("[YT-LOWER-VIS] install returned false")
+    except Exception as exc:
+        try:
+            print("[YT-LOWER-VIS] install failed:", exc)
         except Exception:
             pass
 
