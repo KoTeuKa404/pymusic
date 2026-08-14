@@ -1,8 +1,8 @@
 """Keep the player preview image at its original aspect ratio.
 
-The Android video SurfaceView already preserves video geometry.  The Kivy
+The Android video SurfaceView already preserves video geometry. The Kivy
 preview image did not: ``final_player_fix`` could set ``keep_ratio`` to False,
-so thumbnails were stretched to the fixed 16:9 player block.  This patch is
+so thumbnails were stretched to the fixed 16:9 player block. This patch is
 installed after the final player layer and makes the preview use contain/fit
 semantics without changing video playback geometry.
 """
@@ -19,7 +19,7 @@ _LOCK = threading.RLock()
 
 
 def _start_lower_panel() -> None:
-    """Install the lower-player UI and its final zero-height guard."""
+    """Install data hooks first, then the dedicated visible lower panel."""
     try:
         from youtube_lower_panel_fix import install_youtube_lower_panel_fix
 
@@ -30,18 +30,17 @@ def _start_lower_panel() -> None:
             print("[YT-LOWER] install failed:", exc)
         except Exception:
             pass
-        return
 
+    # V2 never reuses similar_scroll. It creates a dedicated child directly in
+    # player_details_scroll, so legacy recommendation geometry cannot hide it.
     try:
-        from youtube_lower_panel_visibility_fix import (
-            install_youtube_lower_panel_visibility_fix,
-        )
+        from youtube_lower_panel_v2 import install_youtube_lower_panel_v2
 
-        if not install_youtube_lower_panel_visibility_fix():
-            print("[YT-LOWER-VIS] install returned false")
+        if not install_youtube_lower_panel_v2():
+            print("[YT-LOWER-V2] install returned false")
     except Exception as exc:
         try:
-            print("[YT-LOWER-VIS] install failed:", exc)
+            print("[YT-LOWER-V2] install failed:", exc)
         except Exception:
             pass
 
