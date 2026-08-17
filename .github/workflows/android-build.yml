@@ -89,16 +89,46 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # GitHub Actions artifacts are always downloaded as ZIP archives.
-          # Keep one moving prerelease instead, so the asset itself downloads
-          # directly as PyMusic-debug.apk with no ZIP wrapper or hash filename.
-          gh release delete latest-debug --cleanup-tag --yes >/dev/null 2>&1 || true
-          gh release create latest-debug \
-            "dist/PyMusic-debug.apk#PyMusic-debug.apk" \
-            --target "$GITHUB_SHA" \
-            --title "PyMusic latest debug APK" \
-            --notes "Latest debug APK built from commit $GITHUB_SHA." \
-            --prerelease
+          # Keep one moving prerelease whose APK can be downloaded directly.
+          # Do not delete/recreate the release: transient GitHub API failures can
+          # leave the tag in place and make the following create fail. Updating
+          # the existing release is idempotent and safe for repeated builds.
+          publish_latest() {
+            if gh release view latest-debug >/dev/null 2>&1; then
+              gh api \
+                --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest-debug" \
+                -f sha="$GITHUB_SHA" \
+                -F force=true >/dev/null
+
+              gh release upload latest-debug \
+                "dist/PyMusic-debug.apk#PyMusic-debug.apk" \
+                --clobber
+
+              gh release edit latest-debug \
+                --title "PyMusic latest debug APK" \
+                --notes "Latest debug APK built from commit $GITHUB_SHA." \
+                --prerelease
+            else
+              gh release create latest-debug \
+                "dist/PyMusic-debug.apk#PyMusic-debug.apk" \
+                --target "$GITHUB_SHA" \
+                --title "PyMusic latest debug APK" \
+                --notes "Latest debug APK built from commit $GITHUB_SHA." \
+                --prerelease
+            fi
+          }
+
+          for attempt in 1 2 3; do
+            if publish_latest; then
+              exit 0
+            fi
+            echo "GitHub release publish attempt ${attempt}/3 failed; retrying..." >&2
+            sleep $((attempt * 4))
+          done
+
+          echo "Unable to publish latest-debug after 3 attempts." >&2
+          exit 1
 
       - name: Upload log on failure
         if: failure()
