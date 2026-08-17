@@ -12,7 +12,7 @@ _LOCK = threading.RLock()
 
 
 def _start_lower_panel() -> None:
-    """Install data hooks, visible panel, then live ScreenManager recovery."""
+    """Install data hooks, then render the UI in the permanent KV slot."""
     try:
         from youtube_lower_panel_fix import install_youtube_lower_panel_fix
         if not install_youtube_lower_panel_fix():
@@ -20,20 +20,15 @@ def _start_lower_panel() -> None:
     except Exception as exc:
         print("[YT-LOWER] install failed:", exc)
 
+    # V3 deliberately replaces the old runtime-mounted V2 panel.  The player
+    # already owns similar_scroll/similar_list in youtube_gui.kv, so using that
+    # static slot avoids lifecycle races and ScrollView child-order problems.
     try:
-        from youtube_lower_panel_v2 import install_youtube_lower_panel_v2
-        if not install_youtube_lower_panel_v2():
-            print("[YT-LOWER-V2] install returned false")
+        from youtube_lower_panel_static_v3 import install_youtube_lower_panel_static_v3
+        if not install_youtube_lower_panel_static_v3():
+            print("[YT-LOWER-V3] install returned false")
     except Exception as exc:
-        print("[YT-LOWER-V2] install failed:", exc)
-
-    # Final recovery knows the actual PyMusic root shape: App.root.sm.
-    try:
-        from youtube_lower_panel_mount_fix import install_youtube_lower_panel_mount_fix
-        if not install_youtube_lower_panel_mount_fix():
-            print("[YT-LOWER-MOUNT] install returned false")
-    except Exception as exc:
-        print("[YT-LOWER-MOUNT] install failed:", exc)
+        print("[YT-LOWER-V3] install failed:", exc)
 
 
 def _apply_thumb_ratio(owner) -> None:
