@@ -1,11 +1,4 @@
-"""Keep the player preview image at its original aspect ratio.
-
-The Android video SurfaceView already preserves video geometry. The Kivy
-preview image did not: ``final_player_fix`` could set ``keep_ratio`` to False,
-so thumbnails were stretched to the fixed 16:9 player block. This patch is
-installed after the final player layer and makes the preview use contain/fit
-semantics without changing video playback geometry.
-"""
+"""Keep preview aspect ratio and bootstrap final lower-player UI patches."""
 from __future__ import annotations
 
 import threading
@@ -19,30 +12,28 @@ _LOCK = threading.RLock()
 
 
 def _start_lower_panel() -> None:
-    """Install data hooks first, then the dedicated visible lower panel."""
+    """Install data hooks, visible panel, then live ScreenManager recovery."""
     try:
         from youtube_lower_panel_fix import install_youtube_lower_panel_fix
-
         if not install_youtube_lower_panel_fix():
             print("[YT-LOWER] install returned false")
     except Exception as exc:
-        try:
-            print("[YT-LOWER] install failed:", exc)
-        except Exception:
-            pass
+        print("[YT-LOWER] install failed:", exc)
 
-    # V2 never reuses similar_scroll. It creates a dedicated child directly in
-    # player_details_scroll, so legacy recommendation geometry cannot hide it.
     try:
         from youtube_lower_panel_v2 import install_youtube_lower_panel_v2
-
         if not install_youtube_lower_panel_v2():
             print("[YT-LOWER-V2] install returned false")
     except Exception as exc:
-        try:
-            print("[YT-LOWER-V2] install failed:", exc)
-        except Exception:
-            pass
+        print("[YT-LOWER-V2] install failed:", exc)
+
+    # Final recovery knows the actual PyMusic root shape: App.root.sm.
+    try:
+        from youtube_lower_panel_mount_fix import install_youtube_lower_panel_mount_fix
+        if not install_youtube_lower_panel_mount_fix():
+            print("[YT-LOWER-MOUNT] install returned false")
+    except Exception as exc:
+        print("[YT-LOWER-MOUNT] install failed:", exc)
 
 
 def _apply_thumb_ratio(owner) -> None:
@@ -56,9 +47,6 @@ def _apply_thumb_ratio(owner) -> None:
             thumb.keep_ratio = True
         except Exception:
             pass
-
-        # Kivy 2.3 uses fit_mode as the authoritative sizing behaviour.
-        # "contain" shows the complete image and never changes its proportions.
         try:
             if hasattr(thumb, "fit_mode"):
                 thumb.fit_mode = "contain"
@@ -85,10 +73,7 @@ def _apply_thumb_ratio(owner) -> None:
         except Exception:
             pass
     except Exception as exc:
-        try:
-            print("[THUMB-ASPECT] apply failed:", exc)
-        except Exception:
-            pass
+        print("[THUMB-ASPECT] apply failed:", exc)
 
 
 def _install_now() -> bool:
@@ -97,17 +82,15 @@ def _install_now() -> bool:
         if _PATCHED:
             _start_lower_panel()
             return True
+
         try:
             import audio_screen
-
             cls = getattr(audio_screen, "AudioPlayerScreen", None)
             if cls is None:
                 return False
-
-            # Install after final_player_fix so our wrapper/guard is the last
-            # authority if that layer tries to set keep_ratio=False again.
             if not bool(getattr(cls, "_pymusic_final_player_v2", False)):
                 return False
+
             if bool(getattr(cls, "_pymusic_thumb_aspect_v1", False)):
                 _PATCHED = True
                 _start_lower_panel()
@@ -128,8 +111,9 @@ def _install_now() -> bool:
                     )
 
             def init_fixed(self, *args, **kwargs):
-                old_init(self, *args, **kwargs)
+                result = old_init(self, *args, **kwargs)
                 queue(self)
+                return result
 
             def pre_enter_fixed(self, *args, **kwargs):
                 result = old_pre_enter(self, *args, **kwargs)
@@ -169,10 +153,7 @@ def _install_now() -> bool:
             _start_lower_panel()
             return True
         except Exception as exc:
-            try:
-                print("[THUMB-ASPECT] install failed:", exc)
-            except Exception:
-                pass
+            print("[THUMB-ASPECT] install failed:", exc)
             return False
 
 
@@ -191,10 +172,7 @@ def install_thumbnail_aspect_fix() -> bool:
             if _install_now():
                 return
             time.sleep(0.05)
-        try:
-            print("[THUMB-ASPECT] install timeout")
-        except Exception:
-            pass
+        print("[THUMB-ASPECT] install timeout")
 
     threading.Thread(
         target=waiter,
