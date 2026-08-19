@@ -1,4 +1,9 @@
-"""Keep preview aspect ratio and bootstrap final lower-player UI patches."""
+"""Keep the player preview image in its original aspect ratio.
+
+This module intentionally owns only thumbnail geometry.  Recommendations and
+autoplay are installed independently by current_video_related_fix so a failure
+in one visual patch cannot silently disable the lower player experience.
+"""
 from __future__ import annotations
 
 import threading
@@ -9,26 +14,6 @@ from kivy.clock import Clock
 _PATCHED = False
 _STARTED = False
 _LOCK = threading.RLock()
-
-
-def _start_lower_panel() -> None:
-    """Install data hooks, then render the UI in the permanent KV slot."""
-    try:
-        from youtube_lower_panel_fix import install_youtube_lower_panel_fix
-        if not install_youtube_lower_panel_fix():
-            print("[YT-LOWER] install returned false")
-    except Exception as exc:
-        print("[YT-LOWER] install failed:", exc)
-
-    # V3 deliberately replaces the old runtime-mounted V2 panel.  The player
-    # already owns similar_scroll/similar_list in youtube_gui.kv, so using that
-    # static slot avoids lifecycle races and ScrollView child-order problems.
-    try:
-        from youtube_lower_panel_static_v3 import install_youtube_lower_panel_static_v3
-        if not install_youtube_lower_panel_static_v3():
-            print("[YT-LOWER-V3] install returned false")
-    except Exception as exc:
-        print("[YT-LOWER-V3] install failed:", exc)
 
 
 def _apply_thumb_ratio(owner) -> None:
@@ -75,7 +60,6 @@ def _install_now() -> bool:
     global _PATCHED
     with _LOCK:
         if _PATCHED:
-            _start_lower_panel()
             return True
 
         try:
@@ -88,7 +72,6 @@ def _install_now() -> bool:
 
             if bool(getattr(cls, "_pymusic_thumb_aspect_v1", False)):
                 _PATCHED = True
-                _start_lower_panel()
                 return True
 
             old_init = cls.__init__
@@ -145,7 +128,6 @@ def _install_now() -> bool:
 
             _PATCHED = True
             print("[THUMB-ASPECT] original preview proportions enabled")
-            _start_lower_panel()
             return True
         except Exception as exc:
             print("[THUMB-ASPECT] install failed:", exc)
