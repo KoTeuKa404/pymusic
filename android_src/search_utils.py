@@ -136,6 +136,17 @@ try:
 except Exception as exc:
     print("[THUMB-ASPECT] synchronous install failed:", exc)
 
+# Final owner of the current-video -> recommendations -> autoplay chain.
+# It has its own readiness waiter, so it installs after the old core/final
+# patches even when recent_utils finishes asynchronously.
+try:
+    from current_video_related_fix import install_current_video_related_fix
+
+    if not install_current_video_related_fix():
+        print("[CURRENT-V4] install returned false")
+except Exception as exc:
+    print("[CURRENT-V4] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
