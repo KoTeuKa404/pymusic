@@ -170,6 +170,17 @@ try:
 except Exception as exc:
     print("[STABILITY-V6] install failed:", exc)
 
+# yt-dlp's 2026 client table no longer embeds INNERTUBE_API_KEY. If a watch page
+# does not expose it in ytcfg either, scrape YouTube's current public web key
+# over verified HTTPS and use it for the exact watch-next request.
+try:
+    from watch_next_key_fix_v7 import install_watch_next_key_fix_v7
+
+    if not install_watch_next_key_fix_v7():
+        print("[WATCH-NEXT-V7] install returned false")
+except Exception as exc:
+    print("[WATCH-NEXT-V7] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
