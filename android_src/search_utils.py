@@ -147,6 +147,17 @@ try:
 except Exception as exc:
     print("[CURRENT-V4] install failed:", exc)
 
+# If a fast-opened playlist queue omits the already-playing seed video, index 0
+# is the first *next* item. The normal next() call would skip it and jump to 1.
+# Install this after CURRENT-V4 because that layer also wraps auto-next.
+try:
+    from playlist_first_track_fix import install_playlist_first_track_fix
+
+    if not install_playlist_first_track_fix():
+        print("[PLAYLIST-FIRST] install returned false")
+except Exception as exc:
+    print("[PLAYLIST-FIRST] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
