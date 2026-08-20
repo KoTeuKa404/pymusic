@@ -158,6 +158,18 @@ try:
 except Exception as exc:
     print("[PLAYLIST-FIRST] install failed:", exc)
 
+# Final stability owner: aligns queue index to the actually playing URL before
+# any next(), waits through real offline periods without resetting video state,
+# supplies yt-dlp's current public Innertube key to watch-next, and keeps the
+# optional comments extractor from competing with critical startup workers.
+try:
+    from player_stability_v6 import install_player_stability_v6
+
+    if not install_player_stability_v6():
+        print("[STABILITY-V6] install returned false")
+except Exception as exc:
+    print("[STABILITY-V6] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
