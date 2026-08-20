@@ -181,6 +181,17 @@ try:
 except Exception as exc:
     print("[WATCH-NEXT-V7] install failed:", exc)
 
+# Preserve the native video surface during a real network outage instead of
+# calling AndroidVideoPlayer.stop() on the first MediaPlayer network error.
+# The audio recovery layer above owns the reconnect and resumes the same URL.
+try:
+    from video_network_stability_v8 import install_video_network_stability_v8
+
+    if not install_video_network_stability_v8():
+        print("[VIDEO-NET-V8] install returned false")
+except Exception as exc:
+    print("[VIDEO-NET-V8] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
