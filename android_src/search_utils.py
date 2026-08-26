@@ -192,6 +192,27 @@ try:
 except Exception as exc:
     print("[VIDEO-NET-V8] install failed:", exc)
 
+# Make an explicit user-selected track replace the old playing MediaPlayer
+# immediately. This file existed in master already but was not actually loaded.
+try:
+    from fast_track_switch_v9 import install_fast_track_switch_v9
+
+    if not install_fast_track_switch_v9():
+        print("[FAST-SWITCH-V9] install returned false")
+except Exception as exc:
+    print("[FAST-SWITCH-V9] install failed:", exc)
+
+# Long sessions must not restart merely because the signed direct stream URL is
+# nearing expiry. Refresh only a spare URL in the background and recover only
+# after a confirmed stall, preserving the last known playback position.
+try:
+    from long_playback_stability_v10 import install_long_playback_stability_v10
+
+    if not install_long_playback_stability_v10():
+        print("[LONGPLAY-V10] install returned false")
+except Exception as exc:
+    print("[LONGPLAY-V10] install failed:", exc)
+
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
 
