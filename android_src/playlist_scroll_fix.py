@@ -1,16 +1,20 @@
-"""Single-scroll playlist/title hotfix v8.
+"""Nested playlist scrolling hotfix v9.
 
-The player already has an outer ``player_details_scroll``.  A second vertical
-ScrollView around the playlist caused Android gestures to fight each other:
-touches inside the playlist disabled the outer scroller and made both the queue
-and the rest of the player feel stuck.  V8 keeps the playlist viewport as a
-non-scrolling container whose height follows its rendered rows, so the whole
-player uses exactly one vertical gesture surface.
+The previous single-scroll v8 deliberately disabled ``playlist_scroll`` and
+expanded the queue to the full row height.  That avoided two ScrollViews
+fighting over one gesture, but it also meant the playlist itself could no longer
+be swiped and large queues were truncated to a 28-row window.
+
+V9 gives the playlist a bounded viewport again and lets it own vertical gestures
+that start inside that viewport.  The outer player ScrollView keeps working
+normally everywhere else.  All playlist tracks are rendered incrementally so
+users can actually reach the full queue.
 """
 from __future__ import annotations
 
 import sys
 import threading
+from types import MethodType
 
 _PATCHED = False
 _PATCH_LOCK = threading.RLock()
@@ -31,11 +35,17 @@ def _patch_playlist_scroll() -> bool:
             return False
         if not getattr(player_cls, "_pymusic_hotfix_v4", False):
             return False
-        if getattr(player_cls, "_pymusic_playlist_scroll_v8", False):
+        if getattr(player_cls, "_pymusic_playlist_scroll_v9", False):
             _PATCHED = True
             return True
 
         Clock, dp = module.Clock, module.dp
+        Window = getattr(module, "Window", None)
+
+        try:
+            from kivy.uix.widget import Widget
+        except Exception:
+            Widget = None
 
         def request_layout(widget):
             if widget is None:
@@ -66,6 +76,52 @@ def _patch_playlist_scroll() -> bool:
                     pass
             except Exception:
                 pass
+
+        def bind_nested_touch(self):
+            """Do not let the parent ScrollView steal a playlist swipe.
+
+            Kivy nested ScrollViews both try to grab the same touch.  When the
+            playlist is actually scrollable, bypass the parent's ScrollView
+            handler for touches that start over the playlist and dispatch them
+            straight through the normal Widget child chain.  The inner
+            playlist_scroll then becomes the only ScrollView that grabs it.
+            """
+            if Widget is None:
+                return
+            try:
+                outer = self.ids.get("player_details_scroll")
+                inner = self.ids.get("playlist_scroll")
+                if outer is None or inner is None:
+                    return
+                if getattr(outer, "_pymusic_playlist_nested_v9", False):
+                    return
+
+                original_down = outer.on_touch_down
+                outer._pymusic_outer_touch_down_v9 = original_down
+
+                def outer_touch_down(widget, touch):
+                    try:
+                        playlist = self.ids.get("playlist_scroll")
+                        if (
+                            playlist is not None
+                            and not bool(getattr(playlist, "disabled", False))
+                            and bool(getattr(playlist, "do_scroll_y", False))
+                            and float(getattr(playlist, "height", 0) or 0) > dp(1)
+                            and playlist.collide_point(*touch.pos)
+                        ):
+                            # Skip ScrollView.on_touch_down on the parent.  The
+                            # regular Widget dispatcher walks into its content,
+                            # where playlist_scroll receives and grabs the touch.
+                            return Widget.on_touch_down(widget, touch)
+                    except Exception:
+                        pass
+                    return original_down(touch)
+
+                outer.on_touch_down = MethodType(outer_touch_down, outer)
+                outer._pymusic_playlist_nested_v9 = True
+                print("[PLAYLIST] nested touch owner v9 installed")
+            except Exception as exc:
+                print("[PLAYLIST] nested touch install failed:", exc)
 
         def bind_title(self):
             try:
@@ -108,13 +164,22 @@ def _patch_playlist_scroll() -> bool:
                         pass
                     self._pymusic_title_ev = Clock.schedule_once(apply, 0)
 
-                if not getattr(view, "_pymusic_title_v8", False):
+                if not getattr(view, "_pymusic_title_v9", False):
                     label.bind(text=queue, texture_size=queue)
                     view.bind(width=queue)
-                    view._pymusic_title_v8 = True
+                    view._pymusic_title_v9 = True
                 queue()
             except Exception as exc:
                 print("[TITLE] bind failed:", exc)
+
+        def playlist_view_cap():
+            try:
+                win_h = float(getattr(Window, "height", 0) or 0)
+            except Exception:
+                win_h = 0
+            if win_h > 0:
+                return max(dp(220), min(dp(360), win_h * 0.42))
+            return dp(320)
 
         def playlist_geometry(self, expanded=None):
             try:
@@ -128,28 +193,43 @@ def _patch_playlist_scroll() -> bool:
                 if expanded is None:
                     expanded = bool(visible and not collapsed)
 
-                content_h = max(0.0, float(getattr(listing, "minimum_height", 0) or 0))
+                content_h = max(
+                    0.0,
+                    float(getattr(listing, "minimum_height", 0) or 0),
+                    float(getattr(listing, "height", 0) or 0),
+                )
                 try:
                     listing.size_hint_y = None
-                    listing.height = content_h
+                    listing.height = max(
+                        content_h,
+                        float(getattr(listing, "minimum_height", 0) or 0),
+                    )
                 except Exception:
                     pass
 
-                # Critical v8 rule: this viewport never scrolls.  It simply
-                # expands to its rows and lets player_details_scroll own every
-                # vertical swipe, including swipes that begin on a track row.
-                try:
-                    viewport.do_scroll_x = False
+                if not expanded:
+                    viewport.height = 0
+                    viewport.opacity = 0
+                    viewport.disabled = True
                     viewport.do_scroll_y = False
-                    viewport.bar_width = 0
-                    viewport.always_overscroll = False
-                    viewport.scroll_y = 1.0
-                    viewport.disabled = not expanded
-                except Exception:
-                    pass
-
-                viewport.height = content_h if expanded else 0
-                viewport.opacity = 1 if expanded else 0
+                else:
+                    cap = playlist_view_cap()
+                    view_h = min(content_h, cap) if content_h > 0 else 0
+                    viewport.height = view_h
+                    viewport.opacity = 1
+                    viewport.disabled = False
+                    viewport.do_scroll_x = False
+                    viewport.do_scroll_y = bool(content_h > view_h + dp(2))
+                    try:
+                        viewport.always_overscroll = False
+                        viewport.bar_width = dp(3) if viewport.do_scroll_y else 0
+                        viewport.scroll_type = ["bars", "content"]
+                        # Shorter timeout/distance makes Android finger scrolling
+                        # feel immediate without breaking row taps.
+                        viewport.scroll_timeout = 140
+                        viewport.scroll_distance = dp(8)
+                    except Exception:
+                        pass
 
                 request_layout(listing)
                 request_layout(viewport)
@@ -159,8 +239,9 @@ def _patch_playlist_scroll() -> bool:
                     request_layout(outer.children[0] if outer.children else None)
                     request_layout(outer)
                 configure_outer(self)
+                bind_nested_touch(self)
             except Exception as exc:
-                print("[PLAYLIST] v8 geometry failed:", exc)
+                print("[PLAYLIST] v9 geometry failed:", exc)
 
         def signature(self):
             try:
@@ -183,10 +264,9 @@ def _patch_playlist_scroll() -> bool:
                 visible = bool(self.playlist and self.playlist.tracks)
                 collapsed = bool(getattr(self, "_playlist_collapsed", False))
                 title = self.playlist.name or "Черга"
-                start, end = getattr(self, "_hotfix_playlist_window", (0, 0))
                 total = len(self.playlist.tracks) if visible else 0
-                if total > 28 and end > start:
-                    title = f"{title} · {start + 1}–{end} / {total}"
+                if total:
+                    title = f"{title} · {total}"
                 self._set_collapsible_header(
                     self.ids.get("playlist_header_row"),
                     self.ids.get("playlist_header"),
@@ -197,7 +277,19 @@ def _patch_playlist_scroll() -> bool:
                 )
                 playlist_geometry(self, visible and not collapsed)
             except Exception as exc:
-                print("[PLAYLIST] v8 header failed:", exc)
+                print("[PLAYLIST] v9 header failed:", exc)
+
+        def position_on_current(self):
+            try:
+                viewport = self.ids.get("playlist_scroll")
+                total = len(self.playlist.tracks) if self.playlist else 0
+                current = int(getattr(self.playlist, "index", 0) or 0)
+                if viewport is None or total <= 1 or not viewport.do_scroll_y:
+                    return
+                # scroll_y: 1 = top, 0 = bottom.
+                viewport.scroll_y = max(0.0, min(1.0, 1.0 - (current / float(total - 1))))
+            except Exception:
+                pass
 
         def render(self, force=False):
             listing = self.ids.get("playlist_list")
@@ -205,6 +297,7 @@ def _patch_playlist_scroll() -> bool:
                 return None
             bind_title(self)
             configure_outer(self)
+            bind_nested_touch(self)
 
             tracks = list(
                 self.playlist.tracks
@@ -212,14 +305,11 @@ def _patch_playlist_scroll() -> bool:
                 else []
             )
             sig = signature(self)
-            current = int(getattr(self.playlist, "index", 0) or 0)
-            start0, end0 = getattr(self, "_hotfix_playlist_window", (0, 0))
 
             if (
                 not force
-                and sig == getattr(self, "_hotfix_playlist_sig", None)
-                and listing.children
-                and start0 <= current < end0
+                and sig == getattr(self, "_hotfix_playlist_sig_v9", None)
+                and len(listing.children) == len(tracks)
             ):
                 update_header(self)
                 return None
@@ -227,36 +317,25 @@ def _patch_playlist_scroll() -> bool:
             self._playlist_render_gen = int(getattr(self, "_playlist_render_gen", 0)) + 1
             generation = self._playlist_render_gen
             listing.clear_widgets()
+            self._hotfix_playlist_sig_v9 = sig
 
             if not tracks:
-                self._hotfix_playlist_window = (0, 0)
-                self._hotfix_playlist_sig = sig
                 update_header(self)
                 return None
 
-            # Rendering hundreds of Kivy rows is expensive.  Small/medium
-            # queues are shown completely; large queues keep a useful window
-            # around the current track while still using the single page scroll.
-            window_size = 28
-            if len(tracks) <= window_size:
-                start, end = 0, len(tracks)
-            else:
-                start = max(0, current - 9)
-                end = min(len(tracks), start + window_size)
-                start = max(0, end - window_size)
-
-            self._hotfix_playlist_window = (start, end)
-            self._hotfix_playlist_sig = sig
             update_header(self)
             if bool(getattr(self, "_playlist_collapsed", False)):
                 return None
 
-            indices = list(range(start, end))
+            # Render the complete queue, but in small chunks so opening a large
+            # YouTube playlist does not freeze the Kivy UI for one long frame.
+            indices = list(range(len(tracks)))
+            chunk_size = 8
 
             def add_chunk(offset):
                 if generation != int(getattr(self, "_playlist_render_gen", -1)):
                     return
-                stop_at = min(len(indices), offset + 4)
+                stop_at = min(len(indices), offset + chunk_size)
                 for pos in range(offset, stop_at):
                     idx = indices[pos]
                     try:
@@ -268,10 +347,9 @@ def _patch_playlist_scroll() -> bool:
                 if stop_at < len(indices):
                     Clock.schedule_once(lambda _dt: add_chunk(stop_at), 0.01)
                 else:
-                    for delay in (0.0, 0.03, 0.12):
-                        Clock.schedule_once(
-                            lambda _dt: playlist_geometry(self, True), delay
-                        )
+                    for delay in (0.0, 0.04, 0.14):
+                        Clock.schedule_once(lambda _dt: playlist_geometry(self, True), delay)
+                    Clock.schedule_once(lambda _dt: position_on_current(self), 0.16)
 
             Clock.schedule_once(lambda _dt: add_chunk(0), 0)
             return None
@@ -282,7 +360,10 @@ def _patch_playlist_scroll() -> bool:
             )
             if not self._playlist_collapsed:
                 listing = self.ids.get("playlist_list")
-                if listing is not None and not listing.children and self.playlist.tracks:
+                if listing is not None and (
+                    not listing.children
+                    or len(listing.children) != len(self.playlist.tracks)
+                ):
                     render(self, force=True)
                     return
             update_header(self)
@@ -291,35 +372,42 @@ def _patch_playlist_scroll() -> bool:
         old_pre_enter = player_cls.on_pre_enter
         old_resume = player_cls.handle_app_resume
 
-        def init_v8(self, *args, **kwargs):
+        def init_v9(self, *args, **kwargs):
             old_init(self, *args, **kwargs)
             for delay in (0.0, 0.08, 0.25):
                 Clock.schedule_once(lambda _dt: configure_outer(self), delay)
                 Clock.schedule_once(lambda _dt: bind_title(self), delay)
+                Clock.schedule_once(lambda _dt: bind_nested_touch(self), delay)
                 Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
 
-        def pre_enter_v8(self, *args, **kwargs):
+        def pre_enter_v9(self, *args, **kwargs):
             result = old_pre_enter(self, *args, **kwargs)
             for delay in (0.0, 0.06, 0.18):
                 Clock.schedule_once(lambda _dt: configure_outer(self), delay)
+                Clock.schedule_once(lambda _dt: bind_nested_touch(self), delay)
                 Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
             return result
 
-        def resume_v8(self, *args, **kwargs):
+        def resume_v9(self, *args, **kwargs):
             result = old_resume(self, *args, **kwargs)
             for delay in (0.0, 0.08, 0.22):
                 Clock.schedule_once(lambda _dt: configure_outer(self), delay)
+                Clock.schedule_once(lambda _dt: bind_nested_touch(self), delay)
                 Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
             return result
 
-        player_cls.__init__ = init_v8
-        player_cls.on_pre_enter = pre_enter_v8
-        player_cls.handle_app_resume = resume_v8
+        player_cls.__init__ = init_v9
+        player_cls.on_pre_enter = pre_enter_v9
+        player_cls.handle_app_resume = resume_v9
         player_cls.toggle_playlist_collapsed = toggle
         player_cls._render_playlist_ui = render
+
+        # Keep old markers for downstream patches that only check readiness.
+        player_cls._pymusic_playlist_scroll_v7 = True
         player_cls._pymusic_playlist_scroll_v8 = True
+        player_cls._pymusic_playlist_scroll_v9 = True
         _PATCHED = True
-        print("[HOTFIX] single-scroll playlist v8 enabled")
+        print("[HOTFIX] nested playlist scroll v9 enabled")
         return True
 
 
