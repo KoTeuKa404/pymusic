@@ -9,6 +9,10 @@ class KivyMDRecipe(PythonRecipe):
     so the normal ``kivymd==1.2.0`` requirement is rejected before p4a can
     install it. Keeping a local recipe makes p4a fetch and install the exact
     source release directly instead of trying to resolve an Android wheel.
+
+    Kivy and Pillow are p4a recipe dependencies and are already built for
+    the Android target. Disable pip dependency resolution here so installing
+    KivyMD does not try to download and rebuild a host-style Kivy wheel.
     """
 
     name = "kivymd"
@@ -21,6 +25,7 @@ class KivyMDRecipe(PythonRecipe):
     sha256sum = "2d33e2c59259998e93aee55acde647a4a20e5a0f962469db24ee4c9ec586962e"
     depends = ["kivy", "pillow"]
     site_packages_name = "kivymd"
+    setup_extra_args = ["--no-deps"]
 
 
 recipe = KivyMDRecipe()
