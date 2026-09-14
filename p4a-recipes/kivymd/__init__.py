@@ -11,8 +11,10 @@ class KivyMDRecipe(PythonRecipe):
     source release directly instead of trying to resolve an Android wheel.
 
     Kivy and Pillow are p4a recipe dependencies and are already built for
-    the Android target. Disable pip dependency resolution here so installing
-    KivyMD does not try to download and rebuild a host-style Kivy wheel.
+    the Android target. KivyMD also imports MaterialYouColor at runtime and
+    requires Asynckivy. Declare both explicitly because pip dependency
+    resolution is disabled below: MaterialYouColor must use p4a's Android
+    recipe, while Asynckivy is a pure-Python dependency.
     """
 
     name = "kivymd"
@@ -23,7 +25,8 @@ class KivyMDRecipe(PythonRecipe):
         "kivymd-{version}.tar.gz"
     )
     sha256sum = "2d33e2c59259998e93aee55acde647a4a20e5a0f962469db24ee4c9ec586962e"
-    depends = ["kivy", "pillow"]
+    depends = ["kivy", "pillow", "materialyoucolor"]
+    python_depends = ["asynckivy>=0.6,<0.7"]
     site_packages_name = "kivymd"
     setup_extra_args = ["--no-deps"]
 
