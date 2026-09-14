@@ -12,12 +12,14 @@ import time
 try:
     import sitecustomize as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
+    import playlist_gesture_fix as _playlist_gesture_fix
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
         ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
+        ("playlist_gesture", _playlist_gesture_fix._patch_playlist_gesture),
         ("resume", _resume_ui_fix._patch_resume_ui),
         # Always last. It owns visible geometry and explicitly forces an
         # audio-first, non-blocking video startup without dual-player seeks.
@@ -42,7 +44,7 @@ try:
                         last_errors[name] = text
                         print(f"[HOTFIX] loader patch failed: {name}: {text}")
 
-            required = ("base", "playlist", "final")
+            required = ("base", "playlist", "playlist_gesture", "final")
             if all(statuses.get(name, False) for name in required):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
                 return
