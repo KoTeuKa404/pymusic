@@ -1,12 +1,12 @@
 """Bridge vertical drags on the native video layer into the Kivy player scroll.
 
 AndroidVideoPlayer uses a native SurfaceView (and a transparent native controls
-FrameLayout) above the Kivy tree.  Those Views must consume their touch stream,
+FrameLayout) above the Kivy tree. Those Views must consume their touch stream,
 so Kivy's player_details_scroll never receives gestures that begin on video.
 
 V13 keeps the three native transport ImageButtons on the existing Java
 ACTION_DOWN path, but makes the SurfaceView/empty overlay distinguish a tap from
-a vertical drag.  A tap still uses the existing video-zone callback.  A drag
+a vertical drag. A tap still uses the existing video-zone callback. A drag
 updates the single outer Kivy ScrollView introduced by playlist v12.
 """
 from __future__ import annotations
@@ -29,6 +29,16 @@ def install_video_scroll_bridge_v13() -> bool:
         video_cls = getattr(video_player, "AndroidVideoPlayer", None)
         if screen_cls is None or video_cls is None:
             return False
+
+        # Do not race the layers that own the actual buttons and playlist
+        # geometry. recent_utils retries this installer until both are ready.
+        if not bool(getattr(screen_cls, "_pymusic_playlist_single_scroll_v12", False)):
+            return False
+        if not bool(getattr(screen_cls, "_pymusic_native_java_transport_v1", False)):
+            return False
+        if not bool(getattr(video_cls, "_pymusic_native_java_transport_v1", False)):
+            return False
+
         if bool(getattr(screen_cls, "_pymusic_video_scroll_bridge_v13", False)):
             _PATCHED = True
             return True
@@ -66,7 +76,9 @@ def install_video_scroll_bridge_v13() -> bool:
 
         def apply_pending_scroll(screen) -> None:
             try:
-                delta = float(getattr(screen, "_pymusic_video_scroll_pending_v13", 0.0) or 0.0)
+                delta = float(
+                    getattr(screen, "_pymusic_video_scroll_pending_v13", 0.0) or 0.0
+                )
                 screen._pymusic_video_scroll_pending_v13 = 0.0
                 screen._pymusic_video_scroll_event_v13 = None
                 if abs(delta) < 0.01:
@@ -86,12 +98,18 @@ def install_video_scroll_bridge_v13() -> bool:
                     return
 
                 current = float(getattr(outer, "scroll_y", 1.0) or 0.0)
-                outer.scroll_y = max(0.0, min(1.0, current + (delta / scroll_range)))
+                outer.scroll_y = max(
+                    0.0,
+                    min(1.0, current + (delta / scroll_range)),
+                )
 
                 # SurfaceView is a native overlay, so keep it aligned with the
                 # Kivy video placeholder while the page moves underneath it.
                 try:
-                    Clock.schedule_once(lambda _dt: screen._align_video_to_thumb(), 0)
+                    Clock.schedule_once(
+                        lambda _dt: screen._align_video_to_thumb(),
+                        0,
+                    )
                 except Exception:
                     pass
             except Exception as exc:
@@ -107,7 +125,8 @@ def install_video_scroll_bridge_v13() -> bool:
                 ) + float(delta_y)
                 if getattr(screen, "_pymusic_video_scroll_event_v13", None) is None:
                     screen._pymusic_video_scroll_event_v13 = Clock.schedule_once(
-                        lambda _dt, owner=screen: apply_pending_scroll(owner), 0
+                        lambda _dt, owner=screen: apply_pending_scroll(owner),
+                        0,
                     )
             except Exception:
                 pass
@@ -148,7 +167,10 @@ def install_video_scroll_bridge_v13() -> bool:
                         dx = raw_x - self._down_x
                         dy_total = raw_y - self._down_y
                         if not self._dragging:
-                            if abs(dy_total) >= touch_slop and abs(dy_total) >= abs(dx):
+                            if (
+                                abs(dy_total) >= touch_slop
+                                and abs(dy_total) >= abs(dx)
+                            ):
                                 self._dragging = True
                             elif abs(dx) >= touch_slop:
                                 self._cancel_tap = True
@@ -156,7 +178,11 @@ def install_video_scroll_bridge_v13() -> bool:
                         if self._dragging:
                             dy = raw_y - self._last_y
                             self._last_y = raw_y
-                            screen = getattr(self._owner, "_pymusic_scroll_screen_v13", None)
+                            screen = getattr(
+                                self._owner,
+                                "_pymusic_scroll_screen_v13",
+                                None,
+                            )
                             if screen is not None and abs(dy) > 0.01:
                                 queue_scroll(screen, dy)
                         return True
@@ -181,8 +207,8 @@ def install_video_scroll_bridge_v13() -> bool:
                     return True
 
         # Replace only the listener class used by SurfaceView / empty overlay.
-        # native_java_transport_fix owns the first three ImageButtons and will
-        # continue rebinding them to NativeTransportBridge.
+        # native_java_transport_fix owns the first three ImageButtons and keeps
+        # rebinding them to NativeTransportBridge.
         video_cls._OnTouchListener = ScrollAwareVideoTouch
 
         old_ensure = screen_cls._ensure_video_player
@@ -193,7 +219,10 @@ def install_video_scroll_bridge_v13() -> bool:
             if result and vp is not None:
                 try:
                     vp._pymusic_scroll_screen_v13 = self
-                    if not isinstance(getattr(vp, "_tap_listener", None), ScrollAwareVideoTouch):
+                    if not isinstance(
+                        getattr(vp, "_tap_listener", None),
+                        ScrollAwareVideoTouch,
+                    ):
                         vp._tap_listener = ScrollAwareVideoTouch(vp)
                     vp._bind_surface_tap()
                     # This method is already owned by native_java_transport_fix:
