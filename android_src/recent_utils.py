@@ -14,6 +14,8 @@ try:
     import playlist_scroll_fix as _playlist_scroll_fix
     import playlist_gesture_fix as _playlist_gesture_fix
     import playlist_extent_fix as _playlist_extent_fix
+    import playlist_single_scroll_v12 as _playlist_single_scroll_v12
+    import playlist_open_guard_v12 as _playlist_open_guard_v12
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
@@ -22,6 +24,7 @@ try:
         ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
         ("playlist_gesture", _playlist_gesture_fix._patch_playlist_gesture),
         ("playlist_extent", _playlist_extent_fix._patch_playlist_extent),
+        ("playlist_single", _playlist_single_scroll_v12._patch_playlist_single_scroll),
         ("resume", _resume_ui_fix._patch_resume_ui),
         # Always last. It owns visible geometry and explicitly forces an
         # audio-first, non-blocking video startup without dual-player seeks.
@@ -51,6 +54,7 @@ try:
                 "playlist",
                 "playlist_gesture",
                 "playlist_extent",
+                "playlist_single",
                 "final",
             )
             if all(statuses.get(name, False) for name in required):
@@ -65,6 +69,12 @@ try:
         name="pymusic-player-hotfix",
         daemon=True,
     ).start()
+
+    try:
+        if not _playlist_open_guard_v12.install_playlist_open_guard_v12():
+            print("[PLAYLIST-OPEN-V12] installer returned false")
+    except Exception as exc:
+        print("[PLAYLIST-OPEN-V12] installer failed:", exc)
 except Exception as _hotfix_error:
     print("[HOTFIX] loader failed:", _hotfix_error)
 
