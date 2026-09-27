@@ -16,7 +16,7 @@ try:
     import playlist_extent_fix as _playlist_extent_fix
     import playlist_single_scroll_v12 as _playlist_single_scroll_v12
     import playlist_open_guard_v12 as _playlist_open_guard_v12
-    import video_scroll_bridge_v14 as _video_scroll_bridge_v14
+    import video_scroll_bridge_v15 as _video_scroll_bridge_v15
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
@@ -27,12 +27,10 @@ try:
         ("playlist_extent", _playlist_extent_fix._patch_playlist_extent),
         ("playlist_single", _playlist_single_scroll_v12._patch_playlist_single_scroll),
         ("resume", _resume_ui_fix._patch_resume_ui),
-        # Always after the single-scroll geometry. V14 also waits for the Java
-        # transport layer, then owns native video/overlay drag routing.
-        ("video_scroll", _video_scroll_bridge_v14.install_video_scroll_bridge_v14),
-        # Always last. It owns visible geometry and explicitly forces an
-        # audio-first, non-blocking video startup without dual-player seeks.
+        # Final player owns geometry first; V15 must be the last owner of native
+        # SurfaceView touch routing so later layout patches cannot replace it.
         ("final", _final_player_fix._patch_final_player),
+        ("video_scroll", _video_scroll_bridge_v15.install_video_scroll_bridge_v15),
     )
 
     def _install_player_hotfix_when_ready():
