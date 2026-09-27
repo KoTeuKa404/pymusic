@@ -16,7 +16,7 @@ try:
     import playlist_extent_fix as _playlist_extent_fix
     import playlist_single_scroll_v12 as _playlist_single_scroll_v12
     import playlist_open_guard_v12 as _playlist_open_guard_v12
-    import video_scroll_bridge_v15 as _video_scroll_bridge_v15
+    import video_touch_passthrough_v16 as _video_touch_passthrough_v16
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
@@ -27,10 +27,11 @@ try:
         ("playlist_extent", _playlist_extent_fix._patch_playlist_extent),
         ("playlist_single", _playlist_single_scroll_v12._patch_playlist_single_scroll),
         ("resume", _resume_ui_fix._patch_resume_ui),
-        # Final player owns geometry first; V15 must be the last owner of native
-        # SurfaceView touch routing so later layout patches cannot replace it.
+        # Final player owns geometry first. V16 is the final touch owner and
+        # makes only the bare SurfaceView/empty native containers passive while
+        # preserving Java transport buttons and the native SeekBar.
         ("final", _final_player_fix._patch_final_player),
-        ("video_scroll", _video_scroll_bridge_v15.install_video_scroll_bridge_v15),
+        ("video_scroll", _video_touch_passthrough_v16.install_video_touch_passthrough_v16),
     )
 
     def _install_player_hotfix_when_ready():
