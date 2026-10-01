@@ -13,6 +13,7 @@ try:
     import sitecustomize as _player_hotfix
     import player_input_cleanup as _player_input_cleanup
     import playlist_full_render as _playlist_full_render
+    import outer_scroll_gesture_tuning as _outer_scroll_gesture_tuning
     import playlist_open_guard_v12 as _playlist_open_guard_v12
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
@@ -24,6 +25,10 @@ try:
         # the sole queue renderer and creates every row in one stable pass so
         # startup callbacks cannot strand the queue at the first 8-row chunk.
         ("playlist_full", _playlist_full_render.install_full_playlist_renderer),
+        # Playlist rows are ButtonBehavior widgets. Tune only the single outer
+        # ScrollView so ordinary Android drags are classified as scrolls before
+        # a row receives and grabs the touch.
+        ("outer_scroll", _outer_scroll_gesture_tuning.install_outer_scroll_gesture_tuning),
         ("resume", _resume_ui_fix._patch_resume_ui),
         # Final player owns visible video geometry. Native touch cleanup waits
         # for this plus the Java transport/timeline layers, then becomes the
@@ -54,6 +59,7 @@ try:
                 "base",
                 "single_scroll",
                 "playlist_full",
+                "outer_scroll",
                 "resume",
                 "final",
                 "native_touch",
