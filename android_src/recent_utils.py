@@ -6,39 +6,33 @@ import threading
 import time
 
 # AudioPlayerScreen imports this module while its class is still being defined.
-# Patch modules therefore poll sys.modules until the class exists.  Keep the
-# patch chain intentionally small: aggressive AV synchronizers used to seek
-# both Android MediaPlayers during startup and could freeze audio and video.
+# Poll until the class is ready, then install one owner for playlist geometry
+# and one owner for native touch.  The old v9-v12/v16 scroll/touch patches are
+# intentionally no longer imported: stacking them caused delayed callbacks and
+# multiple on_touch wrappers to fight over the same gestures.
 try:
     import sitecustomize as _player_hotfix
-    import playlist_scroll_fix as _playlist_scroll_fix
-    import playlist_gesture_fix as _playlist_gesture_fix
-    import playlist_extent_fix as _playlist_extent_fix
-    import playlist_single_scroll_v12 as _playlist_single_scroll_v12
+    import player_input_cleanup as _player_input_cleanup
     import playlist_open_guard_v12 as _playlist_open_guard_v12
-    import video_touch_passthrough_v16 as _video_touch_passthrough_v16
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
-        ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
-        ("playlist_gesture", _playlist_gesture_fix._patch_playlist_gesture),
-        ("playlist_extent", _playlist_extent_fix._patch_playlist_extent),
-        ("playlist_single", _playlist_single_scroll_v12._patch_playlist_single_scroll),
+        ("single_scroll", _player_input_cleanup.install_single_scroll_cleanup),
         ("resume", _resume_ui_fix._patch_resume_ui),
-        # Final player owns geometry first. V16 is the final touch owner and
-        # makes only the bare SurfaceView/empty native containers passive while
-        # preserving Java transport buttons and the native SeekBar.
+        # Final player owns visible video geometry. Native touch cleanup waits
+        # for this plus the Java transport/timeline layers, then becomes the
+        # single final touch-policy owner.
         ("final", _final_player_fix._patch_final_player),
-        ("video_scroll", _video_touch_passthrough_v16.install_video_touch_passthrough_v16),
+        ("native_touch", _player_input_cleanup.install_native_touch_cleanup),
     )
 
     def _install_player_hotfix_when_ready():
         statuses = {name: False for name, _fn in _PATCHERS}
         last_errors = {}
 
-        for attempt in range(300):
+        for attempt in range(400):
             for name, patch_fn in _PATCHERS:
                 if statuses.get(name):
                     continue
@@ -54,12 +48,10 @@ try:
 
             required = (
                 "base",
-                "playlist",
-                "playlist_gesture",
-                "playlist_extent",
-                "playlist_single",
-                "video_scroll",
+                "single_scroll",
+                "resume",
                 "final",
+                "native_touch",
             )
             if all(statuses.get(name, False) for name in required):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
