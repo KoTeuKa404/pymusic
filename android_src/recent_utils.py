@@ -6,13 +6,13 @@ import threading
 import time
 
 # AudioPlayerScreen imports this module while its class is still being defined.
-# Poll until the class is ready, then install one owner for playlist geometry
-# and one owner for native touch.  The old v9-v12/v16 scroll/touch patches are
-# intentionally no longer imported: stacking them caused delayed callbacks and
-# multiple on_touch wrappers to fight over the same gestures.
+# Poll until the class is ready, then install one owner for playlist geometry,
+# one final full-queue renderer, and one owner for native touch. The old
+# v9-v12/v16 scroll/touch patches stay out of the runtime chain.
 try:
     import sitecustomize as _player_hotfix
     import player_input_cleanup as _player_input_cleanup
+    import playlist_full_render as _playlist_full_render
     import playlist_open_guard_v12 as _playlist_open_guard_v12
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
@@ -20,6 +20,10 @@ try:
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
         ("single_scroll", _player_input_cleanup.install_single_scroll_cleanup),
+        # The cleanup removes the nested ScrollView. This renderer then becomes
+        # the sole queue renderer and creates every row in one stable pass so
+        # startup callbacks cannot strand the queue at the first 8-row chunk.
+        ("playlist_full", _playlist_full_render.install_full_playlist_renderer),
         ("resume", _resume_ui_fix._patch_resume_ui),
         # Final player owns visible video geometry. Native touch cleanup waits
         # for this plus the Java transport/timeline layers, then becomes the
@@ -49,6 +53,7 @@ try:
             required = (
                 "base",
                 "single_scroll",
+                "playlist_full",
                 "resume",
                 "final",
                 "native_touch",
