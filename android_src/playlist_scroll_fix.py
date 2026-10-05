@@ -1,11 +1,9 @@
-"""Single-scroll playlist/title hotfix v8.
+"""Deterministic single-scroll playlist for Android.
 
-The player already has an outer ``player_details_scroll``.  A second vertical
-ScrollView around the playlist caused Android gestures to fight each other:
-touches inside the playlist disabled the outer scroller and made both the queue
-and the rest of the player feel stuck.  V8 keeps the playlist viewport as a
-non-scrolling container whose height follows its rendered rows, so the whole
-player uses exactly one vertical gesture surface.
+The player page already owns one vertical ScrollView: ``player_details_scroll``.
+Keep playlist rows directly inside that page instead of leaving a second
+MDScrollView in the live touch tree.  Render the complete queue synchronously so
+startup callbacks cannot cancel a pending chunk and leave only a few rows.
 """
 from __future__ import annotations
 
@@ -47,9 +45,145 @@ def _patch_playlist_scroll() -> bool:
             except Exception:
                 pass
             try:
+                do_layout = getattr(widget, "do_layout", None)
+                if callable(do_layout):
+                    do_layout()
+            except Exception:
+                pass
+            try:
                 widget.canvas.ask_update()
             except Exception:
                 pass
+
+        def padding_y(widget) -> float:
+            try:
+                value = getattr(widget, "padding", 0) or 0
+                if isinstance(value, (int, float)):
+                    return float(value) * 2.0
+                values = list(value)
+                if len(values) >= 4:
+                    return float(values[1] or 0) + float(values[3] or 0)
+                if len(values) == 2:
+                    return float(values[1] or 0) * 2.0
+                if len(values) == 1:
+                    return float(values[0] or 0) * 2.0
+            except Exception:
+                pass
+            return 0.0
+
+        def spacing_y(widget) -> float:
+            try:
+                value = getattr(widget, "spacing", 0) or 0
+                if isinstance(value, (list, tuple)):
+                    return float(value[-1] or 0) if value else 0.0
+                return float(value)
+            except Exception:
+                return 0.0
+
+        def exact_list_height(listing) -> float:
+            children = list(getattr(listing, "children", []) or [])
+            total = padding_y(listing)
+            for child in children:
+                try:
+                    total += max(0.0, float(getattr(child, "height", 0) or 0))
+                except Exception:
+                    pass
+            if len(children) > 1:
+                total += spacing_y(listing) * float(len(children) - 1)
+            try:
+                total = max(total, float(getattr(listing, "minimum_height", 0) or 0))
+            except Exception:
+                pass
+            return max(0.0, total)
+
+        def mount_playlist_direct(self) -> bool:
+            """Remove playlist_scroll from the live touch hierarchy once."""
+            try:
+                viewport = self.ids.get("playlist_scroll")
+                listing = self.ids.get("playlist_list")
+                if listing is None:
+                    return False
+                if bool(getattr(listing, "_pymusic_direct_v8", False)):
+                    return True
+                if viewport is None:
+                    return False
+
+                parent = getattr(viewport, "parent", None)
+                if parent is None:
+                    # It may already have been detached by a previous call.
+                    if getattr(listing, "parent", None) is not None:
+                        listing._pymusic_direct_v8 = True
+                        return True
+                    return False
+
+                try:
+                    insertion_index = list(parent.children).index(viewport)
+                except Exception:
+                    insertion_index = 0
+
+                if getattr(listing, "parent", None) is viewport:
+                    viewport.remove_widget(listing)
+                elif getattr(listing, "parent", None) is not None:
+                    try:
+                        listing.parent.remove_widget(listing)
+                    except Exception:
+                        pass
+
+                parent.remove_widget(viewport)
+                parent.add_widget(listing, index=insertion_index)
+
+                # Keep the old ids entry only for compatibility with legacy code;
+                # the object is detached and can no longer receive a gesture.
+                try:
+                    viewport.size_hint_y = None
+                    viewport.height = 0
+                    viewport.opacity = 0
+                    viewport.disabled = True
+                    viewport.do_scroll_x = False
+                    viewport.do_scroll_y = False
+                    viewport.bar_width = 0
+                except Exception:
+                    pass
+
+                listing.size_hint_y = None
+                listing._pymusic_direct_v8 = True
+                print("[PLAYLIST-V8] nested viewport removed from touch tree")
+                return True
+            except Exception as exc:
+                print("[PLAYLIST-V8] direct mount failed:", exc)
+                return False
+
+        def bind_outer_diagnostics(self):
+            try:
+                outer = self.ids.get("player_details_scroll")
+                if outer is None or bool(getattr(outer, "_pymusic_diag_v8", False)):
+                    return
+
+                def on_start(widget, *_args):
+                    try:
+                        print(
+                            "[PLAYLIST-V8] scroll start "
+                            f"y={float(widget.scroll_y):.4f}"
+                        )
+                    except Exception:
+                        pass
+
+                def on_stop(widget, *_args):
+                    try:
+                        content = widget.children[0] if widget.children else None
+                        content_h = float(getattr(content, "height", 0) or 0) if content else 0.0
+                        print(
+                            "[PLAYLIST-V8] scroll stop "
+                            f"y={float(widget.scroll_y):.4f} "
+                            f"range={max(0.0, content_h - float(widget.height or 0)):.1f}"
+                        )
+                    except Exception:
+                        pass
+
+                outer.bind(on_scroll_start=on_start, on_scroll_stop=on_stop)
+                outer._pymusic_diag_v8 = True
+            except Exception as exc:
+                print("[PLAYLIST-V8] diagnostic bind failed:", exc)
 
         def configure_outer(self):
             try:
@@ -62,8 +196,13 @@ def _patch_playlist_scroll() -> bool:
                 try:
                     outer.always_overscroll = False
                     outer.bar_width = dp(3)
+                    # Android rows are ButtonBehavior widgets. Give the parent
+                    # enough time and a small enough distance to claim a drag.
+                    outer.scroll_timeout = 180
+                    outer.scroll_distance = dp(6)
                 except Exception:
                     pass
+                bind_outer_diagnostics(self)
             except Exception:
                 pass
 
@@ -116,11 +255,12 @@ def _patch_playlist_scroll() -> bool:
             except Exception as exc:
                 print("[TITLE] bind failed:", exc)
 
-        def playlist_geometry(self, expanded=None):
+        def playlist_geometry(self, expanded=None, log=False):
             try:
-                viewport = self.ids.get("playlist_scroll")
+                mount_playlist_direct(self)
                 listing = self.ids.get("playlist_list")
-                if viewport is None or listing is None:
+                outer = self.ids.get("player_details_scroll")
+                if listing is None or outer is None:
                     return
 
                 visible = bool(self.playlist and self.playlist.tracks)
@@ -128,39 +268,31 @@ def _patch_playlist_scroll() -> bool:
                 if expanded is None:
                     expanded = bool(visible and not collapsed)
 
-                content_h = max(0.0, float(getattr(listing, "minimum_height", 0) or 0))
-                try:
-                    listing.size_hint_y = None
-                    listing.height = content_h
-                except Exception:
-                    pass
+                content_h = exact_list_height(listing) if expanded else 0.0
+                listing.size_hint_y = None
+                listing.height = content_h
+                listing.opacity = 1 if expanded else 0
+                listing.disabled = not expanded
 
-                # Critical v8 rule: this viewport never scrolls.  It simply
-                # expands to its rows and lets player_details_scroll own every
-                # vertical swipe, including swipes that begin on a track row.
-                try:
-                    viewport.do_scroll_x = False
-                    viewport.do_scroll_y = False
-                    viewport.bar_width = 0
-                    viewport.always_overscroll = False
-                    viewport.scroll_y = 1.0
-                    viewport.disabled = not expanded
-                except Exception:
-                    pass
-
-                viewport.height = content_h if expanded else 0
-                viewport.opacity = 1 if expanded else 0
-
-                request_layout(listing)
-                request_layout(viewport)
-                request_layout(getattr(viewport, "parent", None))
-                outer = self.ids.get("player_details_scroll")
-                if outer is not None:
-                    request_layout(outer.children[0] if outer.children else None)
-                    request_layout(outer)
                 configure_outer(self)
+                request_layout(listing)
+                request_layout(getattr(listing, "parent", None))
+                page = outer.children[0] if outer.children else None
+                request_layout(page)
+                request_layout(outer)
+
+                if log:
+                    page_h = float(getattr(page, "height", 0) or 0) if page is not None else 0.0
+                    print(
+                        "[PLAYLIST-V8] geometry "
+                        f"rows={len(getattr(listing, 'children', []) or [])}/"
+                        f"{len(self.playlist.tracks if self.playlist else [])} "
+                        f"list_h={float(listing.height or 0):.1f} "
+                        f"page_h={page_h:.1f} viewport_h={float(outer.height or 0):.1f} "
+                        f"range={max(0.0, page_h - float(outer.height or 0)):.1f}"
+                    )
             except Exception as exc:
-                print("[PLAYLIST] v8 geometry failed:", exc)
+                print("[PLAYLIST-V8] geometry failed:", exc)
 
         def signature(self):
             try:
@@ -183,10 +315,9 @@ def _patch_playlist_scroll() -> bool:
                 visible = bool(self.playlist and self.playlist.tracks)
                 collapsed = bool(getattr(self, "_playlist_collapsed", False))
                 title = self.playlist.name or "Черга"
-                start, end = getattr(self, "_hotfix_playlist_window", (0, 0))
                 total = len(self.playlist.tracks) if visible else 0
-                if total > 28 and end > start:
-                    title = f"{title} · {start + 1}–{end} / {total}"
+                if total:
+                    title = f"{title} · {total}"
                 self._set_collapsible_header(
                     self.ids.get("playlist_header_row"),
                     self.ids.get("playlist_header"),
@@ -195,14 +326,15 @@ def _patch_playlist_scroll() -> bool:
                     title,
                     collapsed,
                 )
-                playlist_geometry(self, visible and not collapsed)
             except Exception as exc:
-                print("[PLAYLIST] v8 header failed:", exc)
+                print("[PLAYLIST-V8] header failed:", exc)
 
         def render(self, force=False):
             listing = self.ids.get("playlist_list")
             if listing is None:
                 return None
+
+            mount_playlist_direct(self)
             bind_title(self)
             configure_outer(self)
 
@@ -212,68 +344,38 @@ def _patch_playlist_scroll() -> bool:
                 else []
             )
             sig = signature(self)
-            current = int(getattr(self.playlist, "index", 0) or 0)
-            start0, end0 = getattr(self, "_hotfix_playlist_window", (0, 0))
+            old_sig = getattr(self, "_hotfix_playlist_sig", None)
+            complete = len(getattr(listing, "children", []) or []) == len(tracks)
 
-            if (
-                not force
-                and sig == getattr(self, "_hotfix_playlist_sig", None)
-                and listing.children
-                and start0 <= current < end0
-            ):
+            # Do not destroy/recreate live ButtonBehavior rows merely because
+            # play_audio called render(force=True) during video startup. Rebuilding
+            # the tree under an active finger is enough to cancel scrolling.
+            if sig == old_sig and complete:
                 update_header(self)
+                playlist_geometry(self, log=bool(force))
                 return None
 
-            self._playlist_render_gen = int(getattr(self, "_playlist_render_gen", 0)) + 1
-            generation = self._playlist_render_gen
-            listing.clear_widgets()
-
-            if not tracks:
-                self._hotfix_playlist_window = (0, 0)
-                self._hotfix_playlist_sig = sig
-                update_header(self)
-                return None
-
-            # Rendering hundreds of Kivy rows is expensive.  Small/medium
-            # queues are shown completely; large queues keep a useful window
-            # around the current track while still using the single page scroll.
-            window_size = 28
-            if len(tracks) <= window_size:
-                start, end = 0, len(tracks)
-            else:
-                start = max(0, current - 9)
-                end = min(len(tracks), start + window_size)
-                start = max(0, end - window_size)
-
-            self._hotfix_playlist_window = (start, end)
+            self._playlist_render_gen = int(getattr(self, "_playlist_render_gen", 0) or 0) + 1
             self._hotfix_playlist_sig = sig
+            listing.clear_widgets()
             update_header(self)
-            if bool(getattr(self, "_playlist_collapsed", False)):
-                return None
 
-            indices = list(range(start, end))
-
-            def add_chunk(offset):
-                if generation != int(getattr(self, "_playlist_render_gen", -1)):
-                    return
-                stop_at = min(len(indices), offset + 4)
-                for pos in range(offset, stop_at):
-                    idx = indices[pos]
+            if tracks and not bool(getattr(self, "_playlist_collapsed", False)):
+                # Complete queue, one pass. No generation-sensitive Clock chunks.
+                for idx, item in enumerate(tracks):
                     try:
-                        row = self._make_playlist_row(idx, tracks[idx])
-                        listing.add_widget(row)
+                        listing.add_widget(self._make_playlist_row(idx, item))
                     except Exception as exc:
-                        print("[PLAYLIST] row failed:", exc)
-                playlist_geometry(self, True)
-                if stop_at < len(indices):
-                    Clock.schedule_once(lambda _dt: add_chunk(stop_at), 0.01)
-                else:
-                    for delay in (0.0, 0.03, 0.12):
-                        Clock.schedule_once(
-                            lambda _dt: playlist_geometry(self, True), delay
-                        )
+                        print(f"[PLAYLIST-V8] row {idx} failed: {exc}")
 
-            Clock.schedule_once(lambda _dt: add_chunk(0), 0)
+            playlist_geometry(self, log=True)
+            for delay in (0.0, 0.04, 0.12):
+                Clock.schedule_once(
+                    lambda _dt, owner=self, final=(delay == 0.12): playlist_geometry(
+                        owner, log=final
+                    ),
+                    delay,
+                )
             return None
 
         def toggle(self):
@@ -282,10 +384,12 @@ def _patch_playlist_scroll() -> bool:
             )
             if not self._playlist_collapsed:
                 listing = self.ids.get("playlist_list")
-                if listing is not None and not listing.children and self.playlist.tracks:
-                    render(self, force=True)
-                    return
+                total = len(self.playlist.tracks if self.playlist else [])
+                if listing is not None and len(listing.children) != total:
+                    return render(self, force=True)
             update_header(self)
+            playlist_geometry(self, log=True)
+            return None
 
         old_init = player_cls.__init__
         old_pre_enter = player_cls.on_pre_enter
@@ -294,22 +398,25 @@ def _patch_playlist_scroll() -> bool:
         def init_v8(self, *args, **kwargs):
             old_init(self, *args, **kwargs)
             for delay in (0.0, 0.08, 0.25):
-                Clock.schedule_once(lambda _dt: configure_outer(self), delay)
-                Clock.schedule_once(lambda _dt: bind_title(self), delay)
-                Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
+                Clock.schedule_once(lambda _dt, owner=self: mount_playlist_direct(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: configure_outer(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: bind_title(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: playlist_geometry(owner), delay)
 
         def pre_enter_v8(self, *args, **kwargs):
             result = old_pre_enter(self, *args, **kwargs)
             for delay in (0.0, 0.06, 0.18):
-                Clock.schedule_once(lambda _dt: configure_outer(self), delay)
-                Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
+                Clock.schedule_once(lambda _dt, owner=self: mount_playlist_direct(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: configure_outer(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: playlist_geometry(owner), delay)
             return result
 
         def resume_v8(self, *args, **kwargs):
             result = old_resume(self, *args, **kwargs)
             for delay in (0.0, 0.08, 0.22):
-                Clock.schedule_once(lambda _dt: configure_outer(self), delay)
-                Clock.schedule_once(lambda _dt: playlist_geometry(self), delay)
+                Clock.schedule_once(lambda _dt, owner=self: mount_playlist_direct(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: configure_outer(owner), delay)
+                Clock.schedule_once(lambda _dt, owner=self: playlist_geometry(owner), delay)
             return result
 
         player_cls.__init__ = init_v8
@@ -319,7 +426,7 @@ def _patch_playlist_scroll() -> bool:
         player_cls._render_playlist_ui = render
         player_cls._pymusic_playlist_scroll_v8 = True
         _PATCHED = True
-        print("[HOTFIX] single-scroll playlist v8 enabled")
+        print("[HOTFIX] deterministic single-scroll playlist v8 enabled")
         return True
 
 
