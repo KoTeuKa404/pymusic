@@ -5,31 +5,31 @@ import json
 import threading
 import time
 
-# Restore the player scroll/runtime order that was working on 2026-08-20.
-# Keep the chain intentionally small: base player -> single-scroll playlist v8
-# -> resume helper (optional, as in the old chain) -> final player geometry.
-# Newer experimental scroll/touch layers remain in the repo for history but are
-# deliberately not imported here.
+# Player runtime order:
+#   1) base non-UI runtime fixes
+#   2) final video/metadata geometry
+#   3) canonical player-page rewrite
+#
+# Old playlist_scroll_fix/resume/nested-scroll/video-bridge layers deliberately
+# stay out of the runtime chain. player_screen_rewrite owns the complete player
+# page gesture/layout model after the native/search layers finish installing.
 try:
     import sitecustomize as _player_hotfix
-    import playlist_scroll_fix as _playlist_scroll_fix
     import playlist_open_guard_v12 as _playlist_open_guard_v12
-    import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
+    import player_screen_rewrite as _player_screen_rewrite
 
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
-        ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
-        ("resume", _resume_ui_fix._patch_resume_ui),
-        # Same ordering as the known-good Aug 20 state: final player last.
         ("final", _final_player_fix._patch_final_player),
+        ("player_core", _player_screen_rewrite.install_player_screen_rewrite),
     )
 
     def _install_player_hotfix_when_ready():
         statuses = {name: False for name, _fn in _PATCHERS}
         last_errors = {}
 
-        for attempt in range(300):
+        for _attempt in range(400):
             for name, patch_fn in _PATCHERS:
                 if statuses.get(name):
                     continue
@@ -43,10 +43,7 @@ try:
                         last_errors[name] = text
                         print(f"[HOTFIX] loader patch failed: {name}: {text}")
 
-            # This intentionally matches Aug 20: resume was attempted but was
-            # not required for the player to become ready.
-            required = ("base", "playlist", "final")
-            if all(statuses.get(name, False) for name in required):
+            if all(statuses.get(name, False) for name in ("base", "final", "player_core")):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
                 return
             time.sleep(0.05)
@@ -59,8 +56,8 @@ try:
         daemon=True,
     ).start()
 
-    # Keep the newer plain-playlist open guard because it fixes the already
-    # verified first-track/index-0 regression without changing scroll behavior.
+    # Keep the verified plain-playlist opening guard. It fixes the container URL
+    # / first-track race and does not own page geometry or touch dispatch.
     try:
         if not _playlist_open_guard_v12.install_playlist_open_guard_v12():
             print("[PLAYLIST-OPEN-V12] installer returned false")
