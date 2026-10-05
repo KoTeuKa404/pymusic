@@ -5,43 +5,31 @@ import json
 import threading
 import time
 
-# AudioPlayerScreen imports this module while its class is still being defined.
-# Poll until the class is ready, then install one owner for playlist geometry,
-# one final full-queue renderer, and one owner for native touch. The old
-# v9-v12/v16 scroll/touch patches stay out of the runtime chain.
+# Restore the player scroll/runtime order that was working on 2026-08-20.
+# Keep the chain intentionally small: base player -> single-scroll playlist v8
+# -> resume helper (optional, as in the old chain) -> final player geometry.
+# Newer experimental scroll/touch layers remain in the repo for history but are
+# deliberately not imported here.
 try:
     import sitecustomize as _player_hotfix
-    import player_input_cleanup as _player_input_cleanup
-    import playlist_full_render as _playlist_full_render
-    import outer_scroll_gesture_tuning as _outer_scroll_gesture_tuning
+    import playlist_scroll_fix as _playlist_scroll_fix
     import playlist_open_guard_v12 as _playlist_open_guard_v12
     import resume_ui_fix as _resume_ui_fix
     import final_player_fix as _final_player_fix
 
     _PATCHERS = (
         ("base", _player_hotfix._patch_audio_screen),
-        ("single_scroll", _player_input_cleanup.install_single_scroll_cleanup),
-        # The cleanup removes the nested ScrollView. This renderer then becomes
-        # the sole queue renderer and creates every row in one stable pass so
-        # startup callbacks cannot strand the queue at the first 8-row chunk.
-        ("playlist_full", _playlist_full_render.install_full_playlist_renderer),
-        # Playlist rows are ButtonBehavior widgets. Tune only the single outer
-        # ScrollView so ordinary Android drags are classified as scrolls before
-        # a row receives and grabs the touch.
-        ("outer_scroll", _outer_scroll_gesture_tuning.install_outer_scroll_gesture_tuning),
+        ("playlist", _playlist_scroll_fix._patch_playlist_scroll),
         ("resume", _resume_ui_fix._patch_resume_ui),
-        # Final player owns visible video geometry. Native touch cleanup waits
-        # for this plus the Java transport/timeline layers, then becomes the
-        # single final touch-policy owner.
+        # Same ordering as the known-good Aug 20 state: final player last.
         ("final", _final_player_fix._patch_final_player),
-        ("native_touch", _player_input_cleanup.install_native_touch_cleanup),
     )
 
     def _install_player_hotfix_when_ready():
         statuses = {name: False for name, _fn in _PATCHERS}
         last_errors = {}
 
-        for attempt in range(400):
+        for attempt in range(300):
             for name, patch_fn in _PATCHERS:
                 if statuses.get(name):
                     continue
@@ -55,15 +43,9 @@ try:
                         last_errors[name] = text
                         print(f"[HOTFIX] loader patch failed: {name}: {text}")
 
-            required = (
-                "base",
-                "single_scroll",
-                "playlist_full",
-                "outer_scroll",
-                "resume",
-                "final",
-                "native_touch",
-            )
+            # This intentionally matches Aug 20: resume was attempted but was
+            # not required for the player to become ready.
+            required = ("base", "playlist", "final")
             if all(statuses.get(name, False) for name in required):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
                 return
@@ -77,6 +59,8 @@ try:
         daemon=True,
     ).start()
 
+    # Keep the newer plain-playlist open guard because it fixes the already
+    # verified first-track/index-0 regression without changing scroll behavior.
     try:
         if not _playlist_open_guard_v12.install_playlist_open_guard_v12():
             print("[PLAYLIST-OPEN-V12] installer returned false")
