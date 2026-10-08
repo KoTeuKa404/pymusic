@@ -171,12 +171,15 @@ def _install_now() -> bool:
                 self._current_comments_loading_v4 = False
 
         def get_slot(self):
-            try:
-                scroll = self.ids.get("similar_scroll")
-                listing = self.ids.get("similar_list")
-                header = self.ids.get("similar_header_row")
-            except Exception:
-                return None, None
+            """Use the plain similar_list when the player has one real scroll.
+
+            The previous similar_scroll (nested MDScrollView) no longer exists
+            in the static KV tree. For compatibility the list itself can also
+            act as this panel's height/opacity target.
+            """
+            listing = self.ids.get("similar_list")
+            scroll = self.ids.get("similar_scroll") or listing
+            header = self.ids.get("similar_header_row")
             if scroll is None or listing is None:
                 return None, None
             try:
@@ -184,16 +187,17 @@ def _install_now() -> bool:
                     header.height = 0
                     header.opacity = 0
                     header.disabled = True
-                scroll.size_hint_y = None
-                scroll.do_scroll_x = False
-                scroll.do_scroll_y = False
-                scroll.bar_width = 0
+                if scroll is not listing:
+                    scroll.size_hint_y = None
+                    scroll.do_scroll_x = False
+                    scroll.do_scroll_y = False
+                    scroll.bar_width = 0
+                    try:
+                        scroll.always_overscroll = False
+                    except Exception:
+                        pass
                 scroll.opacity = 1
                 scroll.disabled = False
-                try:
-                    scroll.always_overscroll = False
-                except Exception:
-                    pass
                 listing.size_hint_y = None
                 listing.padding = (0, 0, 0, dp(12))
                 listing.spacing = dp(2)
@@ -203,7 +207,9 @@ def _install_now() -> bool:
                 def guard(instance, value):
                     wanted = float(getattr(instance, "_current_v4_height", 0) or 0)
                     if wanted > 0 and float(value or 0) + 0.5 < wanted:
-                        Clock.schedule_once(lambda _dt: setattr(instance, "height", wanted), 0)
+                        Clock.schedule_once(
+                            lambda _dt: setattr(instance, "height", wanted), 0
+                        )
                 scroll.bind(height=guard)
                 scroll._current_v4_height_guard = True
             return scroll, listing
