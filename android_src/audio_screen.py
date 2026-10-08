@@ -1834,81 +1834,50 @@ class AudioPlayerScreen(Screen):
             pass
 
     def _render_playlist_ui(self, force: bool = False):
+        """Fallback plain playlist renderer for the static single-scroll KV.
+
+        It is safe even when optional runtime layers have not installed yet.
+        A stable queue never replaces its ButtonBehavior widgets on metadata
+        updates, which would otherwise interrupt the user's drag gesture.
+        """
         try:
-            lst = self.ids.get("playlist_list")
-            scroll = self.ids.get("playlist_scroll")
-            header = self.ids.get("playlist_header")
-            header_row = self.ids.get("playlist_header_row")
-            toggle_btn = self.ids.get("playlist_toggle_btn")
-            if not lst:
+            listing = self.ids.get("playlist_list")
+            if listing is None:
                 return
-            sig = None
-            try:
-                if self.playlist and self.playlist.tracks:
-                    sig = tuple(
-                        (
-                            str(t.get("url") or ""),
-                            str(t.get("video_id") or ""),
-                            str(t.get("thumb") or ""),
-                            str(t.get("duration") or ""),
-                        )
-                        for t in self.playlist.tracks
-                    )
-            except Exception:
-                sig = None
-            if (not force) and sig is not None and sig == self._playlist_ui_sig:
-                return
-            self._playlist_ui_sig = sig
-            self._playlist_ui_last_ts = time.time()
-            self._playlist_render_gen += 1
-            render_gen = int(self._playlist_render_gen)
-            lst.clear_widgets()
-            if not self.playlist or not self.playlist.tracks:
-                self._set_collapsible_header(header_row, header, toggle_btn, False, "Черга", False)
-                if scroll:
-                    scroll.height = 0
-                    scroll.opacity = 0
-                    scroll.disabled = True
-                return
-            title = self.playlist.name or "Черга"
+            tracks = list(self.playlist.tracks if self.playlist else [])
+            signature = tuple(
+                (str(t.get("url") or ""), str(t.get("video_id") or ""))
+                for t in tracks
+            )
+            if (
+                getattr(self, "_fallback_playlist_signature", None) != signature
+                or len(listing.children) != len(tracks)
+            ):
+                listing.clear_widgets()
+                for index, item in enumerate(tracks):
+                    listing.add_widget(self._make_playlist_row(index, item))
+                self._fallback_playlist_signature = signature
+                print(
+                    "[PLAYLIST-BASE] full render "
+                    f"{len(listing.children)}/{len(tracks)}"
+                )
+
             collapsed = bool(getattr(self, "_playlist_collapsed", False))
-            self._set_collapsible_header(header_row, header, toggle_btn, True, title, collapsed)
-            if collapsed:
-                if scroll:
-                    scroll.height = 0
-                    scroll.opacity = 0
-                    scroll.disabled = True
-                return
-            if scroll:
-                scroll.height = dp(240)
-                scroll.opacity = 1
-                scroll.disabled = False
-
-            tracks = list(self.playlist.tracks)
-            chunk_size = 10
-
-            def _add_chunk(start_idx: int):
-                try:
-                    if render_gen != int(getattr(self, "_playlist_render_gen", -1)):
-                        return
-                    end_idx = min(len(tracks), start_idx + chunk_size)
-                    for idx in range(start_idx, end_idx):
-                        row = self._make_playlist_row(idx, tracks[idx])
-                        lst.add_widget(row)
-                    if end_idx < len(tracks):
-                        Clock.schedule_once(lambda dt, n=end_idx: _add_chunk(n), 0)
-                except Exception as e:
-                    try:
-                        ma.log(f"[PLAYLIST] chunk render err: {e}")
-                    except Exception:
-                        pass
-
-            Clock.schedule_once(lambda dt: _add_chunk(0), 0)
-        except Exception as e:
-            try:
-                ma.log(f"[PLAYLIST] render err: {e}")
-            except Exception:
-                pass
+            self._set_collapsible_header(
+                self.ids.get("playlist_header_row"),
+                self.ids.get("playlist_header"),
+                self.ids.get("playlist_toggle_btn"),
+                bool(tracks),
+                (self.playlist.name or "Черга") if self.playlist else "Черга",
+                collapsed,
+            )
+            visible = bool(tracks and not collapsed)
+            listing.size_hint_y = None
+            listing.disabled = not visible
+            listing.opacity = 1 if visible else 0
+            listing.height = max(0, float(listing.minimum_height or 0)) if visible else 0
+        except Exception as exc:
+            ma.log(f"[PLAYLIST-BASE] render failed: {exc}")
 
     def _render_similar_ui(self, force: bool = False):
         try:
