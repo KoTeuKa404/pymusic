@@ -254,6 +254,30 @@ def _install_now() -> bool:
                 scroll.opacity = 0
                 return
 
+            # Updating current-video metadata can call this repeatedly.
+            # Recreating every ButtonBehavior row while the user is dragging
+            # cancels the active Kivy touch stream. Rebuild only for a genuine
+            # content change (track, comments, autoplay or related entries).
+            comments_key = tuple(
+                (str(x.get("author") or ""), str(x.get("text") or ""))
+                for x in (getattr(self, "_current_comments_v4", []) or [])[:3]
+            )
+            related_key = tuple(
+                (str(x.get("url") or ""), str(x.get("video_id") or ""),
+                 str(x.get("title") or ""))
+                for x in (getattr(self, "_related_items", []) or [])[:8]
+            )
+            panel_signature = (
+                url, title, bool(getattr(self, "_auto_skip", True)),
+                bool(getattr(self, "_current_comments_loading_v4", False)),
+                comments_key, related_key,
+            )
+            if (
+                getattr(self, "_current_v4_render_signature", None) == panel_signature
+                and bool(listing.children)
+            ):
+                return
+            self._current_v4_render_signature = panel_signature
             listing.clear_widgets()
 
             autoplay = BoxLayout(
