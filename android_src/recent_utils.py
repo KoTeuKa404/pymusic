@@ -5,83 +5,17 @@ import json
 import threading
 import time
 
-# Player runtime order:
-#   1) base non-UI runtime fixes
-#   2) final video/metadata geometry
-#   3) canonical player-page rewrite
-#
-# Old playlist_scroll_fix/resume/nested-scroll/video-bridge layers deliberately
-# stay out of the runtime chain. player_screen_rewrite owns the complete player
-# page gesture/layout model after the native/search layers finish installing.
+# The user-supplied working APK uses the native KV playlist_scroll viewport.
+# Do not import/reapply sitecustomize, final_player_fix or player_screen_rewrite:
+# they alter scroll ownership and can race the already-built Kivy screen.
+# Native playback and transport fixes are initialized separately in search_utils.
 try:
-    import sitecustomize as _player_hotfix
-    import playlist_open_guard_v12 as _playlist_open_guard_v12
-    import final_player_fix as _final_player_fix
-    import player_screen_rewrite as _player_screen_rewrite
+    from playlist_open_guard_v12 import install_playlist_open_guard_v12
+    install_playlist_open_guard_v12()
+except Exception as exc:
+    print("[PLAYLIST-OPEN-V12] initialization failed:", exc)
 
-    _PATCHERS = (
-        ("base", _player_hotfix._patch_audio_screen),
-        ("final", _final_player_fix._patch_final_player),
-        ("player_core", _player_screen_rewrite.install_player_screen_rewrite),
-    )
-
-    def _install_player_hotfix_when_ready():
-        statuses = {name: False for name, _fn in _PATCHERS}
-        last_errors = {}
-
-        for _attempt in range(400):
-            for name, patch_fn in _PATCHERS:
-                if statuses.get(name):
-                    continue
-                try:
-                    statuses[name] = bool(patch_fn())
-                    if statuses[name]:
-                        print(f"[HOTFIX] loader installed: {name}")
-                except Exception as exc:
-                    text = f"{type(exc).__name__}: {exc}"
-                    if last_errors.get(name) != text:
-                        last_errors[name] = text
-                        print(f"[HOTFIX] loader patch failed: {name}: {text}")
-
-            if all(statuses.get(name, False) for name in ("base", "final", "player_core")):
-                print(f"[HOTFIX] loader ready statuses={statuses}")
-                return
-            if _attempt in (40, 120, 240, 399) and not statuses.get("player_core"):
-                try:
-                    import sys
-                    module = sys.modules.get("audio_screen")
-                    cls = getattr(module, "AudioPlayerScreen", None)
-                    markers = (
-                        "_pymusic_hotfix_v4",
-                        "_pymusic_final_player_v2",
-                        "_pymusic_native_java_transport_v1",
-                        "_pymusic_player_core_rewrite_v2",
-                    )
-                    readiness = {
-                        key: bool(getattr(cls, key, False)) for key in markers
-                    }
-                    print(f"[PLAYER-CORE-V2] waiting prerequisites={readiness}")
-                except Exception as exc:
-                    print("[PLAYER-CORE-V2] prerequisite check failed:", exc)
-            time.sleep(0.05)
-
-        print(f"[HOTFIX] loader timeout statuses={statuses} errors={last_errors}")
-
-    threading.Thread(
-        target=_install_player_hotfix_when_ready,
-        name="pymusic-player-hotfix",
-        daemon=True,
-    ).start()
-
-    # Keep the verified plain-playlist opening guard. It fixes the container URL
-    # / first-track race and does not own page geometry or touch dispatch.
-    try:
-        if not _playlist_open_guard_v12.install_playlist_open_guard_v12():
-            print("[PLAYLIST-OPEN-V12] installer returned false")
-    except Exception as exc:
-        print("[PLAYLIST-OPEN-V12] installer failed:", exc)
-except Exception as _hotfix_error:
-    print("[HOTFIX] loader failed:", _hotfix_error)
+print("[PLAYLIST-APK] old-APK viewport mode selected (no page rewrite)")
 
 
 RECENT_PATH = "recent.json"
