@@ -31,7 +31,7 @@ from recent_utils import load_recent, save_recent
 # search_utils loads its dependent layers. The experimental page rewrite is
 # intentionally excluded; playlist_scroll owns only playlist gestures.
 try:
-    import sitecustomize as _player_hotfix
+    import pymusic_runtime_patch as _player_hotfix
     import playlist_scroll_fix as _playlist_scroll_fix
     import final_player_fix as _final_player_fix
     _base_ready = bool(_player_hotfix._patch_audio_screen())
