@@ -118,6 +118,19 @@ def _install_now() -> bool:
                 _apply_thumb_ratio(self)
                 return result
 
+            # Kivy's WeakMethod resolves bound callbacks by function __name__
+            # on the instance. on_kv_post binds _align_video_to_thumb to the
+            # thumbnail position/size; after replacing it with align_fixed,
+            # WeakMethod looks up self.align_fixed unless the name is kept.
+            # Preserve canonical class method names on every wrapper so
+            # scheduled/bound callbacks survive the patch without aliases.
+            init_fixed.__name__ = "__init__"
+            pre_enter_fixed.__name__ = "on_pre_enter"
+            resume_fixed.__name__ = "handle_app_resume"
+            sync_loaded_fixed.__name__ = "_sync_ui_loaded"
+            sync_loading_fixed.__name__ = "_sync_ui_loading"
+            align_fixed.__name__ = "_align_video_to_thumb"
+
             cls.__init__ = init_fixed
             cls.on_pre_enter = pre_enter_fixed
             cls.handle_app_resume = resume_fixed
