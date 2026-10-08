@@ -248,7 +248,26 @@ def _install_now():
                 except Exception:
                     pass
 
-            scroll.bind(on_scroll_stop=align_after_stop)
+            def scroll_begin(*_args):
+                try:
+                    page = scroll.children[0] if scroll.children else None
+                    page_h = float(getattr(page, "height", 0) or 0)
+                    print(
+                        "[PLAYER-CORE-V2] drag start "
+                        f"y={float(scroll.scroll_y):.3f} "
+                        f"range={max(0.0, page_h - float(scroll.height)):.1f}"
+                    )
+                except Exception:
+                    pass
+
+            def scroll_end(*_args):
+                align_after_stop()
+                try:
+                    print("[PLAYER-CORE-V2] drag end y=%.3f" % float(scroll.scroll_y))
+                except Exception:
+                    pass
+
+            scroll.bind(on_scroll_start=scroll_begin, on_scroll_stop=scroll_end)
             # Keep the video rect in sync during normal/kinetic scrolling at
             # a bounded rate rather than re-layouting native views on every MOVE.
             def position_changed(*_args):
