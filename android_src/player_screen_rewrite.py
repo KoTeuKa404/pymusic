@@ -83,6 +83,11 @@ def _render_playlist(owner, force=False):
 
 
 def _render_similar(owner, force=False):
+    # CURRENT-V4 owns the combined autoplay/comments/related panel. Keep its
+    # renderer if present; it now uses similar_list directly without nesting.
+    current_panel = getattr(owner, "_render_current_lower_v4", None)
+    if callable(current_panel):
+        return current_panel()
     listing = owner.ids.get("similar_list")
     if listing is None:
         return
