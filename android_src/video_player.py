@@ -227,28 +227,43 @@ class AndroidVideoPlayer:
             pass
 
     def _bind_surface_tap(self):
+        """Video pixels belong to the Kivy page, not to a native touch view.
+
+        The Kivy VideoTapArea handles taps and the parent Kivy ScrollView
+        handles vertical swipes. A native SurfaceView is used only for pixels.
+        """
         try:
-            if self.surface_view is None:
-                return
-            if self._tap_listener is None:
-                self._tap_listener = self._OnTouchListener(self)
-            self.surface_view.setClickable(True)
-            self.surface_view.setOnTouchListener(self._tap_listener)
+            surface = self.surface_view
+            if surface is not None:
+                surface.setOnTouchListener(None)
+                surface.setClickable(False)
+                surface.setLongClickable(False)
+                surface.setFocusable(False)
         except Exception as e:
-            print("[VIDEO] bind tap err:", e)
+            print("[VIDEO] passive surface err:", e)
 
     def _bind_controls_tap(self):
+        """Only real control buttons take native touch input.
+
+        The Java transport layer later takes ownership of the three buttons.
+        This Python fallback never attaches listeners to the full-frame
+        transparent overlay or to its background bar.
+        """
         try:
             if self._tap_listener is None:
                 self._tap_listener = self._OnTouchListener(self)
-            views = [self.controls_overlay] + list(getattr(self, "_controls_touch_views", []) or [])
-            for view in views:
-                if view is None:
-                    continue
-                view.setClickable(True)
-                view.setOnTouchListener(self._tap_listener)
+            controls = list(getattr(self, "_controls_touch_views", []) or [])
+            for button in controls[:3]:
+                if button is not None:
+                    button.setClickable(True)
+                    button.setOnTouchListener(self._tap_listener)
+            for frame in [self.controls_overlay, *controls[3:]]:
+                if frame is not None:
+                    frame.setOnTouchListener(None)
+                    frame.setClickable(False)
+                    frame.setLongClickable(False)
         except Exception as e:
-            print("[VIDEO] bind controls tap err:", e)
+            print("[VIDEO] bind native button fallback err:", e)
 
     def _style_control_text(self, tv, text: str):
         try:
@@ -388,7 +403,7 @@ class AndroidVideoPlayer:
                 # лише самі іконки + тонкий progress унизу.
                 overlay.setBackgroundColor(Color.TRANSPARENT)
                 overlay.setAlpha(1.0)
-                overlay.setClickable(True)
+                overlay.setClickable(False)
                 overlay.setFocusable(False)
             except Exception:
                 pass
@@ -522,7 +537,7 @@ class AndroidVideoPlayer:
         # CREATE NEW SURFACE
         sv = SurfaceViewClass(activity)
         try:
-            sv.setClickable(True)
+            sv.setClickable(False)
             sv.setFocusable(False)
             sv.setFocusableInTouchMode(False)
             # SurfaceView може перекривати Kivy/native overlay. Тримаємо його не on-top,
