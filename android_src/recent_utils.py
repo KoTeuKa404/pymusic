@@ -9,7 +9,7 @@ import time
 # Only the experimental whole-page scrolling rewrite is disabled: the
 # playlist owns a bounded MDScrollView as in the user-verified APK.
 try:
-    import sitecustomize as _player_hotfix
+    import pymusic_runtime_patch as _player_hotfix
     import final_player_fix as _final_player_fix
     import playlist_scroll_fix as _playlist_scroll_fix
     import playlist_open_guard_v12 as _playlist_open_guard_v12
