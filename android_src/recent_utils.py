@@ -11,10 +11,11 @@ import time
 try:
     import sitecustomize as _player_hotfix
     import final_player_fix as _final_player_fix
+    import playlist_scroll_fix as _playlist_scroll_fix
     import playlist_open_guard_v12 as _playlist_open_guard_v12
 
     def _install_player_hotfix_when_ready():
-        ready = {"base": False, "final": False}
+        ready = {"base": False, "playlist": False, "final": False}
         for attempt in range(400):
             if not ready["base"]:
                 try:
@@ -23,7 +24,14 @@ try:
                         print("[HOTFIX] loader installed: base")
                 except Exception as exc:
                     print("[HOTFIX] base install failed:", exc)
-            if ready["base"] and not ready["final"]:
+            if ready["base"] and not ready["playlist"]:
+                try:
+                    ready["playlist"] = bool(_playlist_scroll_fix._patch_playlist_scroll())
+                    if ready["playlist"]:
+                        print("[HOTFIX] loader installed: playlist-v5")
+                except Exception as exc:
+                    print("[HOTFIX] playlist install failed:", exc)
+            if ready["base"] and ready["playlist"] and not ready["final"]:
                 try:
                     ready["final"] = bool(_final_player_fix._patch_final_player())
                     if ready["final"]:
