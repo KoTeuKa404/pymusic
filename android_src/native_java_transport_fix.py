@@ -51,21 +51,25 @@ def install_native_java_transport_fix() -> bool:
                     except Exception as exc:
                         print(f"[JAVA-CTRL] button bind {index} failed: {exc}")
 
-                # The transparent overlay/bar may still use the normal Python
-                # zone listener.  Crucially, it must never replace the Java
-                # OnTouchListener installed on the first three ImageButtons.
-                if self._tap_listener is None:
-                    self._tap_listener = self._OnTouchListener(self)
-
-                views = [self.controls_overlay]
-                if len(controls) > 3:
-                    views.extend(controls[3:])
-                for view in views:
+                # Never turn the transparent parent frames into native
+                # touch targets. Kivy owns drag/tap gestures in the player
+                # page; only these three actual buttons and SeekBar are native.
+                for view in [self.controls_overlay, *controls[3:]]:
                     if view is None:
                         continue
                     try:
-                        view.setClickable(True)
-                        view.setOnTouchListener(self._tap_listener)
+                        view.setOnTouchListener(None)
+                        view.setClickable(False)
+                        view.setLongClickable(False)
+                        view.setFocusable(False)
+                    except Exception:
+                        pass
+                surface = getattr(self, "surface_view", None)
+                if surface is not None:
+                    try:
+                        surface.setOnTouchListener(None)
+                        surface.setClickable(False)
+                        surface.setLongClickable(False)
                     except Exception:
                         pass
             except Exception as exc:
