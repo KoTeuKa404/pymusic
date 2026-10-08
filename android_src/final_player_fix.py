@@ -336,6 +336,19 @@ def _patch_final_player() -> bool:
                 Clock.schedule_once(lambda _dt: bind_layout(self), delay)
             return result
 
+        # Kivy stores bound Clock/property callbacks through WeakMethod and
+        # resolves them by their __name__ on the instance. Keep the original
+        # method names when installing wrappers, especially the video alignment
+        # method bound to thumbnail.pos and thumbnail.size by on_kv_post.
+        auto_video_nonblocking.__name__ = "_auto_video_for_current"
+        safe_synced_start.__name__ = "_start_synced_audio_and_video"
+        init_final.__name__ = "__init__"
+        sync_loaded_final.__name__ = "_sync_ui_loaded"
+        sync_loading_final.__name__ = "_sync_ui_loading"
+        pre_enter_final.__name__ = "on_pre_enter"
+        resume_final.__name__ = "handle_app_resume"
+        align_video_to_block.__name__ = "_align_video_to_thumb"
+
         screen_cls._auto_video_for_current = auto_video_nonblocking
         screen_cls._start_synced_audio_and_video = safe_synced_start
         screen_cls.__init__ = init_final
