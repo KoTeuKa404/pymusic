@@ -39,6 +39,7 @@ def _patch_playlist_scroll() -> bool:
 
         Clock = module.Clock
         dp = module.dp
+        Window = module.Window
 
         def stop_effect(scroll) -> None:
             """Stop stale kinetic movement without rebuilding any rows."""
@@ -81,20 +82,63 @@ def _patch_playlist_scroll() -> bool:
                             and widget.height > 0
                             and widget.collide_point(*touch.pos)
                         ):
+                            # Only suspend the parent for the *current*
+                            # gesture. The child can grab the touch, so its
+                            # own on_touch_up is not guaranteed to fire.
+                            inner._pymusic_active_touch_uid = touch.uid
                             outer.do_scroll_y = False
-                    except Exception:
-                        pass
+                            print(
+                                "[PLAYLIST-V5] inner gesture begin "
+                                f"uid={touch.uid} outer_y={outer.do_scroll_y}"
+                            )
+                    except Exception as exc:
+                        print("[PLAYLIST-V5] gesture begin failed:", exc)
 
-                def on_touch_up(_widget, _touch):
-                    Clock.schedule_once(
-                        lambda _dt: release_outer_scroll(self), 0
-                    )
+                def restore_touch(touch):
+                    try:
+                        active = getattr(inner, "_pymusic_active_touch_uid", None)
+                        if active is None or active == touch.uid:
+                            inner._pymusic_active_touch_uid = None
+                            release_outer_scroll(self)
+                            print(
+                                "[PLAYLIST-V5] gesture released "
+                                f"uid={touch.uid} outer_y={outer.do_scroll_y}"
+                            )
+                    except Exception as exc:
+                        print("[PLAYLIST-V5] gesture release failed:", exc)
 
-                inner.bind(
-                    on_touch_down=on_touch_down,
-                    on_touch_up=on_touch_up,
+                def on_touch_up(_widget, touch):
+                    restore_touch(touch)
+
+                def window_touch_up(_window, touch):
+                    # A grabbed KivyMD Button/ScrollView can bypass the
+                    # child's normal touch-up dispatch. Window.on_touch_up
+                    # is the lifecycle owner for the physical finger, so it
+                    # must ALWAYS restore outer scrolling.
+                    restore_touch(touch)
+                    return False
+
+                def window_touch_down(_window, touch):
+                    # Recover from a dropped UP (screen transition, OS
+                    # interruption) before the next gesture starts.
+                    if getattr(inner, "_pymusic_active_touch_uid", None) is not None:
+                        inner._pymusic_active_touch_uid = None
+                        release_outer_scroll(self)
+                        print("[PLAYLIST-V5] recovered stale outer scroll state")
+                    return False
+
+                inner.bind(on_touch_down=on_touch_down, on_touch_up=on_touch_up)
+                Window.bind(
+                    on_touch_up=window_touch_up,
+                    on_touch_down=window_touch_down,
+                )
+                # Retain strong references to handlers for Kivy event bindings.
+                inner._pymusic_window_touch_handlers = (
+                    window_touch_up,
+                    window_touch_down,
                 )
                 inner._pymusic_nested_guard = True
+                print("[PLAYLIST-V5] global touch release guard enabled")
             except Exception as exc:
                 print("[PLAYLIST] nested scroll guard failed:", exc)
 
