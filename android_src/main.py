@@ -32,10 +32,18 @@ from recent_utils import load_recent, save_recent
 # intentionally excluded; playlist_scroll owns only playlist gestures.
 try:
     import sitecustomize as _player_hotfix
+    import playlist_scroll_fix as _playlist_scroll_fix
     import final_player_fix as _final_player_fix
     _base_ready = bool(_player_hotfix._patch_audio_screen())
+    _playlist_ready = (
+        bool(_playlist_scroll_fix._patch_playlist_scroll())
+        if _base_ready else False
+    )
     _final_ready = bool(_final_player_fix._patch_final_player()) if _base_ready else False
-    print(f"[PLAYER-BOOT] base={_base_ready} final={_final_ready} independent_playlist=True")
+    print(
+        f"[PLAYER-BOOT] base={_base_ready} playlist-v5={_playlist_ready} "
+        f"final={_final_ready}"
+    )
 except Exception as exc:
     print("[PLAYER-BOOT] initialization error:", repr(exc))
 
