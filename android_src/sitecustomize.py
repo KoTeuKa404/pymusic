@@ -184,7 +184,8 @@ def _patch_audio_screen() -> bool:
             if scroll is not None:
                 scroll.height = dp(240) if expanded else 0
                 scroll.opacity = 1 if expanded else 0
-                scroll.disabled = not expanded
+                scroll.disabled = False
+                scroll.do_scroll_y = True
 
         def set_similar_visibility(self) -> None:
             ensure_state(self)
@@ -246,82 +247,74 @@ def _patch_audio_screen() -> bool:
                 return None
 
         def render_playlist(self, force=False):
+            """One stable, complete renderer for the bounded playlist viewport.
+
+            The child MDList owns height through minimum_height; its parent
+            playlist_scroll is a real independent vertical ScrollView. Never
+            re-create rows when only playback metadata/force=True changes.
+            """
             ensure_state(self)
             listing = self.ids.get("playlist_list")
-            if listing is None:
+            viewport = self.ids.get("playlist_scroll")
+            if listing is None or viewport is None:
                 return None
 
-            tracks = list(
-                self.playlist.tracks
-                if self.playlist and self.playlist.tracks
-                else []
-            )
+            tracks = list(self.playlist.tracks if self.playlist else [])
             signature = playlist_signature(self)
-            current_index = int(
-                getattr(self.playlist, "index", 0) or 0
+            unchanged = (
+                signature == getattr(self, "_hotfix_playlist_sig", None)
+                and len(listing.children) == len(tracks)
             )
-            win_start, win_end = self._hotfix_playlist_window
-            current_in_window = win_start <= current_index < win_end
-            has_rows = bool(getattr(listing, "children", None))
-
-            if (
-                signature == self._hotfix_playlist_sig
-                and has_rows
-                and (current_in_window or len(tracks) <= 72)
-            ):
-                set_playlist_visibility(self)
-                return None
-
-            self._playlist_render_gen = int(
-                getattr(self, "_playlist_render_gen", 0)
-            ) + 1
-            render_gen = self._playlist_render_gen
-            listing.clear_widgets()
-
-            if not tracks:
-                self._hotfix_playlist_window = (0, 0)
+            if not unchanged:
+                listing.clear_widgets()
+                for index, item in enumerate(tracks):
+                    listing.add_widget(self._make_playlist_row(index, item))
                 self._hotfix_playlist_sig = signature
-                set_playlist_visibility(self)
-                return None
+                self._hotfix_playlist_window = (0, len(tracks))
+                self._playlist_ui_sig = signature
+                print(
+                    "[PLAYLIST-SCROLL] rebuilt complete list "
+                    f"rows={len(listing.children)}/{len(tracks)}"
+                )
 
-            if len(tracks) <= 72:
-                start = 0
-                end = len(tracks)
-            else:
-                start = max(0, current_index - 14)
-                end = min(len(tracks), start + 54)
-                start = max(0, end - 54)
+            # The viewport must remain interactive, including after
+            # collapse/reopen. The working Android build kept its list bounded
+            # to 240dp and assigned swipe gestures to this inner viewport.
+            visible = bool(tracks)
+            collapsed = bool(getattr(self, "_playlist_collapsed", False))
+            self._set_collapsible_header(
+                self.ids.get("playlist_header_row"),
+                self.ids.get("playlist_header"),
+                self.ids.get("playlist_toggle_btn"),
+                visible,
+                (self.playlist.name or "Черга") if self.playlist else "Черга",
+                collapsed,
+            )
+            expanded = visible and not collapsed
+            viewport.size_hint_y = None
+            viewport.height = dp(240) if expanded else 0
+            viewport.opacity = 1.0 if expanded else 0.0
+            viewport.disabled = False
+            viewport.do_scroll_x = False
+            viewport.do_scroll_y = True
+            listing.disabled = not expanded
 
-            self._hotfix_playlist_window = (start, end)
-            self._hotfix_playlist_sig = signature
-            set_playlist_visibility(self)
-            if bool(getattr(self, "_playlist_collapsed", False)):
-                return None
+            if not getattr(self, "_pymusic_playlist_scroll_logged", False):
+                self._pymusic_playlist_scroll_logged = True
 
-            indices = list(range(start, end))
-            chunk_size = 4
-
-            def add_chunk(offset):
-                if render_gen != int(
-                    getattr(self, "_playlist_render_gen", -1)
-                ):
-                    return
-                stop = min(len(indices), offset + chunk_size)
-                for position in range(offset, stop):
-                    actual_index = indices[position]
-                    row = self._make_playlist_row(
-                        actual_index, tracks[actual_index]
+                def drag_start(widget, touch):
+                    print(
+                        "[PLAYLIST-SCROLL] start "
+                        f"y={float(widget.scroll_y):.3f} "
+                        f"range={max(0.0, float(listing.height)-float(widget.height)):.1f}"
                     )
-                    listing.add_widget(row)
-                if stop < len(indices):
-                    Clock.schedule_once(
-                        lambda _dt, next_offset=stop: add_chunk(
-                            next_offset
-                        ),
-                        0.016,
-                    )
 
-            Clock.schedule_once(lambda _dt: add_chunk(0), 0)
+                def drag_stop(widget, touch):
+                    print(f"[PLAYLIST-SCROLL] stop y={float(widget.scroll_y):.3f}")
+
+                viewport.bind(on_scroll_start=drag_start, on_scroll_stop=drag_stop)
+                print("[PLAYLIST-SCROLL] independent 240dp viewport enabled")
+
             return None
 
         player_cls._render_playlist_ui = render_playlist
