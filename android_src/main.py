@@ -28,24 +28,10 @@ import media_android as ma  # <<< ДОДАНО
 from recent_utils import load_recent, save_recent
 from search_utils import load_search_history, save_search_history
 
-# Deterministic player initialization before KV loads or AudioPlayerScreen is
-# created. The legacy recent_utils loader is asynchronous, and source changes
-# alone do not guarantee it won the race with earlier UI patchers.
-try:
-    import sitecustomize as _player_base_fix
-    import final_player_fix as _player_final_fix
-    import player_screen_rewrite as _player_page_fix
+# The user-verified APK uses the original KivyMD nested playlist viewport.
+# No runtime page rewrite is installed before the KV screen is constructed.
+print("[PLAYLIST-APK] using verified old APK scroll hierarchy")
 
-    _bootstrap_player_state = {
-        "base": bool(_player_base_fix._patch_audio_screen()),
-        "final": bool(_player_final_fix._patch_final_player()),
-        "core_v2": bool(_player_page_fix.install_player_screen_rewrite()),
-    }
-    print("[PLAYER-BOOT] before Builder.load_file", _bootstrap_player_state)
-    if not all(_bootstrap_player_state.values()):
-        print("[PLAYER-BOOT] incomplete; loader will retry; check prereq markers")
-except Exception as _player_boot_exc:
-    print("[PLAYER-BOOT] synchronous initialization failed:", repr(_player_boot_exc))
 from kivymd.uix.chip import MDChip
 from kivymd.uix.card import MDCard
 from kivymd.uix.boxlayout import MDBoxLayout
