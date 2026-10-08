@@ -12,6 +12,7 @@ import threading
 
 from kivy.clock import Clock
 from kivy.metrics import dp
+from kivy.core.window import Window
 
 _LOCK = threading.RLock()
 _INSTALLED = False
@@ -284,6 +285,57 @@ def _install_now():
             scroll.bind(scroll_y=position_changed)
             video_block = owner.ids["video_block"]
             video_block.bind(pos=position_changed, size=position_changed)
+
+            # Observe the raw Kivy input stream without grabbing or consuming
+            # touches. This distinguishes Android-native interception from
+            # Kivy ScrollView gesture and geometry problems on the real device.
+            def raw_down(_window, touch):
+                if owner.manager is None or owner.manager.current != owner.name:
+                    return False
+                if not scroll.collide_point(*touch.pos):
+                    return False
+                touch.ud["player_core_v2_trace"] = (
+                    float(touch.x), float(touch.y), float(scroll.scroll_y)
+                )
+                print(
+                    "[PLAYER-TOUCH] down "
+                    f"x={float(touch.x):.0f} y={float(touch.y):.0f} "
+                    f"scroll={float(scroll.scroll_y):.4f}"
+                )
+                return False
+
+            def raw_move(_window, touch):
+                trace = touch.ud.get("player_core_v2_trace")
+                if trace is None or touch.ud.get("player_core_v2_move_logged"):
+                    return False
+                dx = float(touch.x) - trace[0]
+                dy = float(touch.y) - trace[1]
+                if max(abs(dx), abs(dy)) >= dp(18):
+                    touch.ud["player_core_v2_move_logged"] = True
+                    print(
+                        "[PLAYER-TOUCH] move "
+                        f"dx={dx:.0f} dy={dy:.0f} "
+                        f"scroll={float(scroll.scroll_y):.4f}"
+                    )
+                return False
+
+            def raw_up(_window, touch):
+                trace = touch.ud.pop("player_core_v2_trace", None)
+                if trace is not None:
+                    touch.ud.pop("player_core_v2_move_logged", None)
+                    print(
+                        "[PLAYER-TOUCH] up "
+                        f"start={trace[2]:.4f} end={float(scroll.scroll_y):.4f} "
+                        f"page_h={float(scroll.children[0].height) if scroll.children else 0:.0f} "
+                        f"view_h={float(scroll.height):.0f}"
+                    )
+                return False
+
+            Window.bind(
+                on_touch_down=raw_down,
+                on_touch_move=raw_move,
+                on_touch_up=raw_up,
+            )
             _report_layout(owner)
 
         def init_v2(self, *args, **kwargs):
