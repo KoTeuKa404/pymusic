@@ -26,11 +26,20 @@ from kivy.app import App
 import media_android as ma  # <<< ДОДАНО
 
 from recent_utils import load_recent, save_recent
-from search_utils import load_search_history, save_search_history
 
-# The user-verified APK uses the original KivyMD nested playlist viewport.
-# No runtime page rewrite is installed before the KV screen is constructed.
-print("[PLAYLIST-APK] using verified old APK scroll hierarchy")
+# These initialize playback, metadata and current-video recommendations before
+# search_utils loads its dependent layers. The experimental page rewrite is
+# intentionally excluded; playlist_scroll owns only playlist gestures.
+try:
+    import sitecustomize as _player_hotfix
+    import final_player_fix as _final_player_fix
+    _base_ready = bool(_player_hotfix._patch_audio_screen())
+    _final_ready = bool(_final_player_fix._patch_final_player()) if _base_ready else False
+    print(f"[PLAYER-BOOT] base={_base_ready} final={_final_ready} independent_playlist=True")
+except Exception as exc:
+    print("[PLAYER-BOOT] initialization error:", repr(exc))
+
+from search_utils import load_search_history, save_search_history
 
 from kivymd.uix.chip import MDChip
 from kivymd.uix.card import MDCard
