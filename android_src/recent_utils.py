@@ -46,6 +46,23 @@ try:
             if all(statuses.get(name, False) for name in ("base", "final", "player_core")):
                 print(f"[HOTFIX] loader ready statuses={statuses}")
                 return
+            if _attempt in (40, 120, 240, 399) and not statuses.get("player_core"):
+                try:
+                    import sys
+                    module = sys.modules.get("audio_screen")
+                    cls = getattr(module, "AudioPlayerScreen", None)
+                    markers = (
+                        "_pymusic_hotfix_v4",
+                        "_pymusic_final_player_v2",
+                        "_pymusic_native_java_transport_v1",
+                        "_pymusic_player_core_rewrite_v2",
+                    )
+                    readiness = {
+                        key: bool(getattr(cls, key, False)) for key in markers
+                    }
+                    print(f"[PLAYER-CORE-V2] waiting prerequisites={readiness}")
+                except Exception as exc:
+                    print("[PLAYER-CORE-V2] prerequisite check failed:", exc)
             time.sleep(0.05)
 
         print(f"[HOTFIX] loader timeout statuses={statuses} errors={last_errors}")
