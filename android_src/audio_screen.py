@@ -780,10 +780,18 @@ class AudioPlayerScreen(Screen):
             Clock.schedule_once(self._align_video_to_thumb, 0)
         except Exception:
             pass
-        if visible and auto_hide:
+        # The Android video SurfaceView is deliberately passive; it cannot
+        # bring a hidden full-frame native overlay back with a tap. While
+        # video is visible, real rewind/play/forward buttons and the timeline
+        # therefore remain on screen and usable instead of disappearing after
+        # five seconds with no way to reveal them again.
+        if visible and auto_hide and not bool(getattr(self, "_video_active", False)):
             self._video_controls_ev = Clock.schedule_once(self._hide_video_controls, 5.0)
 
     def _hide_video_controls(self, dt):
+        if bool(getattr(self, "_video_active", False)):
+            self._set_video_controls_visible(True, auto_hide=False)
+            return
         self._set_video_controls_visible(False, auto_hide=False)
 
     def video_toggle_play(self):
@@ -3313,6 +3321,13 @@ class AudioPlayerScreen(Screen):
                     self._video_player.stop()
             except Exception:
                 pass
+
+        else:
+            # Show native controls as soon as the first video frame becomes
+            # active. The visible native buttons are bound by Java transport;
+            # the Kivy fallback row remains disabled while video is displayed.
+            self._set_video_controls_visible(True, auto_hide=False)
+            print("[VIDEO-CONTROLS] native buttons and seekbar shown persistently")
 
     def hide_video_overlay_fast(self):
         self._video_active = False
