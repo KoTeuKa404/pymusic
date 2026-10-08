@@ -1834,33 +1834,44 @@ class AudioPlayerScreen(Screen):
             pass
 
     def _render_playlist_ui(self, force: bool = False):
-        """Fallback plain playlist renderer for the static single-scroll KV.
+        """Bounded nested playlist scroll from the user-verified working APK.
 
-        It is safe even when optional runtime layers have not installed yet.
-        A stable queue never replaces its ButtonBehavior widgets on metadata
-        updates, which would otherwise interrupt the user's drag gesture.
+        The playlist scrolls *inside* its own 240dp viewport, independently
+        of player_details_scroll. Preserve row instances for the same queue:
+        playback/metadata callbacks may call force=True while a finger drags.
         """
         try:
             listing = self.ids.get("playlist_list")
-            if listing is None:
+            viewport = self.ids.get("playlist_scroll")
+            if listing is None or viewport is None:
+                print("[PLAYLIST-APK] missing nested playlist widgets")
                 return
+
             tracks = list(self.playlist.tracks if self.playlist else [])
             signature = tuple(
-                (str(t.get("url") or ""), str(t.get("video_id") or ""))
-                for t in tracks
-            )
-            if (
-                getattr(self, "_fallback_playlist_signature", None) != signature
-                or len(listing.children) != len(tracks)
-            ):
-                listing.clear_widgets()
-                for index, item in enumerate(tracks):
-                    listing.add_widget(self._make_playlist_row(index, item))
-                self._fallback_playlist_signature = signature
-                print(
-                    "[PLAYLIST-BASE] full render "
-                    f"{len(listing.children)}/{len(tracks)}"
+                (
+                    str(item.get("url") or ""),
+                    str(item.get("video_id") or ""),
+                    str(item.get("title") or ""),
+                    str(item.get("thumb") or ""),
+                    str(item.get("duration") or ""),
                 )
+                for item in tracks
+            )
+            old_signature = getattr(self, "_apk_playlist_signature", None)
+            changed = (
+                signature != old_signature
+                or len(listing.children) != len(tracks)
+            )
+
+            if changed:
+                # Only a genuine queue change may invalidate existing rows.
+                listing.clear_widgets()
+                for index, track in enumerate(tracks):
+                    listing.add_widget(self._make_playlist_row(index, track))
+                self._apk_playlist_signature = signature
+                self._playlist_ui_sig = signature
+                print(f"[PLAYLIST-APK] rows={len(listing.children)}/{len(tracks)}")
 
             collapsed = bool(getattr(self, "_playlist_collapsed", False))
             self._set_collapsible_header(
@@ -1871,13 +1882,67 @@ class AudioPlayerScreen(Screen):
                 (self.playlist.name or "Черга") if self.playlist else "Черга",
                 collapsed,
             )
-            visible = bool(tracks and not collapsed)
+
+            expanded = bool(tracks and not collapsed)
             listing.size_hint_y = None
-            listing.disabled = not visible
-            listing.opacity = 1 if visible else 0
-            listing.height = max(0, float(listing.minimum_height or 0)) if visible else 0
+            # MDList.minimum_height owns the complete scrollable content;
+            # the viewport remains bounded, as in the working APK.
+            listing.height = max(0, float(listing.minimum_height or 0))
+            viewport.size_hint_y = None
+            viewport.height = dp(240) if expanded else 0
+            viewport.opacity = 1 if expanded else 0
+            # Do not toggle disabled on the viewport: it propagates to all row
+            # ButtonBehavior children and may break/kill their touch tracking.
+            viewport.disabled = False
+            viewport.do_scroll_x = False
+            viewport.do_scroll_y = bool(expanded)
+            # Keep all row touch targets alive even when the view is collapsed.
+            # A zero-height viewport cannot receive touches.
+            listing.disabled = not expanded
+
+            if not getattr(self, "_apk_playlist_bound", False):
+                self._apk_playlist_bound = True
+
+                def sync_list_height(_instance, height):
+                    listing.height = max(0, float(height or 0))
+
+                listing.bind(minimum_height=sync_list_height)
+
+                def log_scroll_start(widget, touch):
+                    print(
+                        "[PLAYLIST-APK] drag start "
+                        f"y={float(widget.scroll_y):.3f} "
+                        f"extent={max(0.0, float(listing.height)-float(widget.height)):.1f}"
+                    )
+
+                def log_scroll_stop(widget, touch):
+                    print(f"[PLAYLIST-APK] drag stop y={float(widget.scroll_y):.3f}")
+
+                viewport.bind(
+                    on_scroll_start=log_scroll_start,
+                    on_scroll_stop=log_scroll_stop,
+                )
+                print("[PLAYLIST-APK] working-APK bounded nested scroll active")
+
+            def report(_dt):
+                try:
+                    print(
+                        "[PLAYLIST-APK] geometry "
+                        f"rows={len(listing.children)}/{len(tracks)} "
+                        f"list_h={float(listing.height):.1f} "
+                        f"viewport_h={float(viewport.height):.1f} "
+                        f"range={max(0.0, float(listing.height)-float(viewport.height)):.1f} "
+                        f"scroll_y={float(viewport.scroll_y):.3f}"
+                    )
+                except Exception:
+                    pass
+            if changed:
+                Clock.schedule_once(report, 0.12)
         except Exception as exc:
-            ma.log(f"[PLAYLIST-BASE] render failed: {exc}")
+            try:
+                ma.log(f"[PLAYLIST-APK] renderer failed: {exc}")
+            except Exception:
+                print("[PLAYLIST-APK] renderer failed:", exc)
 
     def _render_similar_ui(self, force: bool = False):
         try:
