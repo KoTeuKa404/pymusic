@@ -394,6 +394,14 @@ class AndroidVideoPlayer:
         try:
             if self.controls_overlay is not None:
                 self._bind_controls_tap()
+                # A previously queued native visibility update may have run
+                # before this view existed. Reconcile with the stored state.
+                try:
+                    self.controls_overlay.setVisibility(
+                        View.VISIBLE if self._controls_visible else 4
+                    )
+                except Exception:
+                    pass
                 return
 
             activity = PythonActivity.mActivity
@@ -491,7 +499,10 @@ class AndroidVideoPlayer:
             params = FrameLayoutLayoutParams(1, 1)
             params.gravity = Gravity.TOP | Gravity.LEFT
             activity.addContentView(overlay, params)
-            overlay.setVisibility(4)
+            # _ensure_controls_overlay is invoked asynchronously on the
+            # Android UI thread. If set_native_controls_visible(True) arrived
+            # before this overlay was created, do not discard that request.
+            overlay.setVisibility(View.VISIBLE if self._controls_visible else 4)
             self.controls_overlay = overlay
             self._bind_controls_tap()
             self._bring_controls_or_surface_front()
