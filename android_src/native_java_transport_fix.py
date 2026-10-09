@@ -64,14 +64,14 @@ def install_native_java_transport_fix() -> bool:
                         view.setFocusable(False)
                     except Exception:
                         pass
-                surface = getattr(self, "surface_view", None)
-                if surface is not None:
-                    try:
-                        surface.setOnTouchListener(None)
-                        surface.setClickable(False)
-                        surface.setLongClickable(False)
-                    except Exception:
-                        pass
+                # The video-only SurfaceView must retain its native tap
+                # listener so users can reveal the controls after hiding
+                # them. This view does NOT overlap the playlist; only the
+                # full-frame controls parent remains touch-passive.
+                try:
+                    self._bind_surface_tap()
+                except Exception as exc:
+                    print("[JAVA-CTRL] video tap bind failed:", exc)
             except Exception as exc:
                 print("[JAVA-CTRL] bind controls failed:", exc)
 
