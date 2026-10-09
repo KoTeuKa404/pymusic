@@ -10,10 +10,23 @@
 <CircularAvatar@AsyncImage>:
     source: ''
     size_hint: None, None
-    size: dp(40), dp(40)
+    size: dp(44), dp(44)
     opacity: 1
     allow_stretch: True
-    keep_ratio: True
+    keep_ratio: False
+    # Stencil clips the actual loaded image texture into a circle.
+    canvas.before:
+        StencilPush
+        Ellipse:
+            pos: self.pos
+            size: self.size
+        StencilUse
+    canvas.after:
+        StencilUnUse
+        Ellipse:
+            pos: self.pos
+            size: self.size
+        StencilPop
 
 <SimilarItem@ButtonBehavior+BoxLayout>:
     size_hint_y: None
@@ -442,36 +455,43 @@
                             padding: 0, 0
     
                         BoxLayout:
+                            id: channel_actions_row
                             size_hint_y: None
-                            height: dp(46)
-                            spacing: dp(10)
+                            height: dp(60)
+                            padding: dp(2), dp(6), dp(2), dp(6)
+                            spacing: dp(8)
     
                             CircularAvatar:
                                 id: channel_avatar
                                 opacity: 0
+                                size: dp(44), dp(44)
+                                pos_hint: {'center_y': 0.5}
     
                             Label:
                                 id: audio_channel
                                 text: ''
-                                font_size: '16sp'
+                                size_hint_x: 1
+                                font_size: '15sp'
+                                bold: True
+                                shorten: True
+                                shorten_from: 'right'
                                 halign: 'left'
                                 valign: 'middle'
-                                text_size: self.width, None
+                                text_size: self.width, self.height
                                 color: 0.15, 0.15, 0.15, 1
-    
-                            Widget:
-                                size_hint_x: 1
     
                             PNGIconButton:
                                 id: repeat_inline_btn
                                 source: "ico/icorepeat.png"
-                                size: dp(28), dp(28)
+                                size: dp(27), dp(27)
+                                pos_hint: {'center_y': 0.5}
                                 on_release: root.toggle_repeat()
     
                             PNGIconButton:
                                 id: favorite_btn
                                 source: "ico/icofavorite.png"
-                                size: dp(28), dp(28)
+                                size: dp(27), dp(27)
+                                pos_hint: {'center_y': 0.5}
                                 on_release: root.toggle_favorite()
     
                     MDBoxLayout:
