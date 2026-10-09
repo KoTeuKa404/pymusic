@@ -64,6 +64,7 @@ from kivy.uix.behaviors   import ButtonBehavior
 from kivy.uix.label       import Label
 from kivy.graphics        import Color, Line, RoundedRectangle
 from kivy.metrics         import dp
+import player_ui_styles as _ui_styles
 
 Builder.load_file("youtube_gui.kv")
 
@@ -938,6 +939,11 @@ class RootLayout(MDBoxLayout):
         self.sm.add_widget(AudioPlayerScreen(name="audio"))
         self.add_widget(self.sm)
         self._build_bottom_bar()
+        # Persisted style is applied after the Kivy player widgets exist.
+        Clock.schedule_once(
+            lambda _dt: _ui_styles.bind_player(self.sm.get_screen("audio")),
+            0,
+        )
         try:
             ma.bind_mode_router(self.set_screen)
         except Exception:
@@ -958,21 +964,36 @@ class RootLayout(MDBoxLayout):
         )
         center = MDBoxLayout(
             size_hint=(None, 1),
-            width=dp(184),
-            spacing=dp(16),
+            width=dp(280),
+            spacing=dp(12),
             padding=(0, dp(11), 0, dp(11)),
         )
         btn_web = BottomNavButton(text="Web")
         btn_web.bind(on_release=lambda _btn: self.set_screen("search"))
         btn_yt = BottomNavButton(text="YT")
         btn_yt.bind(on_release=lambda _btn: self.set_screen("web"))
+        btn_ui = BottomNavButton(text="UI")
+        btn_ui.bind(on_release=lambda _btn: self.show_ui_presets())
 
         bar.add_widget(Widget())
         center.add_widget(btn_web)
         center.add_widget(btn_yt)
+        center.add_widget(btn_ui)
         bar.add_widget(center)
         bar.add_widget(Widget())
         self.add_widget(bar)
+
+    def show_ui_presets(self):
+        # Native WebView sits above Kivy dialogs. Open the player first so
+        # its three live preview choices are visible and clickable.
+        if self.sm.current != "audio":
+            self.open_audio()
+        Clock.schedule_once(
+            lambda _dt: _ui_styles.show_style_picker(
+                self.sm.get_screen("audio")
+            ),
+            0.04,
+        )
 
     def set_screen(self, name: str):
         # Offline fallback applies only on app startup / WebView load errors.
