@@ -67,6 +67,10 @@ try:
     BitmapFactory   = autoclass('android.graphics.BitmapFactory')
 except Exception:
     BitmapFactory = None
+try:
+    Bitmap = autoclass('android.graphics.Bitmap')
+except Exception:
+    Bitmap = None
 
 # Views / layout / surface
 FrameLayout         = autoclass('android.widget.FrameLayout')
@@ -927,12 +931,39 @@ NOTIF_CHANNEL_NAME = "PyMusic Player"
 NOTIF_ID           = 4242
 
 
+_ART_BITMAP_CACHE = {}
+
+
 def _load_bitmap(path: str):
-    if not path or not BitmapFactory:
+    """Decode cached artwork at a safe size for Android Binder/MediaSession."""
+    if not path or not BitmapFactory or not os.path.isfile(path):
         return None
     try:
-        return BitmapFactory.decodeFile(path)
-    except Exception:
+        key = (path, os.path.getmtime(path))
+        cached = _ART_BITMAP_CACHE.get(key)
+        if cached is not None:
+            return cached
+        bmp = BitmapFactory.decodeFile(path)
+        if bmp is None:
+            return None
+        try:
+            width = int(bmp.getWidth())
+            height = int(bmp.getHeight())
+            max_side = max(width, height)
+            if Bitmap is not None and max_side > 512:
+                scale = 512.0 / max_side
+                bmp = Bitmap.createScaledBitmap(
+                    bmp, max(1, int(width * scale)),
+                    max(1, int(height * scale)), True
+                )
+        except Exception:
+            pass
+        if len(_ART_BITMAP_CACHE) >= 5:
+            _ART_BITMAP_CACHE.pop(next(iter(_ART_BITMAP_CACHE)))
+        _ART_BITMAP_CACHE[key] = bmp
+        return bmp
+    except Exception as exc:
+        log(f"[ART] decode failed: {exc}")
         return None
 
 
@@ -1033,11 +1064,14 @@ def create_or_update_media_notification(*,
         if hasattr(b, "setOngoing"):
             b.setOngoing(is_playing)
 
-        # Не показуємо великий лівий арт/аватар у шторці.
+        # The channel avatar is the notification's large icon. The current
+        # video's cover is provided separately through MediaSession artwork.
         try:
-            b.setLargeIcon(None)
-        except Exception:
-            pass
+            icon = _load_bitmap(large_icon_path)
+            if icon is not None:
+                b.setLargeIcon(icon)
+        except Exception as exc:
+            log(f"[NOTIF] channel avatar large icon failed: {exc}")
 
         # Tap -> open the real launcher Activity directly on the player screen.
         # Important: targeting PythonActivity.class can be ignored on builds where the
@@ -1198,7 +1232,7 @@ def _get_session():
 @run_on_ui_thread
 def set_media_metadata(title: str = "", artist: str = "", album: str = "",
                        duration_ms: int | None = None, art_path: str | None = None,
-                       art_uri: str | None = None):
+                       art_uri: str | None = None, avatar_path: str | None = None):
     try:
         ms = _get_session()
         if ms is None:
@@ -1213,22 +1247,27 @@ def set_media_metadata(title: str = "", artist: str = "", album: str = "",
         if duration_ms is not None:
             b.putLong(MediaMetadata.METADATA_KEY_DURATION, int(duration_ms))
 
+        # Video cover drives the OS media artwork/background color. The
+        # separate avatar drives the media-card small display illustration.
         bmp = _load_bitmap(art_path) if art_path else None
+        avatar = _load_bitmap(avatar_path) if avatar_path else None
         if bmp is not None:
             b.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bmp)
             b.putBitmap(MediaMetadata.METADATA_KEY_ART, bmp)
+        if avatar is not None:
+            b.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, avatar)
+        elif bmp is not None:
             b.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, bmp)
 
         if art_uri:
             try:
                 b.putString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, art_uri)
                 b.putString(MediaMetadata.METADATA_KEY_ART_URI, art_uri)
-                b.putString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI, art_uri)
             except Exception:
                 pass
 
         ms.setMetadata(b.build())
-        vlog("[MS] metadata set (with art)")
+        vlog(f"[MS] metadata set cover={bmp is not None} avatar={avatar is not None}")
     except Exception as e:
         log(f"[MS] set metadata err: {e}")
 
