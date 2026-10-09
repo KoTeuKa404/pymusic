@@ -1,262 +1,160 @@
-"""Keep the nested playlist scroll view smooth after collapse/reopen.
+"""Bounded, gesture-isolated playlist scrolling.
 
-The player hotfix intentionally keeps playlist rows alive.  Toggling the
-``disabled`` property on the ScrollView still propagates through every row and
-thumbnail, though, and on Android that leaves the reopened list noticeably
-janky.  This patch changes only geometry/scroll ownership and never disables
-the whole widget tree.
+The original working Android APK used an independent playlist_scroll viewport.
+Keep that layout. Dispatch touches beginning inside the playlist directly to
+its children, bypassing only the outer ScrollView's drag recognizer.
+
+Never disable the outer ScrollView, reset an effect or restore scroll_y during
+ordinary playback/metadata updates. Those operations previously killed the
+next drag, or snapped the queue back immediately after the first swipe.
 """
-
 from __future__ import annotations
 
 import sys
 import threading
+from types import MethodType
 
-_PATCHED = False
-_PATCH_LOCK = threading.RLock()
+from kivy.uix.widget import Widget
+
+_LOCK = threading.RLock()
+_INSTALLED = False
 
 
 def _patch_playlist_scroll() -> bool:
-    global _PATCHED
-
-    with _PATCH_LOCK:
-        if _PATCHED:
+    global _INSTALLED
+    with _LOCK:
+        if _INSTALLED:
             return True
-
         module = sys.modules.get("audio_screen")
-        if module is None:
+        cls = getattr(module, "AudioPlayerScreen", None) if module else None
+        if cls is None or not getattr(cls, "_pymusic_hotfix_v4", False):
             return False
-
-        player_cls = getattr(module, "AudioPlayerScreen", None)
-        if player_cls is None:
-            return False
-        if not getattr(player_cls, "_pymusic_hotfix_v4", False):
-            # Apply only after sitecustomize has installed the main player fix.
-            return False
-        if getattr(player_cls, "_pymusic_playlist_scroll_v5", False):
-            _PATCHED = True
+        if getattr(cls, "_pymusic_playlist_scroll_v5", False):
+            _INSTALLED = True
             return True
 
         Clock = module.Clock
         dp = module.dp
-        Window = module.Window
+        original_init = cls.__init__
+        original_enter = cls.on_pre_enter
+        original_render = cls._render_playlist_ui
+        original_toggle = cls.toggle_playlist_collapsed
 
-        def stop_effect(scroll) -> None:
-            """Stop stale kinetic movement without rebuilding any rows."""
-            try:
-                effect = getattr(scroll, "effect_y", None)
-                if effect is not None:
-                    try:
-                        effect.velocity = 0
-                    except Exception:
-                        pass
-                    try:
-                        effect.is_manual = False
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        def configure(owner):
+            outer = owner.ids.get("player_details_scroll")
+            inner = owner.ids.get("playlist_scroll")
+            listing = owner.ids.get("playlist_list")
+            if outer is None or inner is None or listing is None:
+                return
+            visible = bool(owner.playlist and owner.playlist.tracks)
+            collapsed = bool(getattr(owner, "_playlist_collapsed", False))
+            expanded = visible and not collapsed
 
-        def release_outer_scroll(self, *_args) -> None:
-            try:
-                outer = self.ids.get("player_details_scroll")
-                if outer is not None:
-                    outer.do_scroll_y = True
-            except Exception:
-                pass
+            # Do not touch scroll_y or effect_y here. The renderer may be
+            # called continuously as the currently playing track changes.
+            inner.size_hint_y = None
+            inner.height = dp(240) if expanded else 0
+            inner.opacity = 1.0 if expanded else 0.0
+            inner.disabled = False
+            inner.do_scroll_x = False
+            inner.do_scroll_y = True
+            inner.scroll_timeout = 180
+            inner.scroll_distance = dp(5)
+            outer.do_scroll_x = False
+            outer.do_scroll_y = True
+            listing.size_hint_y = None
+            listing.disabled = not expanded
 
-        def bind_nested_scroll_guard(self) -> None:
-            """Let the inner playlist own a drag instead of fighting its parent."""
-            try:
-                inner = self.ids.get("playlist_scroll")
-                outer = self.ids.get("player_details_scroll")
-                if inner is None or outer is None:
-                    return
-                if getattr(inner, "_pymusic_nested_guard", False):
-                    return
+            if getattr(outer, "_pymusic_playlist_direct_dispatch", False):
+                return
 
-                def on_touch_down(widget, touch):
-                    try:
-                        if (
-                            not bool(getattr(self, "_playlist_collapsed", False))
-                            and widget.height > 0
-                            and widget.collide_point(*touch.pos)
-                        ):
-                            # Only suspend the parent for the *current*
-                            # gesture. The child can grab the touch, so its
-                            # own on_touch_up is not guaranteed to fire.
-                            inner._pymusic_active_touch_uid = touch.uid
-                            outer.do_scroll_y = False
-                            print(
-                                "[PLAYLIST-V5] inner gesture begin "
-                                f"uid={touch.uid} outer_y={outer.do_scroll_y}"
-                            )
-                    except Exception as exc:
-                        print("[PLAYLIST-V5] gesture begin failed:", exc)
+            key = "_pymusic_playlist_inner_touch_" + str(id(outer))
+            old_down = outer.on_touch_down
+            old_move = outer.on_touch_move
+            old_up = outer.on_touch_up
 
-                def restore_touch(touch):
-                    try:
-                        active = getattr(inner, "_pymusic_active_touch_uid", None)
-                        if active is None or active == touch.uid:
-                            inner._pymusic_active_touch_uid = None
-                            release_outer_scroll(self)
-                            print(
-                                "[PLAYLIST-V5] gesture released "
-                                f"uid={touch.uid} outer_y={outer.do_scroll_y}"
-                            )
-                    except Exception as exc:
-                        print("[PLAYLIST-V5] gesture release failed:", exc)
-
-                def on_touch_up(_widget, touch):
-                    restore_touch(touch)
-
-                def window_touch_up(_window, touch):
-                    # A grabbed KivyMD Button/ScrollView can bypass the
-                    # child's normal touch-up dispatch. Window.on_touch_up
-                    # is the lifecycle owner for the physical finger, so it
-                    # must ALWAYS restore outer scrolling.
-                    restore_touch(touch)
-                    return False
-
-                def window_touch_down(_window, touch):
-                    # Recover from a dropped UP (screen transition, OS
-                    # interruption) before the next gesture starts.
-                    if getattr(inner, "_pymusic_active_touch_uid", None) is not None:
-                        inner._pymusic_active_touch_uid = None
-                        release_outer_scroll(self)
-                        print("[PLAYLIST-V5] recovered stale outer scroll state")
-                    return False
-
-                inner.bind(on_touch_down=on_touch_down, on_touch_up=on_touch_up)
-                Window.bind(
-                    on_touch_up=window_touch_up,
-                    on_touch_down=window_touch_down,
+            def is_inner_target(touch):
+                return (
+                    inner.parent is not None
+                    and inner.height > 0
+                    and not bool(getattr(owner, "_playlist_collapsed", False))
+                    and inner.collide_point(*touch.pos)
                 )
-                # Retain strong references to handlers for Kivy event bindings.
-                inner._pymusic_window_touch_handlers = (
-                    window_touch_up,
-                    window_touch_down,
-                )
-                inner._pymusic_nested_guard = True
-                print("[PLAYLIST-V5] global touch release guard enabled")
-            except Exception as exc:
-                print("[PLAYLIST] nested scroll guard failed:", exc)
 
-        def apply_geometry(self, expanded: bool) -> None:
-            try:
-                scroll = self.ids.get("playlist_scroll")
-                if scroll is None:
-                    return
-
-                # Preserve the exact position through collapse/reopen.
-                if not expanded:
-                    try:
-                        self._pymusic_playlist_saved_scroll_y = float(
-                            scroll.scroll_y
-                        )
-                    except Exception:
-                        self._pymusic_playlist_saved_scroll_y = 1.0
-
-                stop_effect(scroll)
-
-                # Do not set disabled=True.  It recursively invalidates every
-                # playlist row and image and is the source of the reopen lag.
-                try:
-                    scroll.disabled = False
-                except Exception:
-                    pass
-                scroll.do_scroll_x = False
-                scroll.do_scroll_y = bool(expanded)
-                scroll.height = dp(240) if expanded else 0
-                scroll.opacity = 1 if expanded else 0
-
-                if expanded:
-                    saved = float(
-                        getattr(
-                            self,
-                            "_pymusic_playlist_saved_scroll_y",
-                            getattr(scroll, "scroll_y", 1.0),
-                        )
+            def touch_down(widget, touch):
+                # The default outer ScrollView grabs a touch BEFORE nested
+                # ScrollViews can decide who owns it. Bypass that recognizer
+                # only when DOWN starts inside the playlist viewport.
+                if is_inner_target(touch):
+                    touch.ud[key] = True
+                    handled = Widget.on_touch_down(widget, touch)
+                    print(
+                        "[PLAYLIST-TOUCH] down delegated "
+                        f"inner_y={float(inner.scroll_y):.3f} "
+                        f"range={max(0.0, float(listing.height)-float(inner.height)):.1f} "
+                        f"handled={bool(handled)}"
                     )
+                    return handled
+                return old_down(touch)
 
-                    def finish_reopen(_dt):
-                        try:
-                            scroll.disabled = False
-                            scroll.do_scroll_y = True
-                            scroll.scroll_y = max(0.0, min(1.0, saved))
-                            stop_effect(scroll)
-                            bind_nested_scroll_guard(self)
-                        except Exception:
-                            pass
+            def touch_move(widget, touch):
+                if touch.ud.get(key):
+                    return Widget.on_touch_move(widget, touch)
+                return old_move(touch)
 
-                    # One callback applies geometry, the second runs after the
-                    # MDList minimum_height/layout update on slower phones.
-                    Clock.schedule_once(finish_reopen, 0)
-                    Clock.schedule_once(finish_reopen, 0.05)
-                else:
-                    release_outer_scroll(self)
-            except Exception as exc:
-                print("[PLAYLIST] geometry update failed:", exc)
-
-        def update_header(self, collapsed: bool) -> None:
-            try:
-                visible = bool(self.playlist and self.playlist.tracks)
-                title = self.playlist.name or "Черга"
-                start, end = getattr(
-                    self, "_hotfix_playlist_window", (0, 0)
-                )
-                total = len(self.playlist.tracks) if visible else 0
-                if total > 72 and end > start:
-                    title = f"{title} · {start + 1}–{end} / {total}"
-                self._set_collapsible_header(
-                    self.ids.get("playlist_header_row"),
-                    self.ids.get("playlist_header"),
-                    self.ids.get("playlist_toggle_btn"),
-                    visible,
-                    title,
-                    collapsed,
-                )
-                apply_geometry(self, bool(visible and not collapsed))
-            except Exception as exc:
-                print("[PLAYLIST] header update failed:", exc)
-
-        def toggle_playlist_smooth(self):
-            collapsed = not bool(
-                getattr(self, "_playlist_collapsed", False)
-            )
-            self._playlist_collapsed = collapsed
-            update_header(self, collapsed)
-
-        player_cls.toggle_playlist_collapsed = toggle_playlist_smooth
-
-        # The v4 renderer can still touch ``disabled`` after a track/window
-        # update.  Normalize the ScrollView immediately afterwards.
-        old_render_playlist = player_cls._render_playlist_ui
-
-        def render_playlist_smooth(self, *args, **kwargs):
-            result = old_render_playlist(self, *args, **kwargs)
-
-            def normalize(_dt):
-                try:
-                    collapsed = bool(
-                        getattr(self, "_playlist_collapsed", False)
+            def touch_up(widget, touch):
+                if touch.ud.pop(key, False):
+                    handled = Widget.on_touch_up(widget, touch)
+                    print(
+                        "[PLAYLIST-TOUCH] up delegated "
+                        f"inner_y={float(inner.scroll_y):.3f} "
+                        f"outer_enabled={bool(outer.do_scroll_y)}"
                     )
-                    visible = bool(
-                        self.playlist and self.playlist.tracks
-                    )
-                    apply_geometry(
-                        self, bool(visible and not collapsed)
-                    )
-                except Exception:
-                    pass
+                    return handled
+                return old_up(touch)
 
-            Clock.schedule_once(normalize, 0)
+            touch_down.__name__ = "on_touch_down"
+            touch_move.__name__ = "on_touch_move"
+            touch_up.__name__ = "on_touch_up"
+            outer.on_touch_down = MethodType(touch_down, outer)
+            outer.on_touch_move = MethodType(touch_move, outer)
+            outer.on_touch_up = MethodType(touch_up, outer)
+            outer._pymusic_playlist_direct_dispatch = True
+            print("[PLAYLIST-TOUCH] isolated inner gestures without disabling outer")
+
+        def init_fixed(self, *args, **kwargs):
+            result = original_init(self, *args, **kwargs)
+            Clock.schedule_once(lambda _dt: configure(self), 0)
             return result
 
-        player_cls._render_playlist_ui = render_playlist_smooth
-        player_cls._pymusic_playlist_scroll_v5 = True
-        _PATCHED = True
-        print("[HOTFIX] playlist reopen scrolling v5 enabled")
+        def enter_fixed(self, *args, **kwargs):
+            result = original_enter(self, *args, **kwargs)
+            configure(self)
+            return result
+
+        def render_fixed(self, *args, **kwargs):
+            result = original_render(self, *args, **kwargs)
+            configure(self)
+            return result
+
+        def toggle_fixed(self, *args, **kwargs):
+            result = original_toggle(self, *args, **kwargs)
+            configure(self)
+            return result
+
+        # Kivy WeakMethod looks up the callback by name on the class.
+        init_fixed.__name__ = "__init__"
+        enter_fixed.__name__ = "on_pre_enter"
+        render_fixed.__name__ = "_render_playlist_ui"
+        toggle_fixed.__name__ = "toggle_playlist_collapsed"
+        cls.__init__ = init_fixed
+        cls.on_pre_enter = enter_fixed
+        cls._render_playlist_ui = render_fixed
+        cls.toggle_playlist_collapsed = toggle_fixed
+
+        cls._pymusic_playlist_scroll_v5 = True
+        _INSTALLED = True
+        print("[PLAYLIST-TOUCH] bounded independent playlist owner installed")
         return True
 
 
