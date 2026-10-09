@@ -227,20 +227,23 @@ class AndroidVideoPlayer:
             pass
 
     def _bind_surface_tap(self):
-        """Video pixels belong to the Kivy page, not to a native touch view.
+        """Tap the video to reveal native controls or invoke transport.
 
-        The Kivy VideoTapArea handles taps and the parent Kivy ScrollView
-        handles vertical swipes. A native SurfaceView is used only for pixels.
+        The native SurfaceView covers ONLY the video frame. It cannot steal
+        gestures from the playlist below it. An active touch listener here is
+        essential because the transparent native controls overlay is
+        intentionally not itself clickable.
         """
         try:
-            surface = self.surface_view
-            if surface is not None:
-                surface.setOnTouchListener(None)
-                surface.setClickable(False)
-                surface.setLongClickable(False)
-                surface.setFocusable(False)
-        except Exception as e:
-            print("[VIDEO] passive surface err:", e)
+            if self.surface_view is None:
+                return
+            if self._tap_listener is None:
+                self._tap_listener = self._OnTouchListener(self)
+            self.surface_view.setClickable(True)
+            self.surface_view.setFocusable(False)
+            self.surface_view.setOnTouchListener(self._tap_listener)
+        except Exception as exc:
+            print("[VIDEO-TOUCH] surface tap binding failed:", exc)
 
     def _bind_controls_tap(self):
         """Only real control buttons take native touch input.
