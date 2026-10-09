@@ -269,6 +269,31 @@ def _patch_final_player() -> bool:
                         )
                     )
                     block._pymusic_final_bound_v2 = True
+
+                # The modern pre-rollback page scrolls its 16:9 video block
+                # together with metadata. Align the native SurfaceView when
+                # that *outer* page moves; the independent playlist ScrollView
+                # remains untouched. Coalesce the expensive Android bounds
+                # update instead of doing it on every pointer MOVE.
+                outer = self.ids.get("player_details_scroll")
+                if outer is not None and not getattr(
+                    outer, "_pymusic_final_video_scroll_bound", False
+                ):
+                    trigger = Clock.create_trigger(
+                        lambda _dt: align_video_to_block(self), 0.035
+                    )
+
+                    def queue_surface_alignment(*_args):
+                        trigger()
+
+                    outer.bind(scroll_y=queue_surface_alignment)
+                    if block is not None:
+                        block.bind(pos=queue_surface_alignment)
+                        block.bind(size=queue_surface_alignment)
+                    outer._pymusic_final_scroll_align_callback = queue_surface_alignment
+                    outer._pymusic_final_scroll_align_trigger = trigger
+                    outer._pymusic_final_video_scroll_bound = True
+                    print("[FINAL] moving video tracks modern page scroll")
             except Exception as exc:
                 print("[FINAL] layout binding failed:", exc)
 
