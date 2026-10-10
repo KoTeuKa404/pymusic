@@ -223,30 +223,32 @@ def _make_stats_widget(owner) -> FloatLayout:
         text_size=(dp(28), dp(28)),
     )
 
+    # The count and like/dislike ratio are a compact two-line block
+    # straddling the thumb's center (0.5): count above, ratio below.
     count_label = Label(
         text="",
         size_hint=(None, None),
-        size=(dp(72), dp(28)),
-        pos_hint={"x": 28.0 / 100.0, "center_y": 0.50},
+        size=(dp(72), dp(18)),
+        pos_hint={"x": 34.0 / 106.0, "center_y": 0.68},
         font_size="13sp",
         color=(0.15, 0.15, 0.15, 1),
         halign="left",
         valign="middle",
         shorten=True,
         shorten_from="right",
-        text_size=(dp(72), dp(28)),
+        text_size=(dp(72), dp(18)),
     )
 
     ratio_label = Label(
         text="",
         size_hint=(None, None),
-        size=(dp(72), dp(12)),
-        pos_hint={"x": 28.0 / 100.0, "y": 0.01},
+        size=(dp(72), dp(14)),
+        pos_hint={"x": 34.0 / 106.0, "center_y": 0.32},
         font_size="8sp",
         color=(0.48, 0.48, 0.48, 1),
         halign="left",
         valign="middle",
-        text_size=(dp(72), dp(12)),
+        text_size=(dp(72), dp(14)),
     )
 
     holder.add_widget(icon)
