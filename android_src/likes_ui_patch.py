@@ -204,14 +204,17 @@ def _make_stats_widget(owner) -> FloatLayout:
     # glyph itself is enlarged and its 28dp box is shifted down slightly.
     holder = FloatLayout(
         size_hint=(None, None),
-        size=(dp(100), dp(46)),
+        size=(dp(106), dp(46)),
+        # BoxLayout otherwise places a fixed-height child at its lower edge.
+        # Match the same center line as the avatar, name and PNG action icons.
+        pos_hint={"center_y": 0.5},
     )
 
     icon = MDIcon(
         icon="thumb-up-outline",
         size_hint=(None, None),
         size=(dp(28), dp(28)),
-        pos_hint={"x": 0.0, "center_y": 0.43},
+        pos_hint={"x": 0.0, "center_y": 0.5},
         font_size="24sp",
         theme_text_color="Custom",
         text_color=(0.15, 0.15, 0.15, 1),
