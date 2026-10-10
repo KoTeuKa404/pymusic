@@ -19,6 +19,7 @@ def _tune_like_widget(owner) -> None:
 
         holder.size_hint = (None, None)
         holder.size = (dp(106), dp(46))
+        holder.pos_hint = {"center_y": 0.5}
 
         like_icon = None
         for child in list(getattr(holder, "children", []) or []):
@@ -31,8 +32,8 @@ def _tune_like_widget(owner) -> None:
             like_icon.size = (dp(34), dp(34))
             like_icon.font_size = "30sp"
             like_icon.text_size = (dp(34), dp(34))
-            # Lower the thumb by another ~2dp inside the 46dp stats holder.
-            like_icon.pos_hint = {"x": 0.0, "center_y": 0.27}
+            # Align the actual thumb glyph with the neighboring PNG actions.
+            like_icon.pos_hint = {"x": 0.0, "center_y": 0.5}
             like_icon.halign = "center"
             like_icon.valign = "middle"
 
@@ -61,11 +62,11 @@ def _tune_channel_row(owner) -> None:
         avatar = owner.ids.get("channel_avatar")
         parent = getattr(favorite, "parent", None) if favorite is not None else None
 
-        # Lower both avatar and channel name by another ~2dp without changing
-        # the 46dp row height or the neighboring action-button geometry.
+        # All channel-row elements share the same vertical center. Never
+        # offset only the title/avatar while leaving action icons in place.
         if avatar is not None:
             try:
-                avatar.pos_hint = {"center_y": 0.41}
+                avatar.pos_hint = {"center_y": 0.5}
             except Exception:
                 pass
 
@@ -73,20 +74,24 @@ def _tune_channel_row(owner) -> None:
             channel.bold = True
             channel.size_hint_x = 1
             channel.size_hint_y = None
-            channel.height = dp(40)
-            channel.pos_hint = {"center_y": 0.41}
+            channel.height = dp(44)
+            channel.pos_hint = {"center_y": 0.5}
             channel.shorten = True
             channel.shorten_from = "right"
             channel.halign = "left"
             channel.valign = "middle"
-            channel.text_size = (channel.width, dp(24))
+            channel.text_size = (channel.width, channel.height)
             if not bool(getattr(channel, "_pymusic_width_bound", False)):
                 def _sync_text_width(instance, width):
-                    instance.text_size = (width, dp(24))
+                    instance.text_size = (width, instance.height)
 
                 channel.bind(width=_sync_text_width)
                 channel._pymusic_width_bound = True
 
+        for button in (favorite, repeat):
+            if button is not None:
+                button.size_hint_y = None
+                button.pos_hint = {"center_y": 0.5}
         _tune_like_widget(owner)
 
         if parent is None:
