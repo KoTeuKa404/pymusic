@@ -37,19 +37,22 @@ def _tune_like_widget(owner) -> None:
             like_icon.halign = "center"
             like_icon.valign = "middle"
 
+        # Place the two labels symmetrically around the thumb's midpoint.
+        # Their combined visual midpoint is holder.center_y, not the count
+        # line itself; this keeps the percentage from dangling underneath.
         count_label = getattr(owner, "_likes_count_label", None)
         if count_label is not None:
             count_label.size_hint = (None, None)
-            count_label.size = (dp(72), dp(28))
-            count_label.pos_hint = {"x": 34.0 / 106.0, "center_y": 0.50}
-            count_label.text_size = (dp(72), dp(28))
+            count_label.size = (dp(72), dp(18))
+            count_label.pos_hint = {"x": 34.0 / 106.0, "center_y": 0.68}
+            count_label.text_size = (dp(72), dp(18))
 
         ratio_label = getattr(owner, "_likes_ratio_label", None)
         if ratio_label is not None:
             ratio_label.size_hint = (None, None)
-            ratio_label.size = (dp(72), dp(12))
-            ratio_label.pos_hint = {"x": 34.0 / 106.0, "y": 0.01}
-            ratio_label.text_size = (dp(72), dp(12))
+            ratio_label.size = (dp(72), dp(14))
+            ratio_label.pos_hint = {"x": 34.0 / 106.0, "center_y": 0.32}
+            ratio_label.text_size = (dp(72), dp(14))
     except Exception:
         pass
 
