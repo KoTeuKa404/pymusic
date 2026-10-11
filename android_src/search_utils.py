@@ -154,16 +154,15 @@ try:
 except Exception as exc:
     print("[WATCH-NEXT-V7] install failed:", exc)
 
-# Preserve the native video surface during a real network outage instead of
-# calling AndroidVideoPlayer.stop() on the first MediaPlayer network error.
-# The audio recovery layer above owns the reconnect and resumes the same URL.
+# AndroidVideoPlayer._on_error directly preserves its SurfaceView while offline.
+# The fast-switch audio-priority layer still installs after reconnect/stability.
 try:
-    from video_network_stability_v8 import install_video_network_stability_v8
-
-    if not install_video_network_stability_v8():
-        print("[VIDEO-NET-V8] install returned false")
+    from fast_track_switch_v9 import install_fast_track_switch_v9
+    if not install_fast_track_switch_v9():
+        print("[FAST-SWITCH-V9] install returned false")
 except Exception as exc:
-    print("[VIDEO-NET-V8] install failed:", exc)
+    print("[FAST-SWITCH-V9] install failed:", exc)
+
 
 SEARCH_HISTORY_PATH = "search_history.json"
 MAX_HISTORY = 10
