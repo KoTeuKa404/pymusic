@@ -56,20 +56,8 @@ try:
 except Exception as exc:
     print("[PLAYBACK-V5] Clock callback alias failed:", exc)
 
-# Add the like counter/like-dislike ratio next to Favorites and make the channel
-# name bold. Apply the tiny layout tuning before installing the runtime hooks so
-# the channel gets the full remaining width and the thumb matches the PNG action
-# buttons visually.
-try:
-    import likes_ui_patch as _likes_ui_patch
-    from likes_ui_tuning import apply_likes_ui_tuning
-
-    if not apply_likes_ui_tuning(_likes_ui_patch):
-        print("[LIKES-UI] visual tuning returned false")
-    if not _likes_ui_patch.install_likes_ui_patch():
-        print("[LIKES-UI] synchronous install returned false")
-except Exception as exc:
-    print("[LIKES-UI] synchronous install failed:", exc)
+# Channel avatar, like/dislike statistics and centered UI geometry now live
+# directly in audio_screen.AudioPlayerScreen. No installer/monkey-patch needed.
 
 # Tune the hidden Kivy controls too. This is useful as a fallback when the
 # SurfaceView/native overlay is not active on a particular device.
