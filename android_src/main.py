@@ -3,6 +3,7 @@ os.environ["KIVY_AUDIO"] = "sdl2"
 
 import re
 import threading
+from urllib.parse import parse_qs, urlparse
 
 # ---- kill yt_dlp cache ----
 try:
