@@ -11,6 +11,8 @@ import copy
 import html
 import json
 import re
+import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -499,6 +501,74 @@ def _watch_bootstrap(
     return ytcfg, initial, text
 
 
+# Anonymous watch-next API key recovery is part of the related-video
+# provider itself, not an installer that wraps _merge_page_config.
+_RELATED_KEY_LOCK = threading.Lock()
+_RELATED_CACHED_KEY = ""
+_RELATED_CACHED_AT = 0.0
+
+_RELATED_UA = (
+    "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+)
+
+
+def _related_extract_key(text: str) -> str:
+    for pattern in (
+        r'"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"',
+        r'"innertubeApiKey"\s*:\s*"([^"]+)"',
+    ):
+        match = re.search(pattern, text or "")
+        if match:
+            value = str(match.group(1) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _related_scrape_public_key(force: bool = False) -> str:
+    global _RELATED_CACHED_KEY, _RELATED_CACHED_AT
+    now = time.time()
+    if _RELATED_CACHED_KEY and not force and (now - _RELATED_CACHED_AT) < 6 * 3600:
+        return _RELATED_CACHED_KEY
+
+    with _RELATED_KEY_LOCK:
+        now = time.time()
+        if _RELATED_CACHED_KEY and not force and (now - _RELATED_CACHED_AT) < 6 * 3600:
+            return _RELATED_CACHED_KEY
+
+        headers = {
+            "User-Agent": _RELATED_UA,
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.7",
+            "Cookie": "SOCS=CAI; PREF=hl=uk&gl=UA",
+        }
+        timeout = httpx.Timeout(8.0, connect=6.0)
+
+        for url in (
+            "https://www.youtube.com/?hl=uk&gl=UA",
+            "https://m.youtube.com/?hl=uk&gl=UA",
+            "https://www.youtube.com/?hl=en&gl=US",
+        ):
+            try:
+                response = httpx.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    follow_redirects=True,
+                )
+                response.raise_for_status()
+                key = _related_extract_key(response.text)
+                if key:
+                    _RELATED_CACHED_KEY = key
+                    _RELATED_CACHED_AT = time.time()
+                    print("[WATCH-NEXT-V7] scraped current YouTube Innertube key")
+                    return key
+            except Exception as exc:
+                print(f"[WATCH-NEXT-V7] key bootstrap failed for {url}: {exc}")
+
+        return ""
+
 def _merge_page_config(
     profile: dict[str, Any],
     ytcfg: dict[str, Any],
@@ -530,6 +600,8 @@ def _merge_page_config(
         client["visitorData"] = visitor
 
     api_key = str(ytcfg.get("INNERTUBE_API_KEY") or "")
+    if not api_key:
+        api_key = _related_scrape_public_key(force=False)
     return context, visitor, api_key
 
 
