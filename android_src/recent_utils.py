@@ -11,7 +11,6 @@ import time
 try:
     import pymusic_runtime_patch as _player_hotfix
     import final_player_fix as _final_player_fix
-    import playlist_open_guard_v12 as _playlist_open_guard_v12
 
     def _install_player_hotfix_when_ready():
         ready = {"base": False, "final": False}
@@ -42,10 +41,6 @@ try:
         daemon=True,
     ).start()
 
-    try:
-        _playlist_open_guard_v12.install_playlist_open_guard_v12()
-    except Exception as exc:
-        print("[PLAYLIST-OPEN-V12] initialization failed:", exc)
 except Exception as exc:
     print("[HOTFIX] loader failed:", exc)
 
