@@ -59,15 +59,8 @@ except Exception as exc:
 # Channel avatar, like/dislike statistics and centered UI geometry now live
 # directly in audio_screen.AudioPlayerScreen. No installer/monkey-patch needed.
 
-# Tune the hidden Kivy controls too. This is useful as a fallback when the
-# SurfaceView/native overlay is not active on a particular device.
-try:
-    from video_controls_ui_fix import install_video_controls_ui_fix
-
-    if not install_video_controls_ui_fix():
-        print("[VIDEO-CTRL] synchronous install returned false")
-except Exception as exc:
-    print("[VIDEO-CTRL] synchronous install failed:", exc)
+# Kivy fallback control size, spacing and on_press actions live in
+# youtube_gui.kv. No runtime method wrapper is needed here.
 
 # Keep the previous Python native path as a fallback for taps on the transparent
 # video surface itself. The actual three ImageButtons are rebound below to a
