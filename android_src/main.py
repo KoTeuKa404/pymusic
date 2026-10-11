@@ -205,6 +205,51 @@ class MarqueeLabel(MDScrollView):
         except Exception:
             pass
 
+# Direct playlist URL safety: a playlist/container URL is not a playable
+# single-track fallback. Keep the first track intact while queue loads.
+def _pymusic_valid_video_id(value: str) -> str:
+    value = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+        return value
+    return ""
+
+
+def _pymusic_playlist_video_id(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    direct = _pymusic_valid_video_id(raw)
+    if direct:
+        return direct
+
+    try:
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        if not host and raw.startswith(("www.youtube.com/", "youtube.com/", "youtu.be/")):
+            parsed = urlparse("https://" + raw)
+            host = (parsed.netloc or "").lower()
+            path = parsed.path or ""
+
+        if "youtu.be" in host:
+            return _pymusic_valid_video_id(path.strip("/").split("/", 1)[0])
+
+        if "youtube.com" not in host:
+            return ""
+
+        query = parse_qs(parsed.query or "")
+        vid = _pymusic_valid_video_id(str((query.get("v") or [""])[0] or ""))
+        if vid:
+            return vid
+
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 2 and parts[0].lower() in ("shorts", "live", "embed"):
+            return _pymusic_valid_video_id(parts[1])
+    except Exception:
+        pass
+    return ""
+
 class YoutubeSearchScreen(MDScreen):
     _scroll_bound = False
     def __init__(self, **kwargs):
@@ -404,10 +449,20 @@ class YoutubeSearchScreen(MDScreen):
         # Для великих плейлистів не чекаємо, поки yt-dlp витягне всі 200+ треків.
         # Якщо посилання містить поточне відео, запускаємо його одразу, а чергу
         # підтягуємо у фоні й підставляємо в плеєр без повторного рестарту треку.
+        raw_fallback = str(fallback_url or "").strip()
+        fallback_vid = _pymusic_playlist_video_id(raw_fallback)
+        seed_vid = _pymusic_playlist_video_id(str(start_video_id or ""))
+        if raw_fallback and not fallback_vid:
+            # Never pass /playlist or /browse URLs to the single-track audio
+            # extractor. Use a genuine seed or wait for complete extraction.
+            fallback_url = (
+                f"https://www.youtube.com/watch?v={seed_vid}"
+                if seed_vid else None
+            )
         started_fast = False
         fast_url = str(fallback_url or "").strip()
-        if not fast_url and start_video_id:
-            fast_url = f"https://www.youtube.com/watch?v={start_video_id}"
+        if not fast_url and seed_vid:
+            fast_url = f"https://www.youtube.com/watch?v={seed_vid}"
         if fast_url:
             started_fast = True
             Clock.schedule_once(lambda dt, u=fast_url: self._open_single_on_ui(u), 0)
