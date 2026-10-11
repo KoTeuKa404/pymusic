@@ -43,6 +43,486 @@ from recent_utils import (
 from video_player import AndroidVideoPlayer
 
 
+# Integrated like statistics and channel-row layout.
+# Previously provided by likes_ui_patch.py and likes_ui_tuning.py.
+import certifi
+import requests
+from typing import Any
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.label import Label
+from kivymd.uix.label import MDIcon
+
+_player_likes_CACHE_TTL_SECONDS = 30 * 60
+_player_likes_REQUEST_TIMEOUT_SECONDS = 6
+_player_likes_RETRY_AFTER_SECONDS = 15
+_player_likes_VOTES_ENDPOINT = "https://returnyoutubedislikeapi.com/votes"
+_player_likes_stats_cache: dict[str, tuple[float, int, int]] = {}
+_player_likes_cache_lock = threading.RLock()
+
+
+def _player_likes_video_id_from_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", text):
+        return text
+
+    try:
+        parsed = urllib.parse.urlparse(text)
+        query = urllib.parse.parse_qs(parsed.query or "")
+        candidate = str((query.get("v") or [""])[0] or "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+            return candidate
+
+        host = (parsed.netloc or "").lower()
+        if "youtu.be" in host:
+            candidate = (parsed.path or "").strip("/").split("/")[0]
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+                return candidate
+
+        match = re.search(
+            r"/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})(?:[/?#]|$)",
+            parsed.path or "",
+        )
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+
+    match = re.search(
+        r"(?:[?&]v=|youtu\.be/|/(?:shorts|live|embed)/)"
+        r"([A-Za-z0-9_-]{11})(?:[&/?#]|$)",
+        text,
+    )
+    return match.group(1) if match else ""
+
+
+def _player_likes_to_non_negative_int(value: Any) -> int:
+    try:
+        number = int(float(value))
+    except Exception:
+        return 0
+    return max(0, number)
+
+
+def _player_likes_format_compact_count(value: int) -> str:
+    try:
+        number = max(0, int(value))
+    except Exception:
+        return ""
+
+    units = (
+        (1_000_000_000, "млрд"),
+        (1_000_000, "млн"),
+        (1_000, "тис."),
+    )
+    for divider, suffix in units:
+        if number >= divider:
+            compact = number / float(divider)
+            if compact >= 100:
+                text = f"{compact:.0f}"
+            else:
+                text = f"{compact:.1f}"
+            text = text.rstrip("0").rstrip(".").replace(".", ",")
+            return f"{text} {suffix}"
+    return f"{number:,}".replace(",", " ")
+
+
+def _player_likes_format_ratio(likes: int, dislikes: int) -> str:
+    total = max(0, int(likes)) + max(0, int(dislikes))
+    if total <= 0:
+        return ""
+    like_pct = 100.0 * max(0, int(likes)) / total
+    dislike_pct = max(0.0, 100.0 - like_pct)
+    left = f"{like_pct:.1f}".replace(".", ",")
+    right = f"{dislike_pct:.1f}".replace(".", ",")
+    return f"{left}% / {right}%"
+
+
+def _player_likes_log(message: str) -> None:
+    try:
+        import media_android as ma
+
+        ma.log(message)
+    except Exception:
+        try:
+            print(message)
+        except Exception:
+            pass
+
+
+def _player_likes_read_cached(video_id: str) -> tuple[int, int] | None:
+    now = time.monotonic()
+    with _player_likes_cache_lock:
+        cached = _player_likes_stats_cache.get(video_id)
+        if not cached:
+            return None
+        ts, likes, dislikes = cached
+        if now - ts > _player_likes_CACHE_TTL_SECONDS:
+            _player_likes_stats_cache.pop(video_id, None)
+            return None
+        return int(likes), int(dislikes)
+
+
+def _player_likes_write_cached(video_id: str, likes: int, dislikes: int) -> None:
+    with _player_likes_cache_lock:
+        _player_likes_stats_cache[video_id] = (
+            time.monotonic(),
+            max(0, int(likes)),
+            max(0, int(dislikes)),
+        )
+        if len(_player_likes_stats_cache) > 128:
+            oldest = sorted(_player_likes_stats_cache.items(), key=lambda item: item[1][0])[:32]
+            for key, _value in oldest:
+                _player_likes_stats_cache.pop(key, None)
+
+
+def _player_likes_fetch_votes(video_id: str) -> tuple[int, int] | None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return None
+
+    cached = _player_likes_read_cached(video_id)
+    if cached is not None:
+        return cached
+
+    try:
+        response = requests.get(
+            _player_likes_VOTES_ENDPOINT,
+            params={"videoId": video_id},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Pragma": "no-cache",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "User-Agent": "PyMusic/1.0 (Android)",
+            },
+            timeout=_player_likes_REQUEST_TIMEOUT_SECONDS,
+            verify=certifi.where(),
+        )
+        if response.status_code == 429:
+            _player_likes_log(f"[LIKES-UI] RYD rate limited video={video_id}")
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        _player_likes_log(f"[LIKES-UI] RYD request failed video={video_id}: {exc}")
+        return None
+
+    if not isinstance(payload, dict):
+        _player_likes_log(f"[LIKES-UI] invalid RYD response video={video_id}")
+        return None
+
+    likes = _player_likes_to_non_negative_int(payload.get("likes"))
+    dislikes = _player_likes_to_non_negative_int(payload.get("dislikes"))
+    if likes <= 0 and dislikes <= 0:
+        _player_likes_log(f"[LIKES-UI] empty RYD votes video={video_id}")
+        return None
+
+    _player_likes_write_cached(video_id, likes, dislikes)
+    return likes, dislikes
+
+
+def _player_likes_make_stats_widget(owner) -> FloatLayout:
+    # Keep the like icon on the same visual baseline as the 28dp repeat/favorite
+    # PNG buttons. Material font glyphs sit high inside their label box, so the
+    # glyph itself is enlarged and its 28dp box is shifted down slightly.
+    holder = FloatLayout(
+        size_hint=(None, None),
+        size=(dp(106), dp(46)),
+        # BoxLayout otherwise places a fixed-height child at its lower edge.
+        # Match the same center line as the avatar, name and PNG action icons.
+        pos_hint={"center_y": 0.5},
+    )
+
+    icon = MDIcon(
+        icon="thumb-up-outline",
+        size_hint=(None, None),
+        size=(dp(28), dp(28)),
+        pos_hint={"x": 0.0, "center_y": 0.5},
+        font_size="24sp",
+        theme_text_color="Custom",
+        text_color=(0.15, 0.15, 0.15, 1),
+        halign="center",
+        valign="middle",
+        text_size=(dp(28), dp(28)),
+    )
+
+    # The count and like/dislike ratio are a compact two-line block
+    # straddling the thumb's center (0.5): count above, ratio below.
+    count_label = Label(
+        text="",
+        size_hint=(None, None),
+        size=(dp(72), dp(18)),
+        pos_hint={"x": 34.0 / 106.0, "center_y": 0.68},
+        font_size="13sp",
+        color=(0.15, 0.15, 0.15, 1),
+        halign="left",
+        valign="middle",
+        shorten=True,
+        shorten_from="right",
+        text_size=(dp(72), dp(18)),
+    )
+
+    ratio_label = Label(
+        text="",
+        size_hint=(None, None),
+        size=(dp(72), dp(14)),
+        pos_hint={"x": 34.0 / 106.0, "center_y": 0.32},
+        font_size="8sp",
+        color=(0.48, 0.48, 0.48, 1),
+        halign="left",
+        valign="middle",
+        text_size=(dp(72), dp(14)),
+    )
+
+    holder.add_widget(icon)
+    holder.add_widget(count_label)
+    holder.add_widget(ratio_label)
+
+    holder._pymusic_like_stats = True
+    holder._pymusic_count_label = count_label
+    holder._pymusic_ratio_label = ratio_label
+    owner._likes_holder = holder
+    owner._likes_count_label = count_label
+    owner._likes_ratio_label = ratio_label
+    return holder
+
+
+def _player_likes_ensure_stats_widget(owner) -> None:
+    try:
+        channel = owner.ids.get("audio_channel")
+        if channel is not None:
+            channel.bold = True
+    except Exception:
+        pass
+
+    try:
+        existing = getattr(owner, "_likes_holder", None)
+        if existing is not None and getattr(existing, "parent", None) is not None:
+            return
+
+        favorite = owner.ids.get("favorite_btn")
+        parent = getattr(favorite, "parent", None) if favorite is not None else None
+        if parent is None:
+            return
+
+        for child in list(getattr(parent, "children", []) or []):
+            if bool(getattr(child, "_pymusic_like_stats", False)):
+                owner._likes_holder = child
+                owner._likes_count_label = getattr(child, "_pymusic_count_label", None)
+                owner._likes_ratio_label = getattr(child, "_pymusic_ratio_label", None)
+                return
+
+        try:
+            parent.spacing = dp(8)
+        except Exception:
+            pass
+
+        widget = _player_likes_make_stats_widget(owner)
+        parent.add_widget(widget)
+    except Exception as exc:
+        _player_likes_log(f"[LIKES-UI] widget creation failed: {exc}")
+
+
+def _player_likes_set_stats_ui(owner, likes: int | None, dislikes: int | None) -> None:
+    _player_likes_ensure_stats_widget(owner)
+    try:
+        count_label = getattr(owner, "_likes_count_label", None)
+        ratio_label = getattr(owner, "_likes_ratio_label", None)
+        if count_label is None or ratio_label is None:
+            return
+
+        if likes is None:
+            count_label.text = ""
+            ratio_label.text = ""
+            return
+
+        safe_likes = max(0, int(likes))
+        safe_dislikes = max(0, int(dislikes or 0))
+        count_label.text = _player_likes_format_compact_count(safe_likes)
+        ratio_label.text = _player_likes_format_ratio(safe_likes, safe_dislikes)
+    except Exception as exc:
+        _player_likes_log(f"[LIKES-UI] render failed: {exc}")
+
+
+def _player_likes_ensure_likes_async(owner, video_url: str) -> None:
+    video_id = _player_likes_video_id_from_url(video_url)
+    if not video_id:
+        Clock.schedule_once(lambda _dt: _player_likes_set_stats_ui(owner, None, None), 0)
+        return
+
+    current_video_id = str(getattr(owner, "_likes_video_id", "") or "")
+    if current_video_id == video_id:
+        failed_at = float(getattr(owner, "_likes_failed_at", 0.0) or 0.0)
+        if failed_at <= 0.0:
+            return
+        if time.monotonic() - failed_at < _player_likes_RETRY_AFTER_SECONDS:
+            return
+
+    owner._likes_video_id = video_id
+    owner._likes_failed_at = 0.0
+    owner._likes_request_token = int(getattr(owner, "_likes_request_token", 0)) + 1
+    token = int(owner._likes_request_token)
+
+    Clock.schedule_once(lambda _dt: _player_likes_set_stats_ui(owner, None, None), 0)
+
+    def worker() -> None:
+        result = _player_likes_fetch_votes(video_id)
+        if token != int(getattr(owner, "_likes_request_token", -1)):
+            return
+        if video_id != _player_likes_video_id_from_url(str(getattr(owner, "_last_video_url", "") or "")):
+            return
+
+        if result is None:
+            owner._likes_failed_at = time.monotonic()
+            Clock.schedule_once(lambda _dt: _player_likes_set_stats_ui(owner, None, None), 0)
+            return
+
+        owner._likes_failed_at = 0.0
+        likes, dislikes = result
+        Clock.schedule_once(
+            lambda _dt, l=likes, d=dislikes: _player_likes_set_stats_ui(owner, l, d),
+            0,
+        )
+
+    threading.Thread(
+        target=worker,
+        name=f"pymusic-like-stats-{video_id}",
+        daemon=True,
+    ).start()
+
+
+
+def _player_likes_tune_like_widget(owner) -> None:
+    """Make the thumb icon larger/lower without replacing its renderer."""
+    try:
+        holder = getattr(owner, "_likes_holder", None)
+        if holder is None:
+            return
+
+        holder.size_hint = (None, None)
+        holder.size = (dp(106), dp(46))
+        holder.pos_hint = {"center_y": 0.5}
+
+        like_icon = None
+        for child in list(getattr(holder, "children", []) or []):
+            if str(getattr(child, "icon", "") or "") == "thumb-up-outline":
+                like_icon = child
+                break
+
+        if like_icon is not None:
+            like_icon.size_hint = (None, None)
+            like_icon.size = (dp(34), dp(34))
+            like_icon.font_size = "30sp"
+            like_icon.text_size = (dp(34), dp(34))
+            # Align the actual thumb glyph with the neighboring PNG actions.
+            like_icon.pos_hint = {"x": 0.0, "center_y": 0.5}
+            like_icon.halign = "center"
+            like_icon.valign = "middle"
+
+        # Place the two labels symmetrically around the thumb's midpoint.
+        # Their combined visual midpoint is holder.center_y, not the count
+        # line itself; this keeps the percentage from dangling underneath.
+        count_label = getattr(owner, "_likes_count_label", None)
+        if count_label is not None:
+            count_label.size_hint = (None, None)
+            count_label.size = (dp(72), dp(18))
+            count_label.pos_hint = {"x": 34.0 / 106.0, "center_y": 0.68}
+            count_label.text_size = (dp(72), dp(18))
+
+        ratio_label = getattr(owner, "_likes_ratio_label", None)
+        if ratio_label is not None:
+            ratio_label.size_hint = (None, None)
+            ratio_label.size = (dp(72), dp(14))
+            ratio_label.pos_hint = {"x": 34.0 / 106.0, "center_y": 0.32}
+            ratio_label.text_size = (dp(72), dp(14))
+    except Exception:
+        pass
+
+
+def _player_likes_tune_channel_row(owner) -> None:
+    try:
+        channel = owner.ids.get("audio_channel")
+        favorite = owner.ids.get("favorite_btn")
+        repeat = owner.ids.get("repeat_inline_btn")
+        avatar = owner.ids.get("channel_avatar")
+        parent = getattr(favorite, "parent", None) if favorite is not None else None
+
+        # All channel-row elements share the same vertical center. Never
+        # offset only the title/avatar while leaving action icons in place.
+        if avatar is not None:
+            try:
+                avatar.pos_hint = {"center_y": 0.5}
+            except Exception:
+                pass
+
+        if channel is not None:
+            channel.bold = True
+            channel.size_hint_x = 1
+            channel.size_hint_y = None
+            channel.height = dp(44)
+            channel.pos_hint = {"center_y": 0.5}
+            channel.shorten = True
+            channel.shorten_from = "right"
+            channel.halign = "left"
+            channel.valign = "middle"
+            channel.text_size = (channel.width, channel.height)
+            if not bool(getattr(channel, "_pymusic_width_bound", False)):
+                def _sync_text_width(instance, width):
+                    instance.text_size = (width, instance.height)
+
+                channel.bind(width=_sync_text_width)
+                channel._pymusic_width_bound = True
+
+        for button in (favorite, repeat):
+            if button is not None:
+                button.size_hint_y = None
+                button.pos_hint = {"center_y": 0.5}
+        _player_likes_tune_like_widget(owner)
+
+        if parent is None:
+            return
+
+        known = {channel, favorite, repeat, avatar, getattr(owner, "_likes_holder", None)}
+        for child in list(getattr(parent, "children", []) or []):
+            if child in known or bool(getattr(child, "_pymusic_like_stats", False)):
+                continue
+            if type(child) is Widget:
+                child.size_hint_x = None
+                child.width = 0
+    except Exception:
+        pass
+
+
+
+def _player_likes_initialize(owner):
+    """Prepare stats UI once; no dynamic method monkey-patching."""
+    owner._likes_video_id = ""
+    owner._likes_failed_at = 0.0
+    owner._likes_request_token = 0
+    owner._likes_holder = None
+    owner._likes_count_label = None
+    owner._likes_ratio_label = None
+
+
+def _player_likes_ensure_and_tune(owner):
+    _player_likes_ensure_stats_widget(owner)
+    _player_likes_tune_channel_row(owner)
+
+
+def _player_likes_reset_on_change(owner):
+    current = str(getattr(owner, "_last_video_url", "") or "")
+    current_id = _player_likes_video_id_from_url(current)
+    if current_id and current_id != str(getattr(owner, "_likes_video_id", "") or ""):
+        owner._likes_video_id = ""
+        owner._likes_failed_at = 0.0
+        owner._likes_request_token = int(getattr(owner, "_likes_request_token", 0)) + 1
+        Clock.schedule_once(lambda _dt: _player_likes_set_stats_ui(owner, None, None), 0)
+
+
+
 # ==================== STABLE LOCAL THUMBNAIL WIDGET ====================
 
 class ThumbImage(Widget):
@@ -355,6 +835,7 @@ class AudioPlayerScreen(Screen):
 
     def __init__(self, **kw):
         super().__init__(**kw)
+        _player_likes_initialize(self)
         # Ensure media callbacks are always callable (QS/headset/notification).
         self._ms_next = self._act_next
         self._ms_prev = self._act_prev
@@ -473,6 +954,7 @@ class AudioPlayerScreen(Screen):
 
     def on_kv_post(self, base_widget):
         super().on_kv_post(base_widget)
+        Clock.schedule_once(lambda _dt: _player_likes_ensure_and_tune(self), 0)
         try:
             thumb = self.ids.audio_thumbnail
             thumb.bind(pos=self._align_video_to_thumb, size=self._align_video_to_thumb)
@@ -2010,6 +2492,7 @@ class AudioPlayerScreen(Screen):
                 pass
 
     def _ensure_metadata_async(self, video_url: str):
+        _player_likes_ensure_likes_async(self, video_url)
         if not video_url:
             return
         if video_url in self._metadata_loaded_urls:
@@ -3221,6 +3704,10 @@ class AudioPlayerScreen(Screen):
     # ==================== UI wiring ====================
 
     def _sync_ui_loaded(self):
+        _player_likes_ensure_and_tune(self)
+        current = str(getattr(self, "_last_video_url", "") or "")
+        if current:
+            _player_likes_ensure_likes_async(self, current)
         try:
             self.ids.audio_title.text = self._title or ""
             views_lbl = self.ids.get("audio_views")
@@ -3402,6 +3889,8 @@ class AudioPlayerScreen(Screen):
         return ""
 
     def _sync_ui_loading(self):
+        _player_likes_ensure_and_tune(self)
+        _player_likes_reset_on_change(self)
         Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
 
     def _sync_thumb_now(self):
