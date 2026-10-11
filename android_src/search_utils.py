@@ -113,16 +113,8 @@ try:
 except Exception as exc:
     print("[LATEST-FIX] synchronous install failed:", exc)
 
-# The video SurfaceView already keeps the real aspect ratio. Keep the Kivy
-# thumbnail on the same rule too, even if final_player_fix tries to stretch it
-# to the 16:9 viewport while aligning the native video layer.
-try:
-    from thumbnail_aspect_fix import install_thumbnail_aspect_fix
-
-    if not install_thumbnail_aspect_fix():
-        print("[THUMB-ASPECT] synchronous install returned false")
-except Exception as exc:
-    print("[THUMB-ASPECT] synchronous install failed:", exc)
+# Thumbnail aspect ratio is enforced by youtube_gui.kv and final_player_fix,
+# without an additional runtime method wrapper.
 
 # Final owner of the current-video -> recommendations -> autoplay chain.
 # It has its own readiness waiter, so it installs after the old core/final
