@@ -92,7 +92,8 @@ def _patch_final_player() -> bool:
                     thumb.size_hint = (1, 1)
                     thumb.pos_hint = {"x": 0, "y": 0}
                     thumb.allow_stretch = True
-                    thumb.keep_ratio = False
+                    thumb.keep_ratio = True
+                    thumb.fit_mode = "contain"
                 except Exception:
                     pass
             request_layout(block)
