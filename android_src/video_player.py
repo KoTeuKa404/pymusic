@@ -784,10 +784,24 @@ class AndroidVideoPlayer:
     def _on_error(self, mp, what, extra, gen: int):
         if gen != self._play_gen:
             return True
+
+        # AudioPlayerScreen owns network reconnection. During an actual
+        # outage do not destroy the visible SurfaceView; a new MediaPlayer
+        # will replace the failed instance when the connection recovers.
         try:
-            _log(f"[VIDEO] MediaPlayer error what={what} extra={extra}")
+            offline = ma is not None and not bool(ma.is_network_available())
         except Exception:
-            pass
+            offline = False
+        if offline:
+            self._prepared = False
+            self._surface_ready_to_show = False
+            _log(
+                f"[VIDEO] offline MediaPlayer error preserved "
+                f"what={what} extra={extra} gen={gen}"
+            )
+            return True
+
+        _log(f"[VIDEO] MediaPlayer error what={what} extra={extra}")
         try:
             self.stop()
         except Exception:
