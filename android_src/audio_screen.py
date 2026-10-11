@@ -967,6 +967,66 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
+        self._bind_playlist_scroll_input()
+
+    def _bind_playlist_scroll_input(self):
+        """Own playlist gestures directly, without a runtime patch installer.
+
+        The nested playlist_scroll is intentionally a 240dp viewport. Disable
+        the parent only for a swipe inside it. Restore the parent on the
+        physical finger UP at Window level, including when the nested
+        ScrollView or a track button has grabbed the touch.
+        """
+        inner = self.ids.get("playlist_scroll")
+        outer = self.ids.get("player_details_scroll")
+        if inner is None or outer is None:
+            return
+        if getattr(inner, "_pymusic_touch_ownership_bound", False):
+            return
+
+        def restore():
+            inner._pymusic_active_touch_uid = None
+            outer.do_scroll_y = True
+
+        def playlist_down(widget, touch):
+            try:
+                if (
+                    self._is_screen_active()
+                    and not getattr(self, "_playlist_collapsed", False)
+                    and widget.height > 0
+                    and widget.collide_point(*touch.pos)
+                ):
+                    inner._pymusic_active_touch_uid = touch.uid
+                    outer.do_scroll_y = False
+            except Exception as exc:
+                print("[PLAYLIST] gesture down failed:", exc)
+            return False
+
+        def playlist_up(_widget, touch):
+            if getattr(inner, "_pymusic_active_touch_uid", None) == touch.uid:
+                restore()
+            return False
+
+        def window_up(_window, touch):
+            if getattr(inner, "_pymusic_active_touch_uid", None) == touch.uid:
+                restore()
+            return False
+
+        def window_down(_window, touch):
+            # Only recover a genuinely stale earlier gesture. Never reset
+            # the current DOWN even if Window dispatch runs after the child.
+            previous = getattr(inner, "_pymusic_active_touch_uid", None)
+            if previous is not None and previous != touch.uid:
+                restore()
+            return False
+
+        inner._pymusic_touch_ownership_bound = True
+        inner._pymusic_window_input_handlers = (
+            playlist_down, playlist_up, window_up, window_down
+        )
+        inner.bind(on_touch_down=playlist_down, on_touch_up=playlist_up)
+        Window.bind(on_touch_down=window_down, on_touch_up=window_up)
+
     def _set_scrubbing(self, active: bool):
         self._is_scrubbing = bool(active)
 
