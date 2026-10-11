@@ -320,7 +320,8 @@
                             size_hint: 1, 1
                             pos_hint: {'x': 0, 'y': 0}
                             allow_stretch: True
-                            keep_ratio: False
+                            keep_ratio: True
+                            fit_mode: 'contain'
         
                         VideoTapArea:
                             on_release: root.toggle_video_controls()
