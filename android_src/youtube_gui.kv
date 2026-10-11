@@ -372,11 +372,11 @@
                             id: video_controls
                             orientation: 'horizontal'
                             size_hint: None, None
-                            height: dp(48)
-                            width: dp(220)
+                            height: dp(58)
+                            width: dp(260)
                             pos_hint: {'center_x': 0.5, 'center_y': 0.68}
-                            spacing: dp(12)
-                            padding: dp(10), dp(6)
+                            spacing: dp(28)
+                            padding: dp(30), dp(3)
                             opacity: 0
                             disabled: True
                             canvas.before:
@@ -392,7 +392,9 @@
                                 theme_text_color: "Custom"
                                 text_color: 1, 1, 1, 1
                                 user_font_size: "24sp"
-                                on_release: root.video_seek(-10)
+                                size_hint: None, None
+                                size: dp(44), dp(44)
+                                on_press: root.video_seek(-10)
         
                             MDIconButton:
                                 id: video_play_btn
@@ -400,14 +402,18 @@
                                 theme_text_color: "Custom"
                                 text_color: 1, 1, 1, 1
                                 user_font_size: "28sp"
-                                on_release: root.video_toggle_play()
+                                size_hint: None, None
+                                size: dp(52), dp(52)
+                                on_press: root.video_toggle_play()
         
                             MDIconButton:
                                 icon: "fast-forward-10"
                                 theme_text_color: "Custom"
                                 text_color: 1, 1, 1, 1
                                 user_font_size: "24sp"
-                                on_release: root.video_seek(10)
+                                size_hint: None, None
+                                size: dp(44), dp(44)
+                                on_press: root.video_seek(10)
 
                 MDBoxLayout:
                     orientation: 'vertical'
