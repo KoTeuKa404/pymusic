@@ -903,27 +903,18 @@ class AndroidVideoPlayer:
             pass
         return True
 
-    def _fit_rect_to_video(self, left: int, top: int, width: int, height: int) -> tuple[int, int, int, int]:
-        vw, vh = self._video_size or (16, 9)
-        if vw <= 0 or vh <= 0 or width <= 0 or height <= 0:
-            return left, top, width, height
-
-        frame_ratio = float(width) / float(height)
-        video_ratio = float(vw) / float(vh)
-        if video_ratio > frame_ratio:
-            out_w = int(width)
-            out_h = max(1, int(round(out_w / video_ratio)))
-        else:
-            out_h = int(height)
-            out_w = max(1, int(round(out_h * video_ratio)))
-
-        out_left = int(left + max(0, (width - out_w) / 2))
-        out_top = int(top + max(0, (height - out_h) / 2))
-        return out_left, out_top, out_w, out_h
+    def _fit_rect_to_video(self, left, top, width, height):
+        """Render full viewport; MediaPlayer applies aspect-correct scaling."""
+        return int(left), int(top), max(1, int(width)), max(1, int(height))
 
     @run_on_ui_thread
     def _apply_surface_bounds(self) -> None:
         try:
+            if self.player is not None:
+                try:
+                    self.player.setVideoScalingMode(2)
+                except Exception:
+                    pass
             if self.surface_view is None or not self._frame_bounds:
                 return
 
