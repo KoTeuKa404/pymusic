@@ -543,6 +543,20 @@ def _pymusic_mix_video_url(value):
     return None
 
 
+def _request_player_layout(widget) -> None:
+    if widget is None:
+        return
+    try:
+        trigger = getattr(widget, "_trigger_layout", None)
+        if callable(trigger):
+            trigger()
+    except Exception:
+        pass
+    try:
+        widget.canvas.ask_update()
+    except Exception:
+        pass
+
 # ==================== STABLE LOCAL THUMBNAIL WIDGET ====================
 
 class ThumbImage(Widget):
@@ -952,6 +966,8 @@ class AudioPlayerScreen(Screen):
         self._playlist_collapsed = False
         self._similar_collapsed = False
         self._initialize_java_transport()
+        for delay in (0, 0.08, 0.25):
+            Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
 
     # ==================== lifecycle ====================
 
@@ -1191,6 +1207,8 @@ class AudioPlayerScreen(Screen):
         return True
 
     def on_pre_enter(self):
+        for delay in (0.0, 0.06, 0.18, 0.40):
+            Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
         self._app_in_background = False
         try:
             ma.request_post_notifications_permission()
@@ -1332,13 +1350,34 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
-    def _align_video_to_thumb(self, *args):
-        """
-        Виставляє SurfaceView у межах прев'ю. Сам SurfaceView потім
-        зменшується під реальний aspect-ratio відео в AndroidVideoPlayer.
-        """
+    def _configure_video_block(self) -> None:
+        block = self.ids.get("video_block")
+        thumb = self.ids.get("audio_thumbnail")
+        if block is None:
+            return
         try:
-            if not self._video_player:
+            block.padding = (0, 0, 0, 0)
+            block.spacing = 0
+        except Exception:
+            pass
+        wanted_h = max(dp(1), float(block.width or 0) * 9.0 / 16.0)
+        if abs(float(block.height or 0) - wanted_h) > 0.25:
+            block.height = wanted_h
+        if thumb is not None:
+            try:
+                thumb.size_hint = (1, 1)
+                thumb.pos_hint = {"x": 0, "y": 0}
+                thumb.allow_stretch = True
+                thumb.keep_ratio = True
+                thumb.fit_mode = "contain"
+            except Exception:
+                pass
+        _request_player_layout(block)
+
+    def _align_video_to_thumb(self, *args):
+        try:
+            vp = getattr(self, "_video_player", None)
+            if vp is None:
                 return
             if not self._is_screen_active():
                 try:
@@ -1347,82 +1386,194 @@ class AudioPlayerScreen(Screen):
                     pass
                 return
 
+            self._configure_video_block()
+            block = self.ids.get("video_block")
+            if block is None:
+                return
+
             win_w, win_h = Window.size
             if win_w <= 0 or win_h <= 0:
                 return
 
-            # ТЕПЕР: через media_android, а не через локальний PythonActivity
             activity = ma.PythonActivity.mActivity
             try:
                 metrics = activity.getResources().getDisplayMetrics()
                 screen_w = int(metrics.widthPixels)
                 screen_h = int(metrics.heightPixels)
             except Exception:
-                screen_w = self._video_player.screen_w_px or 1080
-                screen_h = self._video_player.screen_h_px or 1920
+                screen_w = int(getattr(vp, "screen_w_px", 0) or 1080)
+                screen_h = int(getattr(vp, "screen_h_px", 0) or 1920)
 
-            # коефіцієнти переходу з координат Kivy у px екрана Android
-            kx = screen_w / float(win_w)
-            ky = screen_h / float(win_h)
-
-            thumb = self.ids.get("audio_thumbnail")
-            if not thumb:
+            kx = float(screen_w) / float(win_w)
+            ky = float(screen_h) / float(win_h)
+            wx, wy = block.to_window(block.x, block.y, relative=False)
+            ww = float(block.width or 0)
+            wh = float(block.height or 0)
+            if ww <= 0 or wh <= 0:
                 return
 
-            # позиція превʼю у вікні Kivy (0,0 - знизу зліва)
-            wx, wy = thumb.to_window(thumb.x, thumb.y, relative=False)
-            ww = thumb.width
-            wh = thumb.height
+            left = int(round(float(wx) * kx))
+            top = int(round((float(win_h) - (float(wy) + wh)) * ky))
+            width = int(round(ww * kx))
+            height = int(round(wh * ky))
 
-            full_height_px = int(wh * ky)
+            # Hide one-pixel compositor seams without covering nearby UI.
+            left -= 2
+            top -= 2
+            width += 4
+            height += 4
+            if left < 0:
+                width += left
+                left = 0
+            if top < 0:
+                height += top
+                top = 0
+            width = max(1, min(width, screen_w - left))
+            height = max(1, min(height, screen_h - top))
+            vp.set_bounds(left, top, width, height)
+        except Exception as exc:
+            print("[FINAL] video block alignment failed:", exc)
 
-            height_px = max(0, full_height_px)
-            if height_px < int(40 * ky):  # мінімальна висота відео
-                height_px = int(40 * ky)
+    def _apply_metadata_layout(self, _dt=0) -> None:
+        if bool(getattr(self, "_pymusic_final_layout_busy", False)):
+            return
+        self._pymusic_final_layout_busy = True
+        try:
+            title_view = self.ids.get("title_scroll")
+            title = self.ids.get("audio_title")
+            views = self.ids.get("audio_views")
+            if title_view is None or title is None or views is None:
+                return
 
-            width_px = int(ww * kx)
+            width = max(dp(1), float(title_view.width or 0))
+            try:
+                title.padding = (0, 0)
+            except Exception:
+                pass
+            title.halign = "left"
+            title.valign = "top"
+            title.text_size = (width, None)
+            try:
+                title.texture_update()
+            except Exception:
+                pass
 
-            # горизонтально - по центру екрана
-            left_px = max(0, int((screen_w - width_px) / 2))
+            title_text = str(title.text or "").strip()
+            title_h = float((title.texture_size or (0, 0))[1] or 0)
+            title_h = title_h if title_text else 0.0
+            visible_title_h = min(title_h, dp(50)) if title_h > 0 else 0.0
+            title_view.height = visible_title_h
+            title.height = title_h
+            title_view.do_scroll_x = False
+            title_view.do_scroll_y = title_h > visible_title_h + dp(1)
+            title_view.scroll_y = 1.0
+            try:
+                title_view.always_overscroll = False
+                title_view.bar_width = 0
+                title_view.smooth_scroll_end = 0
+            except Exception:
+                pass
 
-            # верхня межа превʼю в координатах вікна Kivy:
-            top_win = wy + wh
-            # відстань від верху екрана Android
-            top_px = int((win_h - top_win) * ky)
+            try:
+                views.padding = (0, 0)
+            except Exception:
+                pass
+            views.text_size = (max(dp(1), float(views.width or 0)), None)
+            try:
+                views.texture_update()
+            except Exception:
+                pass
+            views_text = str(views.text or "").strip()
+            views_h = float((views.texture_size or (0, 0))[1] or 0)
+            views.height = views_h if views_text else 0.0
 
-            # кламп по екрану
-            if width_px > screen_w:
-                width_px = screen_w
-            if height_px > screen_h:
-                height_px = screen_h
-            if top_px < 0:
-                top_px = 0
-            if top_px + height_px > screen_h:
-                top_px = max(0, screen_h - height_px)
+            details = title_view.parent
+            if details is not None:
+                details.spacing = 0
+                details.padding = (dp(16), dp(4), dp(16), dp(2))
+                _request_player_layout(details)
 
-            print(
-                "[VIDEO] align thumb win:",
-                "win_size=",
-                win_w,
-                win_h,
-                "thumb=",
-                wx,
-                wy,
-                ww,
-                wh,
-                "screen=",
-                screen_w,
-                screen_h,
-                "bounds_px=",
-                left_px,
-                top_px,
-                width_px,
-                height_px,
-            )
+            outer = self.ids.get("player_details_scroll")
+            if outer is not None:
+                _request_player_layout(outer.children[0] if outer.children else None)
+                _request_player_layout(outer)
+        except Exception as exc:
+            print("[FINAL] metadata layout failed:", exc)
+        finally:
+            self._pymusic_final_layout_busy = False
 
-            self._video_player.set_bounds(left_px, top_px, width_px, height_px)
-        except Exception as e:
-            print("[VIDEO] align err:", e)
+    def _queue_metadata_layout(self, delay=0.0) -> None:
+        try:
+            event = getattr(self, "_pymusic_final_layout_event", None)
+            if event is not None:
+                event.cancel()
+        except Exception:
+            pass
+        self._pymusic_final_layout_event = Clock.schedule_once(
+            lambda dt: self._apply_metadata_layout(dt), delay
+        )
+
+    def _bind_player_geometry(self) -> None:
+        try:
+            title_view = self.ids.get("title_scroll")
+            title = self.ids.get("audio_title")
+            views = self.ids.get("audio_views")
+            block = self.ids.get("video_block")
+            if title_view is not None and not getattr(
+                title_view, "_pymusic_final_bound_v2", False
+            ):
+                if title is not None:
+                    title.bind(text=lambda *_a: self._queue_metadata_layout(0.025))
+                    title.bind(texture_size=lambda *_a: self._queue_metadata_layout(0.025))
+                if views is not None:
+                    views.bind(text=lambda *_a: self._queue_metadata_layout(0.025))
+                    views.bind(texture_size=lambda *_a: self._queue_metadata_layout(0.025))
+                title_view.bind(width=lambda *_a: self._queue_metadata_layout(0.025))
+                title_view._pymusic_final_bound_v2 = True
+            if block is not None and not getattr(
+                block, "_pymusic_final_bound_v2", False
+            ):
+                block.bind(
+                    width=lambda *_a: Clock.schedule_once(
+                        lambda _dt: (
+                            self._configure_video_block(),
+                            self._align_video_to_thumb(),
+                        ),
+                        0,
+                    )
+                )
+                block._pymusic_final_bound_v2 = True
+
+            # The modern pre-rollback page scrolls its 16:9 video block
+            # together with metadata. Align the native SurfaceView when
+            # that *outer* page moves; the independent playlist ScrollView
+            # remains untouched. Coalesce the expensive Android bounds
+            # update instead of doing it on every pointer MOVE.
+            outer = self.ids.get("player_details_scroll")
+            if outer is not None and not getattr(
+                outer, "_pymusic_final_video_scroll_bound", False
+            ):
+                trigger = Clock.create_trigger(
+                    lambda _dt: self._align_video_to_thumb(), 0.035
+                )
+
+                def queue_surface_alignment(*_args):
+                    trigger()
+
+                outer.bind(scroll_y=queue_surface_alignment)
+                if block is not None:
+                    block.bind(pos=queue_surface_alignment)
+                    block.bind(size=queue_surface_alignment)
+                outer._pymusic_final_scroll_align_callback = queue_surface_alignment
+                outer._pymusic_final_scroll_align_trigger = trigger
+                outer._pymusic_final_video_scroll_bound = True
+                print("[FINAL] moving video tracks modern page scroll")
+        except Exception as exc:
+            print("[FINAL] layout binding failed:", exc)
+
+        self._configure_video_block()
+        self._apply_metadata_layout()
+        Clock.schedule_once(lambda _dt: self._align_video_to_thumb(), 0)
 
     def toggle_video_controls(self):
         self._set_video_controls_visible(not self._video_controls_visible)
@@ -4000,6 +4151,7 @@ class AudioPlayerScreen(Screen):
     # ==================== UI wiring ====================
 
     def _sync_ui_loaded(self):
+        self._queue_metadata_layout(0.025)
         _player_likes_ensure_and_tune(self)
         current = str(getattr(self, "_last_video_url", "") or "")
         if current:
@@ -4185,6 +4337,7 @@ class AudioPlayerScreen(Screen):
         return ""
 
     def _sync_ui_loading(self):
+        self._queue_metadata_layout(0.025)
         _player_likes_ensure_and_tune(self)
         _player_likes_reset_on_change(self)
         Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
