@@ -1051,9 +1051,7 @@ class AudioPlayerScreen(Screen):
             return True
         try:
             self._video_player = AndroidVideoPlayer()
-            self._video_player.set_tap_callback(
-                lambda zone="center": Clock.schedule_once(lambda dt: self._handle_video_surface_tap(zone), 0)
-            )
+            self._video_player.set_tap_callback(self._native_video_tap)
             self._video_player.set_seek_callback(
                 lambda pos_ms: Clock.schedule_once(lambda dt: self.seek(float(pos_ms) / 1000.0), 0)
             )
@@ -1428,6 +1426,92 @@ class AudioPlayerScreen(Screen):
 
     def toggle_video_controls(self):
         self._set_video_controls_visible(not self._video_controls_visible)
+
+    def _native_video_tap(self, zone="center"):
+        """Handle SurfaceView ACTION_DOWN with no Python Clock playback delay.
+
+        Java transport owns the three actual ImageButtons. This fallback
+        handles taps on the video picture itself and defers only UI updates.
+        """
+        try:
+            if not self._video_controls_visible:
+                Clock.schedule_once(lambda _dt: self._set_video_controls_visible(True), 0)
+                return
+
+            zone = str(zone or "center")
+            now = time.monotonic()
+            last_ts = float(getattr(self, "_pymusic_native_touch_ts", 0.0) or 0.0)
+            if (
+                zone == getattr(self, "_pymusic_native_touch_zone", "")
+                and now - last_ts < 0.10
+            ):
+                return
+            self._pymusic_native_touch_ts = now
+            self._pymusic_native_touch_zone = zone
+            player = getattr(ma, "android_player", None)
+            prepared = bool(player is not None and ma._is_prepared())
+            vp = self._video_player
+
+            if zone == "center":
+                if not prepared:
+                    Clock.schedule_once(lambda _dt: self.video_toggle_play(), 0)
+                    return
+                playing = bool(player.isPlaying())
+                if playing:
+                    self._resume_pos_ms = int(player.getCurrentPosition() or 0)
+                    self._mark_java_transport(True)
+                    self._user_paused = True
+                    self._playback_desired = False
+                    player.pause()
+                    ma.is_playing = False
+                    if vp and vp.player and vp._prepared and vp.player.isPlaying():
+                        vp.player.pause()
+                else:
+                    self._mark_java_transport(False)
+                    self._user_paused = False
+                    self._playback_desired = True
+                    player.start()
+                    ma.is_playing = True
+                    if vp and vp.player and vp._prepared and not vp.player.isPlaying():
+                        vp.player.start()
+                if vp:
+                    vp.set_native_playing(not playing)
+                Clock.schedule_once(
+                    lambda _dt, state=not playing: self._ui_set_playing(state), 0
+                )
+                Clock.schedule_once(lambda _dt: self._set_video_controls_visible(True), 0)
+                return
+
+            delta = -10000 if zone == "left" else 10000
+            pos = int(player.getCurrentPosition() or 0) if prepared else 0
+            target = max(0, pos + delta)
+            if prepared:
+                try:
+                    player.seekTo(target)
+                except Exception:
+                    ma._mp_seek_to(target)
+            self._resume_pos_ms = target
+            if vp is not None:
+                if vp.player and vp._prepared:
+                    try:
+                        vp.player.seekTo(target, 3)
+                    except Exception:
+                        vp.player.seekTo(target)
+                else:
+                    vp._pending_start_pos_ms = target
+                duration = int(player.getDuration() or 0) if prepared else 0
+                vp.set_native_progress(target, max(1, duration))
+
+            def update_ui(_dt):
+                try:
+                    self.ids.current_time_label.text = self._fmt_ms(target)
+                    self.ids.progress_slider.value = target / 1000.0
+                    self._set_video_controls_visible(True)
+                except Exception:
+                    pass
+            Clock.schedule_once(update_ui, 0)
+        except Exception as exc:
+            print("[VIDEO-CTRL-FAST] fallback tap failed:", exc)
 
     def _handle_video_surface_tap(self, zone: str = "center"):
         zone = str(zone or "center")
