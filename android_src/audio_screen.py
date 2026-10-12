@@ -860,6 +860,8 @@ class Playlist:
 class AudioPlayerScreen(Screen):
     """Аудіо через Android MediaPlayer, відео через AndroidVideoPlayer (SurfaceView)."""
 
+    _pymusic_final_player_v2 = True
+
     _ms_next = None
     _ms_prev = None
     _ms_toggle = None
@@ -1307,6 +1309,8 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(_do_open, 0)
 
     def handle_app_resume(self):
+        for delay in (0.0, 0.06, 0.18, 0.40):
+            Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
         self._app_in_background = False
         self._last_bg_resume_ts = time.time()
         self._last_watch_pos = None
@@ -3585,6 +3589,8 @@ class AudioPlayerScreen(Screen):
 
     def _auto_video_for_current(self, gen: int, sync_start: bool = False):
         """Автоматичний показ YouTube-відео для поточного треку."""
+        # Audio is the master clock; loading video must never hold up audio.
+        sync_start = False
         if self._app_in_background or not self._is_screen_active():
             return
         if not self._is_current_gen(gen) or not self._playback_desired:
@@ -3714,84 +3720,21 @@ class AudioPlayerScreen(Screen):
             )
 
     def _start_synced_audio_and_video(self, gen: int, vurl: str, vheaders: dict):
-        """Старт аудіо і відео максимально одночасно."""
-        if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
-            return
-
-        if not self._ensure_video_player():
-            self._start_audio_only_after_prepared(gen)
-            return
-
+        """Legacy caller: start audio now, schedule independent muted video."""
         try:
-            ma.acquire_wake_lock()
-            self._request_af()
+            already_playing = bool(ma.android_player and ma.android_player.isPlaying())
         except Exception:
-            pass
-
-        try:
-            Clock.schedule_once(self._align_video_to_thumb, 0)
-        except Exception:
-            pass
-
-        try:
-            if self._video_player:
-                self._play_video_if_screen_active(vurl, vheaders or {})
-        except Exception as e:
-            try:
-                print("[VIDEO] synced start error:", e)
-            except Exception:
-                pass
-
-        try:
-            dur = ma.android_player.getDuration() if ma.android_player else 0
-
-            # якщо ми відновлюємось - стрибнемо в останню позицію (не дуже близько до кінця)
-            try:
-                if self._resume_pos_ms and dur and self._resume_pos_ms < (dur - 5000):
-                    ma._mp_seek_to(int(self._resume_pos_ms))
-                    print(f"[AUDIO] resume from {self._resume_pos_ms} ms")
-            except Exception:
-                pass
-
-            ma._mp_start()
-
-            try:
-                ma.set_media_metadata(
-                    title=self._title,
-                    artist=self._channel,
-                    duration_ms=int(dur or 0),
-                    art_path=self._art_path,
-                    art_uri=self._thumb,
-                    avatar_path=self._channel_thumb_local,
-                )
-            except Exception:
-                pass
-
-            try:
-                ma.update_media_session_state(
-                    True,
-                    position_ms=int(self._resume_pos_ms or 0),
-                    duration_ms=int(dur or 0),
-                    can_seek=True,
-                )
-                token2 = self._media_session.getSessionToken() if self._media_session else None
-                ma.create_or_update_media_notification(
-                    title=self._title or "Playing",
-                    subtitle=self._channel or "YouTube",
-                    is_playing=True,
-                    session_token=token2,
-                    large_icon_path=self._channel_thumb_local or self._art_path,
-                )
-            except Exception:
-                pass
-
-            self._start_completion_guard(gen, int(dur or 0))
-            Clock.schedule_once(lambda dt: self._ui_set_playing(True), 0)
-            self._schedule_progress()
-            self._schedule_expiry()
-            self._prefetch_next_track_audio()
-        except Exception as e:
-            ma.log(f"sync start err: {e}")
+            already_playing = False
+        if not already_playing:
+            threading.Thread(
+                target=lambda: self._start_audio_only_after_prepared(gen),
+                name="pymusic-audio-first-start",
+                daemon=True,
+            ).start()
+        Clock.schedule_once(
+            lambda _dt: self._play_video_if_screen_active(vurl, vheaders or {}),
+            0,
+        )
 
     def _start_audio_only_after_prepared(self, gen: int):
         """Фолбек: якщо відео не вдалось або вимкнене - стартуємо тільки аудіо."""
