@@ -33,12 +33,10 @@ from recent_utils import load_recent, save_recent
 # intentionally excluded; playlist_scroll owns only playlist gestures.
 try:
     import pymusic_runtime_patch as _player_hotfix
-    import final_player_fix as _final_player_fix
     _base_ready = bool(_player_hotfix._patch_audio_screen())
-    _final_ready = bool(_final_player_fix._patch_final_player()) if _base_ready else False
     print(
         f"[PLAYER-BOOT] base={_base_ready} playlist=core-AudioPlayerScreen "
-        f"final={_final_ready}"
+        f"final=core-AudioPlayerScreen"
     )
 except Exception as exc:
     print("[PLAYER-BOOT] initialization error:", repr(exc))
