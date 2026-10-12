@@ -73,16 +73,8 @@ try:
 except Exception as exc:
     print("[VIDEO-CTRL-FAST] synchronous install failed:", exc)
 
-# Final transport layer: the visible rewind/play/forward ImageButtons execute
-# MediaPlayer commands directly inside Java on ACTION_DOWN. Python only mirrors
-# state later for notifications and the rest of the Kivy UI.
-try:
-    from native_java_transport_fix import install_native_java_transport_fix
-
-    if not install_native_java_transport_fix():
-        print("[JAVA-CTRL] synchronous install returned false")
-except Exception as exc:
-    print("[JAVA-CTRL] synchronous install failed:", exc)
+# AndroidVideoPlayer binds the three Java transport buttons directly;
+# AudioPlayerScreen polls the bridge's state without monkey-patching methods.
 
 # Native timeline/SeekBar styling belongs to AndroidVideoPlayer itself.
 # No second Android OnSeekBarChangeListener installation is needed.
