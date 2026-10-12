@@ -152,8 +152,10 @@ class AndroidVideoPlayer:
         @java_method('(Landroid/view/View;Landroid/view/MotionEvent;)Z')
         def onTouch(self, view, event):
             try:
-                action = int(event.getAction())
-                if action != 1:  # MotionEvent.ACTION_UP
+                # Fire directly on ACTION_DOWN for responsive video taps.
+                # ACTION_UP/CANCEL are consumed but never duplicate transport.
+                action = int(event.getAction()) & 0xFF
+                if action != 0:
                     return True
                 frame = getattr(self._owner, "_frame_bounds", None)
                 if frame:
@@ -440,7 +442,25 @@ class AndroidVideoPlayer:
         except Exception:
             pass
 
+    def _tune_native_transport_spacing(self):
+        """Give the three native ImageButtons independent touch targets."""
+        controls = list(getattr(self, "_controls_touch_views", []) or [])
+        if len(controls) < 3:
+            return
+        frame = getattr(self, "_frame_bounds", None)
+        frame_w = int(frame[2]) if frame else 540
+        margin = max(18, min(38, int(max(0, frame_w - 324) / 6)))
+        for button in controls[:3]:
+            try:
+                params = button.getLayoutParams()
+                if params is not None:
+                    params.setMargins(margin, 0, margin, 0)
+                    button.setLayoutParams(params)
+            except Exception:
+                pass
+
     def _bring_controls_or_surface_front(self):
+        self._tune_native_transport_spacing()
         try:
             ov = self.controls_overlay
             if ov is not None and self._controls_visible:
