@@ -5,45 +5,8 @@ import json
 import threading
 import time
 
-# Restore the modern player runtime/metadata/recommendations patch chain.
-# Only the experimental whole-page scrolling rewrite is disabled: the
-# playlist owns a bounded MDScrollView as in the user-verified APK.
-try:
-    import pymusic_runtime_patch as _player_hotfix
-    import final_player_fix as _final_player_fix
-
-    def _install_player_hotfix_when_ready():
-        ready = {"base": False, "final": False}
-        for attempt in range(400):
-            if not ready["base"]:
-                try:
-                    ready["base"] = bool(_player_hotfix._patch_audio_screen())
-                    if ready["base"]:
-                        print("[HOTFIX] loader installed: base")
-                except Exception as exc:
-                    print("[HOTFIX] base install failed:", exc)
-            if ready["base"] and not ready["final"]:
-                try:
-                    ready["final"] = bool(_final_player_fix._patch_final_player())
-                    if ready["final"]:
-                        print("[HOTFIX] loader installed: final")
-                except Exception as exc:
-                    print("[HOTFIX] final install failed:", exc)
-            if all(ready.values()):
-                print("[HOTFIX] loader ready", ready)
-                return
-            time.sleep(0.05)
-        print("[HOTFIX] loader timeout", ready)
-
-    threading.Thread(
-        target=_install_player_hotfix_when_ready,
-        name="pymusic-player-hotfix",
-        daemon=True,
-    ).start()
-
-except Exception as exc:
-    print("[HOTFIX] loader failed:", exc)
-
+# Playback/UI methods are initialized by core AudioPlayerScreen and main.py.
+# Recent data storage has no startup side effects or class patch installers.
 
 RECENT_PATH = "recent.json"
 FAVORITES_PATH = "favorites.json"
