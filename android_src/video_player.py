@@ -186,10 +186,16 @@ class AndroidVideoPlayer:
         @java_method('(Landroid/widget/SeekBar;)V')
         def onStartTrackingTouch(self, seek_bar):
             self._owner._native_seek_dragging = True
+            self._owner._style_youtube_seekbar(seek_bar)
+            try:
+                self._owner._set_native_time_text(current_ms=int(seek_bar.getProgress() or 0))
+            except Exception:
+                pass
 
         @java_method('(Landroid/widget/SeekBar;)V')
         def onStopTrackingTouch(self, seek_bar):
             self._owner._native_seek_dragging = False
+            self._owner._style_youtube_seekbar(seek_bar)
             try:
                 cb = self._owner._native_seek_callback
                 if callable(cb):
@@ -218,6 +224,11 @@ class AndroidVideoPlayer:
         return f"{minutes}:{seconds:02d}"
 
     def _set_native_time_text(self, current_ms=None, total_ms=None):
+        # Keep the most recent values until Android has created the TextViews.
+        if current_ms is not None:
+            self._pymusic_timeline_current_ms = max(0, int(current_ms or 0))
+        if total_ms is not None:
+            self._pymusic_timeline_total_ms = max(0, int(total_ms or 0))
         try:
             if current_ms is not None and self._native_current_time is not None:
                 self._native_current_time.setText(String(self._format_time_ms(int(current_ms or 0))))
@@ -307,59 +318,97 @@ class AndroidVideoPlayer:
             except Exception:
                 pass
 
-    def _style_youtube_seekbar(self, seek_bar):
-        """Thin red YouTube-like native SeekBar for the SurfaceView overlay."""
+    @staticmethod
+    def _native_dp_px(activity, dp_value):
         try:
-            bg = GradientDrawable()
-            bg.setShape(GradientDrawable.RECTANGLE)
-            bg.setColor(Color.argb(95, 255, 255, 255))
-            bg.setCornerRadius(4.0)
+            density = float(activity.getResources().getDisplayMetrics().density or 1.0)
+        except Exception:
+            density = 1.0
+        return max(1, int(round(float(dp_value) * density)))
+
+    def _style_youtube_seekbar(self, seek_bar):
+        """Use Android's own track, red tint, and a small red drag thumb."""
+        try:
+            activity = PythonActivity.mActivity
+            seek_bar.setProgressTintList(ColorStateList.valueOf(Color.argb(255, 255, 0, 0)))
+            seek_bar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.argb(145, 225, 225, 225)))
             try:
-                bg.setSize(1, 4)
+                seek_bar.setSecondaryProgressTintList(ColorStateList.valueOf(Color.argb(120, 255, 255, 255)))
             except Exception:
                 pass
-
-            progress = GradientDrawable()
-            progress.setShape(GradientDrawable.RECTANGLE)
-            progress.setColor(Color.argb(255, 255, 0, 0))
-            progress.setCornerRadius(4.0)
-            try:
-                progress.setSize(1, 4)
-            except Exception:
-                pass
-
-            clip = ClipDrawable(progress, Gravity.LEFT, 1)  # ClipDrawable.HORIZONTAL == 1
-            layers = LayerDrawable([bg, clip])
-            try:
-                layers.setId(0, R_id.background)
-                layers.setId(1, R_id.progress)
-            except Exception:
-                pass
-            seek_bar.setProgressDrawable(layers)
-
+            active = bool(getattr(self, "_native_seek_dragging", False))
+            thumb_size = self._native_dp_px(activity, 13 if active else 7)
             thumb = GradientDrawable()
             thumb.setShape(GradientDrawable.OVAL)
             thumb.setColor(Color.argb(255, 255, 0, 0))
-            try:
-                thumb.setSize(16, 16)
-            except Exception:
-                pass
+            thumb.setSize(thumb_size, thumb_size)
             seek_bar.setThumb(thumb)
-            try:
-                seek_bar.setThumbOffset(8)
-                seek_bar.setMinHeight(18)
-                seek_bar.setMaxHeight(18)
-            except Exception:
-                pass
-            seek_bar.setPadding(4, 0, 4, 0)
-        except Exception as e:
-            # Fallback через tint, якщо конкретна прошивка не приймає LayerDrawable.
-            try:
-                seek_bar.setProgressTintList(ColorStateList.valueOf(Color.argb(255, 255, 0, 0)))
-                seek_bar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.argb(90, 255, 255, 255)))
-                seek_bar.setThumbTintList(ColorStateList.valueOf(Color.argb(255, 255, 0, 0)))
-            except Exception:
-                pass
+            seek_bar.setThumbOffset(thumb_size // 2)
+            seek_bar.setSplitTrack(False)
+            hit_height = self._native_dp_px(activity, 32)
+            seek_bar.setMinHeight(hit_height)
+            seek_bar.setMaxHeight(hit_height)
+            seek_bar.setPadding(0, 0, 0, 0)
+            seek_bar.setClickable(True)
+            seek_bar.setFocusable(False)
+            seek_bar.setVisibility(View.VISIBLE)
+            seek_bar.setAlpha(1.0)
+            seek_bar.requestLayout()
+            seek_bar.invalidate()
+        except Exception as exc:
+            print("[VIDEO] native timeline style failed:", exc)
+
+    def _apply_native_timeline(self):
+        """Configure time labels and SeekBar once inside the native overlay."""
+        try:
+            overlay = self.controls_overlay
+            seek_bar = self._native_seek_bar
+            current = self._native_current_time
+            total = self._native_total_time
+            if overlay is None or seek_bar is None:
+                return
+            row = seek_bar.getParent()
+            if row is None:
+                return
+            activity = PythonActivity.mActivity
+            px = self._native_dp_px
+            for label, alpha in ((current, 245), (total, 220)):
+                if label is None:
+                    continue
+                label.setVisibility(View.VISIBLE)
+                label.setAlpha(1.0)
+                label.setTextColor(Color.argb(alpha, 255, 255, 255))
+                label.setTextSize(12.0)
+                label.setGravity(Gravity.CENTER)
+                label.setShadowLayer(3.0, 0.0, 1.0, Color.argb(220, 0, 0, 0))
+            if current is not None:
+                current.setLayoutParams(LinearLayoutLayoutParams(px(activity, 46), px(activity, 32)))
+            seek_bar.setLayoutParams(LinearLayoutLayoutParams(0, px(activity, 32), 1.0))
+            if total is not None:
+                total.setLayoutParams(LinearLayoutLayoutParams(px(activity, 46), px(activity, 32)))
+            row.setOrientation(LinearLayout.HORIZONTAL)
+            row.setGravity(Gravity.CENTER_VERTICAL)
+            row.setPadding(px(activity, 4), 0, px(activity, 4), 0)
+            row.setVisibility(View.VISIBLE)
+            row.setAlpha(1.0)
+            params = row.getLayoutParams()
+            if params is not None:
+                params.width = FrameLayoutLayoutParams.MATCH_PARENT
+                params.height = px(activity, 36)
+                params.gravity = Gravity.BOTTOM
+                params.bottomMargin = 0
+                row.setLayoutParams(params)
+            self._style_youtube_seekbar(seek_bar)
+            self._set_native_time_text(
+                current_ms=int(getattr(self, "_pymusic_timeline_current_ms", 0) or 0),
+                total_ms=int(getattr(self, "_pymusic_timeline_total_ms", 0) or 0),
+            )
+            row.bringToFront()
+            overlay.bringToFront()
+            row.requestLayout()
+            overlay.requestLayout()
+        except Exception as exc:
+            print("[VIDEO] native timeline apply failed:", exc)
 
     @run_on_ui_thread
     def set_native_playing(self, playing: bool):
@@ -397,6 +446,7 @@ class AndroidVideoPlayer:
         try:
             if self.controls_overlay is not None:
                 self._bind_controls_tap()
+                self._apply_native_timeline()
                 # A previously queued native visibility update may have run
                 # before this view existed. Reconcile with the stored state.
                 try:
@@ -508,6 +558,7 @@ class AndroidVideoPlayer:
             overlay.setVisibility(View.VISIBLE if self._controls_visible else 4)
             self.controls_overlay = overlay
             self._bind_controls_tap()
+            self._apply_native_timeline()
             self._bring_controls_or_surface_front()
         except Exception as e:
             print("[VIDEO] controls overlay create err:", e)
@@ -1038,6 +1089,8 @@ class AndroidVideoPlayer:
                     except Exception:
                         pass
                 self._bring_controls_or_surface_front()
+                if visible:
+                    self._apply_native_timeline()
         except Exception as e:
             print("[VIDEO] controls visible err:", e)
 
