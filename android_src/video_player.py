@@ -48,13 +48,20 @@ R_id = autoclass("android.R$id")
 String = autoclass("java.lang.String")
 
 
+_NATIVE_BRIDGE_UNRESOLVED = object()
+_native_bridge_cache = _NATIVE_BRIDGE_UNRESOLVED
+
+
 def _native_transport_bridge():
-    """Return the built-in Java transport bridge, if packaged in this APK."""
-    try:
-        return autoclass("org.koteuka404.pymusic.NativeTransportBridge")
-    except Exception as exc:
-        print("[JAVA-CTRL] unavailable:", exc)
-        return None
+    """Cache Java class lookup, including unsupported/non-Java environments."""
+    global _native_bridge_cache
+    if _native_bridge_cache is _NATIVE_BRIDGE_UNRESOLVED:
+        try:
+            _native_bridge_cache = autoclass("org.koteuka404.pymusic.NativeTransportBridge")
+        except Exception as exc:
+            _native_bridge_cache = None
+            print("[JAVA-CTRL] unavailable:", exc)
+    return _native_bridge_cache
 
 
 class AndroidVideoPlayer:
