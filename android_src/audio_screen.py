@@ -523,6 +523,26 @@ def _player_likes_reset_on_change(owner):
 
 
 
+def _pymusic_mix_video_url(value):
+    """Treat YouTube RD/start_radio watch URLs as a single video."""
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        host = (parsed.netloc or "").lower()
+        if "youtube.com" not in host and "youtu.be" not in host:
+            return None
+        query = urllib.parse.parse_qs(parsed.query or "")
+        playlist_id = str((query.get("list") or [""])[0] or "")
+        radio = str((query.get("start_radio") or [""])[0] or "")
+        video_id = str((query.get("v") or [""])[0] or "")
+        if not video_id and "youtu.be" in host:
+            video_id = (parsed.path or "").strip("/").split("/")[0]
+        if (playlist_id.upper().startswith("RD") or radio == "1") and video_id:
+            return f"https://www.youtube.com/watch?v={video_id}", video_id
+    except Exception:
+        pass
+    return None
+
+
 # ==================== STABLE LOCAL THUMBNAIL WIDGET ====================
 
 class ThumbImage(Widget):
@@ -1061,6 +1081,31 @@ class AudioPlayerScreen(Screen):
             pass
 
         self._bind_playlist_scroll_input()
+        self._configure_player_scroll_bounds()
+
+    def _configure_player_scroll_bounds(self):
+        """Clamp player scroll without a runtime class/method patch."""
+        scroll = self.ids.get("player_details_scroll")
+        if scroll is None:
+            return
+        try:
+            from kivy.effects.scroll import ScrollEffect
+            scroll.effect_cls = ScrollEffect
+        except Exception:
+            pass
+        try:
+            scroll.always_overscroll = False
+            scroll.smooth_scroll_end = 0
+            scroll.do_scroll_x = False
+            scroll.do_scroll_y = True
+        except Exception:
+            pass
+        if not getattr(scroll, "_pymusic_bounds_bound", False):
+            def clamp(widget, *_args):
+                widget.scroll_y = max(0.0, min(1.0, float(widget.scroll_y)))
+            scroll.bind(on_scroll_stop=clamp)
+            scroll._pymusic_bounds_bound = True
+        scroll.scroll_y = max(0.0, min(1.0, float(scroll.scroll_y)))
 
     def _bind_playlist_scroll_input(self):
         """Own playlist gestures directly, without a runtime patch installer.
@@ -1771,6 +1816,10 @@ class AudioPlayerScreen(Screen):
         clear_playlist=True,
         hard_reset: bool = False,
     ):
+        mix = _pymusic_mix_video_url(video_url)
+        if mix is not None:
+            video_url = mix[0]
+            clear_playlist = True
         self._mark_java_transport(False)
         Clock.schedule_once(lambda _dt: self._register_java_transport_players(), 0)
         ui_allowed = not bool(getattr(self, "_app_in_background", False))
