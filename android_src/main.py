@@ -16,7 +16,7 @@ from kivymd.app import MDApp
 from kivy.lang import Builder
 from kivy.uix.screenmanager import ScreenManager
 from youtube_search import fetch_youtube_results, fetch_youtube_continuation
-from audio_screen import AudioPlayerScreen
+from audio_screen import AudioPlayerScreen, _pymusic_mix_video_url
 from kivymd.uix.screen import MDScreen
 from jnius import autoclass
 from functools import partial
@@ -323,6 +323,14 @@ class YoutubeSearchScreen(MDScreen):
         threading.Thread(target=self._fetch_results_thread, args=(query,), daemon=True).start()
 
     def _fetch_results_thread(self, query):
+        mix = _pymusic_mix_video_url(query)
+        if mix is not None:
+            canonical, video_id = mix
+            Clock.schedule_once(
+                lambda _dt: self.play_audio(canonical, f"Video {video_id}", "", ""),
+                0,
+            )
+            return
         video_id = None
         playlist_id = None
         normalized_watch_url = None
@@ -862,6 +870,18 @@ class YoutubeWebScreen(MDScreen):
     def _webview_play(self, url):
         try:
             if not url:
+                return
+            mix = _pymusic_mix_video_url(url)
+            if mix is not None:
+                canonical, _video_id = mix
+                audio = self.manager.get_screen("audio")
+                audio.play_audio(canonical, clear_playlist=True)
+                app = App.get_running_app()
+                root = getattr(app, "root", None)
+                if root is not None and hasattr(root, "open_audio"):
+                    root.open_audio()
+                elif self.manager is not None:
+                    self.manager.current = "audio"
                 return
             # якщо це watch/browse з playlist/album - відкриваємо чергу і стартуємо з поточного відео
             try:
