@@ -62,16 +62,8 @@ except Exception as exc:
 # Kivy fallback control size, spacing and on_press actions live in
 # youtube_gui.kv. No runtime method wrapper is needed here.
 
-# Keep the previous Python native path as a fallback for taps on the transparent
-# video surface itself. The actual three ImageButtons are rebound below to a
-# Java-only transport path, so Python/GIL latency cannot delay pause/seek.
-try:
-    from native_video_controls_fast_fix import install_native_video_controls_fast_fix
-
-    if not install_native_video_controls_fast_fix():
-        print("[VIDEO-CTRL-FAST] synchronous install returned false")
-except Exception as exc:
-    print("[VIDEO-CTRL-FAST] synchronous install failed:", exc)
+# SurfaceView fallback ACTION_DOWN and button spacing are implemented by
+# AndroidVideoPlayer and AudioPlayerScreen, with Java transport for buttons.
 
 # AndroidVideoPlayer binds the three Java transport buttons directly;
 # AudioPlayerScreen polls the bridge's state without monkey-patching methods.
