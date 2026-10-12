@@ -48,6 +48,15 @@ R_id = autoclass("android.R$id")
 String = autoclass("java.lang.String")
 
 
+def _native_transport_bridge():
+    """Return the built-in Java transport bridge, if packaged in this APK."""
+    try:
+        return autoclass("org.koteuka404.pymusic.NativeTransportBridge")
+    except Exception as exc:
+        print("[JAVA-CTRL] unavailable:", exc)
+        return None
+
+
 class AndroidVideoPlayer:
 
     def __init__(self):
@@ -257,27 +266,35 @@ class AndroidVideoPlayer:
             print("[VIDEO-TOUCH] surface tap binding failed:", exc)
 
     def _bind_controls_tap(self):
-        """Only real control buttons take native touch input.
+        """Android ImageButtons use direct Java ACTION_DOWN transport.
 
-        The Java transport layer later takes ownership of the three buttons.
-        This Python fallback never attaches listeners to the full-frame
-        transparent overlay or to its background bar.
+        Do not bind the full-frame transparent overlay: it must never cover
+        Kivy's playlist gestures. If the Java bridge is unavailable, fall back
+        to the button-only Python listener rather than breaking playback.
         """
         try:
-            if self._tap_listener is None:
-                self._tap_listener = self._OnTouchListener(self)
             controls = list(getattr(self, "_controls_touch_views", []) or [])
-            for button in controls[:3]:
-                if button is not None:
-                    button.setClickable(True)
-                    button.setOnTouchListener(self._tap_listener)
+            bridge = _native_transport_bridge()
+            if bridge is not None:
+                for index, button in enumerate(controls[:3]):
+                    if button is not None:
+                        bridge.bindTransportButton(button, (-1, 0, 1)[index])
+            else:
+                if self._tap_listener is None:
+                    self._tap_listener = self._OnTouchListener(self)
+                for button in controls[:3]:
+                    if button is not None:
+                        button.setClickable(True)
+                        button.setOnTouchListener(self._tap_listener)
             for frame in [self.controls_overlay, *controls[3:]]:
                 if frame is not None:
                     frame.setOnTouchListener(None)
                     frame.setClickable(False)
                     frame.setLongClickable(False)
-        except Exception as e:
-            print("[VIDEO] bind native button fallback err:", e)
+                    frame.setFocusable(False)
+            self._bind_surface_tap()
+        except Exception as exc:
+            print("[JAVA-CTRL] bind controls failed:", exc)
 
     def _style_control_text(self, tv, text: str):
         try:
