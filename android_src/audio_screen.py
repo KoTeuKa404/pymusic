@@ -627,6 +627,12 @@ class ThumbImage(Widget):
 
     def set_local_file(self, path: str):
         try:
+            if (
+                path
+                and str(getattr(self, "source", "") or "") == str(path)
+                and getattr(self, "texture", None) is not None
+            ):
+                return True
             if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
                 self.clear_image()
                 return False
