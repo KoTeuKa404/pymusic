@@ -40,7 +40,7 @@ from recent_utils import (
 )
 
 # новий імпорт замість локального класу
-from video_player import AndroidVideoPlayer
+from video_player import AndroidVideoPlayer, _native_transport_bridge
 
 
 # Integrated like statistics and channel-row layout.
@@ -931,8 +931,100 @@ class AudioPlayerScreen(Screen):
         self._similar_render_gen = 0
         self._playlist_collapsed = False
         self._similar_collapsed = False
+        self._initialize_java_transport()
 
     # ==================== lifecycle ====================
+
+    def _initialize_java_transport(self):
+        """Start native playback state synchronization without class wrappers."""
+        self._pymusic_java_audio_ref = None
+        self._pymusic_java_video_ref = None
+        bridge = _native_transport_bridge()
+        try:
+            self._pymusic_java_state_version = int(bridge.getStateVersion()) if bridge else 0
+        except Exception:
+            self._pymusic_java_state_version = 0
+        self._pymusic_java_transport_ev = Clock.schedule_interval(
+            self._sync_java_transport_state, 0.10
+        )
+        Clock.schedule_once(lambda _dt: self._register_java_transport_players(), 0)
+
+    def _register_java_transport_players(self):
+        bridge = _native_transport_bridge()
+        if bridge is None:
+            return
+        try:
+            audio = getattr(ma, "android_player", None)
+            if audio is not getattr(self, "_pymusic_java_audio_ref", None):
+                bridge.setAudioPlayer(audio)
+                self._pymusic_java_audio_ref = audio
+        except Exception:
+            pass
+        try:
+            vp = self._video_player
+            native = getattr(vp, "player", None) if vp is not None else None
+            if native is not getattr(self, "_pymusic_java_video_ref", None):
+                bridge.setVideoPlayer(native)
+                self._pymusic_java_video_ref = native
+        except Exception:
+            pass
+
+    def _mark_java_transport(self, paused):
+        bridge = _native_transport_bridge()
+        if bridge is not None:
+            try:
+                bridge.markPaused() if paused else bridge.markPlaying()
+            except Exception:
+                pass
+
+    def _sync_java_transport_state(self, _dt):
+        """Mirror native ACTION_DOWN commands to Python after Java executes."""
+        bridge = _native_transport_bridge()
+        if bridge is None:
+            return True
+        self._register_java_transport_players()
+        try:
+            version = int(bridge.getStateVersion())
+            previous = int(getattr(self, "_pymusic_java_state_version", version) or 0)
+            if version == previous:
+                self._mark_java_transport(bool(getattr(self, "_user_paused", False)))
+                return True
+            self._pymusic_java_state_version = version
+            event = int(bridge.getLastEvent())
+        except Exception:
+            return True
+
+        if event == 2:
+            self._user_paused = True
+            self._playback_desired = False
+            ma.is_playing = False
+            try:
+                if ma.android_player is not None:
+                    self._resume_pos_ms = int(ma.android_player.getCurrentPosition() or 0)
+            except Exception:
+                pass
+            self._ui_set_playing(False)
+        elif event == 1:
+            self._user_paused = False
+            self._playback_desired = True
+            ma.is_playing = True
+            self._ui_set_playing(True)
+        elif event in (3, 4):
+            try:
+                target = max(0, int(bridge.getLastTargetMs()))
+                self._resume_pos_ms = target
+                self.ids.current_time_label.text = self._fmt_ms(target)
+                self.ids.progress_slider.value = float(target) / 1000.0
+                if self._video_player is not None:
+                    duration = int(ma.android_player.getDuration() or 0) if ma.android_player else 0
+                    self._video_player.set_native_progress(target, max(1, duration))
+            except Exception:
+                pass
+        try:
+            self._set_video_controls_visible(True)
+        except Exception:
+            pass
+        return True
 
     def _ensure_video_player(self) -> bool:
         if self._video_player is not None:
@@ -946,6 +1038,7 @@ class AudioPlayerScreen(Screen):
                 lambda pos_ms: Clock.schedule_once(lambda dt: self.seek(float(pos_ms) / 1000.0), 0)
             )
             print("[VIDEO] AndroidVideoPlayer created")
+            Clock.schedule_once(lambda _dt: self._register_java_transport_players(), 0)
             return True
         except Exception as e:
             ma.log(f"[VIDEO] init err: {e}")
@@ -1370,6 +1463,14 @@ class AudioPlayerScreen(Screen):
     # ==================== keys ====================
 
     def _background_tick(self, dt):
+        # Native Java may pause before the next Python state mirror tick.
+        bridge = _native_transport_bridge()
+        try:
+            if bridge is not None and bool(bridge.isUserPaused()):
+                self._user_paused = True
+                self._playback_desired = False
+        except Exception:
+            pass
         # працює навіть у фоні
         try:
             if ma.android_player and ma._is_prepared():
@@ -1670,6 +1771,8 @@ class AudioPlayerScreen(Screen):
         clear_playlist=True,
         hard_reset: bool = False,
     ):
+        self._mark_java_transport(False)
+        Clock.schedule_once(lambda _dt: self._register_java_transport_players(), 0)
         ui_allowed = not bool(getattr(self, "_app_in_background", False))
         self._ensure_media_session()
         same_active_url = bool(
@@ -4416,6 +4519,7 @@ class AudioPlayerScreen(Screen):
         self.toggle_repeat()
 
     def _pause_playback(self):
+        self._mark_java_transport(True)
         self._user_paused = True
         self._playback_desired = False
         try:
@@ -4434,6 +4538,7 @@ class AudioPlayerScreen(Screen):
         self._ui_set_playing(False)
 
     def _resume_playback(self):
+        self._mark_java_transport(False)
         self._user_paused = False
         self._playback_desired = True
         try:
@@ -4482,6 +4587,7 @@ class AudioPlayerScreen(Screen):
     # ==================== stop / cleanup ====================
 
     def stop_audio(self, *a):
+        self._mark_java_transport(True)
         self._playback_desired = False
         try:
             if self._update_ev:
