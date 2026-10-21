@@ -220,33 +220,7 @@ def _patch_related_loader(media) -> None:
     print("[FAST-SWITCH-V9] related loading moved behind audio startup")
 
 
-def _patch_comment_loader(media) -> None:
-    try:
-        import current_video_related_fix as current
-    except Exception:
-        return
-
-    if bool(getattr(current, "_pymusic_comments_priority_v9", False)):
-        return
-
-    old_fetch = getattr(current, "_fetch_comments", None)
-    if not callable(old_fetch):
-        return
-
-    def comments_after_audio(video_url: str, limit: int = 3):
-        if not _wait_for_audio_priority(media, video_url, timeout=6.0):
-            return [], None
-        if not _request_is_current(video_url):
-            return [], None
-        try:
-            return old_fetch(video_url, limit)
-        except BaseException as exc:
-            print("[FAST-SWITCH-V9] comments stopped safely:", exc)
-            return [], None
-
-    current._fetch_comments = comments_after_audio
-    current._pymusic_comments_priority_v9 = True
-    print("[FAST-SWITCH-V9] comments moved behind audio startup")
+# Comments are managed by the core AudioPlayerScreen worker.
 
 
 def _install_now() -> bool:
@@ -278,7 +252,6 @@ def _install_now() -> bool:
         media = audio_screen.ma
         _patch_media_release(media)
         _patch_related_loader(media)
-        _patch_comment_loader(media)
 
         old_play_audio = cls.play_audio
         old_metadata = cls._ensure_metadata_async
