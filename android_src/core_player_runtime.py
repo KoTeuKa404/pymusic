@@ -43,7 +43,7 @@ def install_core_player_fix() -> bool:
         Clock = audio_screen.Clock
         media = audio_screen.ma
         old_safe_video = ydlh.safe_extract_video_info
-        old_set_video_mode = screen_cls._set_video_mode
+        old_set_video_mode = screen_cls._set_video_mode_core
         old_prefetch_next = getattr(screen_cls, "_prefetch_next_track_audio", None)
 
         def get_cached_muxed(video_url: str):
@@ -467,9 +467,10 @@ def install_core_player_fix() -> bool:
             return result
 
         screen_cls._play_video_if_screen_active = play_video_core
-        screen_cls._set_video_mode = set_video_mode_core
-        if callable(old_prefetch_next):
-            screen_cls._prefetch_next_track_audio = prefetch_next_with_muxed
+        # AudioPlayerScreen now owns the seamless video->audio handoff and
+        # screen-off audio-only prefetch. Plug muxed mode into its core slot
+        # instead of overwriting either public method at import time.
+        screen_cls._set_video_mode_core = set_video_mode_core
         screen_cls._pymusic_core_av_master_v4 = True
         _INSTALLED = True
         print("[CORE-V4] fast muxed AV handoff installed")
