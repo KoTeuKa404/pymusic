@@ -557,6 +557,18 @@ def _request_player_layout(widget) -> None:
     except Exception:
         pass
 
+def _player_set_audio_volume(audio, value: float) -> None:
+    try:
+        ma._mp_set_volume(float(value))
+        return
+    except Exception:
+        pass
+    try:
+        if audio is not None:
+            audio.setVolume(float(value), float(value))
+    except Exception:
+        pass
+
 # ==================== STABLE LOCAL THUMBNAIL WIDGET ====================
 
 class ThumbImage(Widget):
@@ -1752,7 +1764,7 @@ class AudioPlayerScreen(Screen):
 
     # ==================== keys ====================
 
-    def _background_tick(self, dt):
+    def _background_tick_base(self, dt):
         # Native Java may pause before the next Python state mirror tick.
         bridge = _native_transport_bridge()
         try:
@@ -1812,6 +1824,39 @@ class AudioPlayerScreen(Screen):
                 )
         except Exception as e:
             print("[BG TICK] err:", e)
+
+    def _background_tick(self, dt):
+        try:
+            if (
+                getattr(self, "_pymusic_muxed_video_master", False)
+                and not getattr(self, "_app_in_background", False)
+            ):
+                audio = getattr(media, "android_player", None)
+                vp = getattr(self, "_video_player", None)
+                native_video = getattr(vp, "player", None) if vp else None
+                if audio is not None and native_video is not None:
+                    audio_pos = int(audio.getCurrentPosition() or 0)
+                    video_pos = int(native_video.getCurrentPosition() or 0)
+                    drift = video_pos - audio_pos
+                    now = time.monotonic()
+                    last_sync = float(
+                        getattr(self, "_pymusic_shadow_sync_ts", 0.0)
+                        or 0.0
+                    )
+                    if abs(drift) > 650 and (now - last_sync) > 2.0:
+                        self._pymusic_shadow_sync_ts = now
+                        try:
+                            ma._mp_seek_to(video_pos)
+                            print(
+                                "[PLAYBACK-V5] shadow clock corrected "
+                                f"drift={drift}"
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return self._background_tick_base( dt)
+
 
     def _maybe_handle_track_end(self, pos: int, dur: int) -> bool:
         try:
@@ -3632,7 +3677,7 @@ class AudioPlayerScreen(Screen):
                 pass
             return None
 
-    def _auto_video_for_current(self, gen: int, sync_start: bool = False):
+    def _auto_video_for_current_base(self, gen: int, sync_start: bool = False):
         """Автоматичний показ YouTube-відео для поточного треку."""
         # Audio is the master clock; loading video must never hold up audio.
         sync_start = False
@@ -3730,6 +3775,51 @@ class AudioPlayerScreen(Screen):
                 Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
 
         threading.Thread(target=_job, daemon=True).start()
+
+    def _auto_video_for_current(self, gen: int, sync_start: bool = False):
+        request_id = int(
+            getattr(self, "_pymusic_video_start_request", 0) or 0
+        ) + 1
+        self._pymusic_video_start_request = request_id
+
+        def worker():
+            deadline = time.monotonic() + (0.9 if not sync_start else 0.35)
+            while time.monotonic() < deadline:
+                if request_id != int(
+                    getattr(self, "_pymusic_video_start_request", -1)
+                ):
+                    return
+                if int(getattr(self, "_load_gen", -1)) != int(gen):
+                    return
+                if getattr(self, "_app_in_background", False):
+                    return
+                if not getattr(self, "_playback_desired", False):
+                    return
+                if getattr(self, "_user_paused", False):
+                    return
+                try:
+                    audio = getattr(media, "android_player", None)
+                    if audio is not None and bool(audio.isPlaying()):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.025)
+
+            if request_id != int(
+                getattr(self, "_pymusic_video_start_request", -1)
+            ):
+                return
+            if int(getattr(self, "_load_gen", -1)) != int(gen):
+                return
+            self._auto_video_for_current_base( gen, sync_start=sync_start)
+
+        # Some resume paths can call this method from Kivy's UI thread.
+        # Never block that thread while waiting for the audio player.
+        if threading.current_thread() is threading.main_thread():
+            threading.Thread(target=worker, daemon=True).start()
+            return None
+        return worker()
+
 
     def _play_embed_if_screen_active(self):
         if not self._is_screen_active() or self._app_in_background or not self._video_enabled:
@@ -4266,7 +4356,7 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
         
-    def _set_video_mode(self, video_on: bool):
+    def _set_video_mode_core(self, video_on: bool):
         """
         video_on = True  -> відео поверх, мініатюра прозора
         video_on = False -> тільки мініатюра, без відео-ряду
@@ -4293,6 +4383,87 @@ class AudioPlayerScreen(Screen):
                     self._video_player.stop()
             except Exception:
                 pass
+
+    def _set_video_mode(self, video_on: bool):
+        if video_on:
+            return self._set_video_mode_core( True)
+
+        was_master = bool(
+            getattr(self, "_pymusic_muxed_video_master", False)
+        )
+        was_pending = bool(
+            getattr(self, "_pymusic_muxed_handoff_pending", False)
+        )
+
+        if was_master or was_pending:
+            self._pymusic_muxed_sync_gen = int(
+                getattr(self, "_pymusic_muxed_sync_gen", 0) or 0
+            ) + 1
+            self._pymusic_muxed_handoff_pending = False
+
+            audio = getattr(media, "android_player", None)
+            vp = getattr(self, "_video_player", None)
+            native_video = getattr(vp, "player", None) if vp else None
+
+            try:
+                audio_pos = int(audio.getCurrentPosition() or 0) if audio else 0
+            except Exception:
+                audio_pos = 0
+            try:
+                video_pos = (
+                    int(native_video.getCurrentPosition() or 0)
+                    if native_video is not None
+                    else 0
+                )
+            except Exception:
+                video_pos = 0
+
+            # Make the already-running shadow audio audible before the
+            # SurfaceView/video player is hidden or stopped.
+            _player_set_audio_volume(audio, 1.0)
+            try:
+                if (
+                    audio is not None
+                    and getattr(self, "_playback_desired", False)
+                    and not getattr(self, "_user_paused", False)
+                    and not bool(audio.isPlaying())
+                ):
+                    audio.start()
+            except Exception:
+                try:
+                    if (
+                        getattr(self, "_playback_desired", False)
+                        and not getattr(self, "_user_paused", False)
+                    ):
+                        ma._mp_start()
+                except Exception:
+                    pass
+
+            # Preserve the continuous audio clock.  Do not overwrite it
+            # with the video position during a screen-off transition.
+            if audio_pos > 0:
+                self._resume_pos_ms = audio_pos
+            elif video_pos > 0:
+                self._resume_pos_ms = video_pos
+
+            try:
+                if native_video is not None:
+                    native_video.setVolume(0.0, 0.0)
+            except Exception:
+                pass
+
+            # Clear these before calling the V4 wrapper.  V4 will then only
+            # hide the video UI and will skip its old seek/restart handoff.
+            self._pymusic_muxed_video_master = False
+            self._pymusic_muxed_handoff_pending = False
+            print(
+                "[PLAYBACK-V5] seamless audio handoff "
+                f"audio={audio_pos} video={video_pos} "
+                f"drift={video_pos - audio_pos}"
+            )
+
+        return self._set_video_mode_core( False)
+
 
     def hide_video_overlay_fast(self):
         self._video_active = False
