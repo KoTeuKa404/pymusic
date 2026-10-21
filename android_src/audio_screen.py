@@ -1272,6 +1272,9 @@ class AudioPlayerScreen(Screen):
 
         self._bind_playlist_scroll_input()
         self._configure_player_scroll_bounds()
+        for delay in (0.0, 0.10, 0.35):
+            Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
+
 
     def _configure_player_scroll_bounds(self):
         """Clamp player scroll without a runtime class/method patch."""
@@ -1527,6 +1530,12 @@ class AudioPlayerScreen(Screen):
                 ).start()
         except Exception:
             pass
+        if _current_video_url_of(self):
+            self._ensure_related_current_v4(force=False)
+            self._current_ensure_comments()
+        for delay in (0.0, 0.12, 0.5):
+            Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
+
 
     def _configure_video_block(self) -> None:
         block = self.ids.get("video_block")
@@ -2290,7 +2299,7 @@ class AudioPlayerScreen(Screen):
                 break
         return changed
 
-    def play_audio(
+    def _play_audio_base(
         self,
         video_url: str,
         title: str = "",
@@ -2478,6 +2487,29 @@ class AudioPlayerScreen(Screen):
         if ui_allowed:
             Clock.schedule_once(self._align_video_to_thumb, 0.5)
         self._ensure_metadata_async(video_url)
+
+    def play_audio(self, video_url, *args, **kwargs):
+        self._current_ensure_state()
+        canonical = _current_canonical_video_url(video_url)
+        self._current_video_url_v4 = canonical
+        self._current_related_url_v4 = ""
+        self._current_auto_next_pending_v4 = False
+        self._current_comments_url_v4 = ""
+        self._current_comments_v4 = []
+        print(f"[CURRENT-V4] current video set url={canonical!r}")
+        result = self._play_audio_base( video_url, *args, **kwargs)
+        final_url = _current_canonical_video_url(getattr(self, "_last_video_url", "") or canonical)
+        if final_url:
+            self._current_video_url_v4 = final_url
+            if not getattr(self, "_last_video_url", None):
+                self._last_video_url = final_url
+        self._ensure_related_current_v4( force=False)
+        if not bool(getattr(self, "_app_in_background", False)):
+            self._current_ensure_comments()
+        for delay in (0.0, 0.10, 0.40):
+            Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
+        return result
+
 
     def _play_playlist_base(
         self,
@@ -3589,7 +3621,7 @@ class AudioPlayerScreen(Screen):
 
         threading.Thread(target=job, name="pymusic-comments-v4", daemon=True).start()
 
-    def _render_similar_ui(self, force: bool = False):
+    def _render_similar_ui_base(self, force: bool = False):
         try:
             header = self.ids.get("similar_header")
             header_row = self.ids.get("similar_header_row")
@@ -3647,6 +3679,10 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
+    def _render_similar_ui(self, force: bool = False):
+        return self._render_current_lower_v4()
+
+
     def _ensure_metadata_async(self, video_url: str):
         _player_likes_ensure_likes_async(self, video_url)
         if not video_url:
@@ -3672,7 +3708,7 @@ class AudioPlayerScreen(Screen):
 
         threading.Thread(target=_job, daemon=True).start()
 
-    def _apply_info_metadata(self, info: dict):
+    def _apply_info_metadata_base(self, info: dict):
         updated = False
         title = info.get("title") or ""
         channel = info.get("channel") or info.get("uploader") or ""
@@ -3728,6 +3764,24 @@ class AudioPlayerScreen(Screen):
         if updated:
             self._publish_media_metadata_now()
             Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
+
+    def _apply_info_metadata(self, info):
+        result = self._apply_info_metadata_base( info)
+        self._current_ensure_state()
+        info_url = _current_canonical_video_url(
+            (info or {}).get("webpage_url")
+            or (info or {}).get("original_url")
+            or ""
+        )
+        if info_url and not _current_video_url_of(self):
+            self._current_video_url_v4 = info_url
+        if not getattr(self, "_related_items", None):
+            self._ensure_related_current_v4( force=True)
+        if not bool(getattr(self, "_app_in_background", False)):
+            self._current_ensure_comments()
+        Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+        return result
+
 
     def _publish_media_metadata_now(self):
         try:
@@ -4970,7 +5024,9 @@ class AudioPlayerScreen(Screen):
                 thumb.opacity = 0.0 if self._video_active else 1.0
         except Exception:
             pass
-        
+        Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+
+
     def _set_video_mode_core(self, video_on: bool):
         """
         video_on = True  -> відео поверх, мініатюра прозора
@@ -5389,6 +5445,8 @@ class AudioPlayerScreen(Screen):
                 btn.source = "ico/icoauto_on.png" if self._auto_skip else "ico/icoauto_off.png"
         except Exception:
             pass
+        Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+
 
     def toggle_favorite(self, *a):
         url = str(self._last_video_url or "")
@@ -5520,7 +5578,7 @@ class AudioPlayerScreen(Screen):
 
     # ==================== media actions ====================
 
-    def _advance_to_next_track_base(self) -> bool:
+    def _advance_to_next_track_playlist_only(self) -> bool:
         try:
             print(
                 f"[AUDIO] advance next playlist_len={len(self.playlist) if self.playlist else 0} index={getattr(self.playlist, 'index', -1)} bg={self._app_in_background}"
@@ -5572,6 +5630,26 @@ class AudioPlayerScreen(Screen):
                 except Exception as exc:
                     print("[PLAYLIST-FIRST-V2] first queued track failed:", exc)
             return bool(self._advance_to_next_track_base())
+
+
+    def _advance_to_next_track_base(self) -> bool:
+        self._current_ensure_state()
+        try:
+            playlist = getattr(self, "playlist", None)
+            if playlist and len(playlist) > 1:
+                return bool(self._advance_to_next_track_playlist_only())
+        except Exception:
+            pass
+        related = list(getattr(self, "_related_items", []) or [])
+        if related:
+            return self._current_play_related_item( related[0])
+        if _current_video_url_of(self):
+            print("[CURRENT-V4] auto-next waiting for related videos")
+            self._playback_desired = True
+            self._user_paused = False
+            self._ensure_related_current_v4( force=True, auto_advance=True)
+            return True
+        return bool(self._advance_to_next_track_playlist_only())
 
 
     def _queue_auto_next(self) -> bool:
