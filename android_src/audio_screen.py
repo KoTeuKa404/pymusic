@@ -3297,7 +3297,7 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 print("[PLAYLIST-APK] renderer failed:", exc)
 
-    def _current_self._current_ensure_state():
+    def _current_ensure_state(self):
         if not hasattr(self, "_current_video_url_v4"):
             self._current_video_url_v4 = ""
         if not hasattr(self, "_current_related_inflight_v4"):
@@ -3315,7 +3315,7 @@ class AudioPlayerScreen(Screen):
         if not hasattr(self, "_current_comments_loading_v4"):
             self._current_comments_loading_v4 = False
 
-    def _current_self._current_get_slot():
+    def _current_get_slot(self):
         """Use the plain similar_list when the player has one real scroll.
 
         The previous similar_scroll (nested MDScrollView) no longer exists
@@ -3359,7 +3359,7 @@ class AudioPlayerScreen(Screen):
             scroll._current_v4_height_guard = True
         return scroll, listing
 
-    def _current_self._current_apply_height( scroll, listing):
+    def _current_apply_height(self, scroll, listing):
         try:
             children = list(getattr(listing, "children", []) or [])
             height = sum(max(0.0, float(getattr(child, "height", 0) or 0)) for child in children)
@@ -3492,7 +3492,7 @@ class AudioPlayerScreen(Screen):
             Clock.schedule_once(lambda _dt, s=scroll, l=listing: self._current_apply_height( s, l), delay)
         print(f"[CURRENT-V4] panel rendered url={url!r} related={len(related)}")
 
-    def _current_self._current_play_related_item( item) -> bool:
+    def _current_play_related_item(self, item) -> bool:
         if not isinstance(item, dict):
             return False
         url = _current_canonical_video_url(item.get("url") or item.get("video_id") or "")
@@ -3510,7 +3510,7 @@ class AudioPlayerScreen(Screen):
         )
         return True
 
-    def _current_self._current_fallback_search( url: str, title: str, channel: str):
+    def _current_fallback_search(self, url: str, title: str, channel: str):
         output = []
         try:
             from youtube_search import fetch_youtube_results
@@ -3593,7 +3593,7 @@ class AudioPlayerScreen(Screen):
         threading.Thread(target=job, name="pymusic-current-related-v4", daemon=True).start()
         return True
 
-    def _current_self._current_ensure_comments():
+    def _current_ensure_comments(self):
         self._current_ensure_state()
         if bool(getattr(self, "_app_in_background", False)):
             return
