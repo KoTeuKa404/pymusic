@@ -2613,105 +2613,105 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
-        def play_playlist(self, tracks, *args, **kwargs):
-            start_playback = bool(kwargs.get("start_playback", True))
-            current_before = str(getattr(self, "_last_video_url", "") or "")
+    def play_playlist(self, tracks, *args, **kwargs):
+        start_playback = bool(kwargs.get("start_playback", True))
+        current_before = str(getattr(self, "_last_video_url", "") or "")
 
-            # Materialize once.  yt-dlp callers normally pass a list, but doing
-            # this here also makes generators deterministic for both the guard
-            # and the original play_playlist implementation.
+        # Materialize once.  yt-dlp callers normally pass a list, but doing
+        # this here also makes generators deterministic for both the guard
+        # and the original play_playlist implementation.
+        try:
+            incoming = list(tracks or [])
+        except Exception:
+            incoming = tracks
+
+        requested_index = _playlist_requested_start_index_core(
+            args,
+            kwargs,
+            len(incoming) if isinstance(incoming, list) else 0,
+        )
+
+        if start_playback:
+            # Critical ordering: invalidate the old MediaPlayer generation
+            # BEFORE old_play_playlist calls playlist.set_tracks().  A stale
+            # completion can no longer advance the new queue from 0 to 1.
+            self._invalidate_previous_playlist_transition()
             try:
-                incoming = list(tracks or [])
+                print(
+                    "[PLAYLIST-FIRST-V2] opening queue "
+                    f"requested_index={requested_index} pre_gen={getattr(self, '_load_gen', -1)}"
+                )
             except Exception:
-                incoming = tracks
+                pass
 
-            requested_index = _playlist_requested_start_index_core(
-                args,
-                kwargs,
-                len(incoming) if isinstance(incoming, list) else 0,
-            )
+        result = self._play_playlist_base( incoming, *args, **kwargs)
 
-            if start_playback:
-                # Critical ordering: invalidate the old MediaPlayer generation
-                # BEFORE old_play_playlist calls playlist.set_tracks().  A stale
-                # completion can no longer advance the new queue from 0 to 1.
-                self._invalidate_previous_playlist_transition()
-                try:
-                    print(
-                        "[PLAYLIST-FIRST-V2] opening queue "
-                        f"requested_index={requested_index} pre_gen={getattr(self, '_load_gen', -1)}"
+        # Only the background queue-install path can have an already playing
+        # seed video that is absent from the returned queue.
+        pending = False
+        if not start_playback and current_before:
+            try:
+                queue = list(getattr(getattr(self, "playlist", None), "tracks", []) or [])
+                current_present = any(
+                    _playlist_same_video_core(
+                        current_before,
+                        str((item or {}).get("url") or (item or {}).get("video_id") or ""),
                     )
-                except Exception:
-                    pass
+                    for item in queue
+                    if isinstance(item, dict)
+                )
+                pending = bool(queue and not current_present)
+            except Exception:
+                pending = False
 
-            result = self._play_playlist_base( incoming, *args, **kwargs)
+        self._playlist_play_current_before_next_v1 = pending
+        if pending:
+            try:
+                print(
+                    "[PLAYLIST-FIRST-V2] current seed is outside queue; "
+                    "first transition will play queue index 0"
+                )
+            except Exception:
+                pass
 
-            # Only the background queue-install path can have an already playing
-            # seed video that is absent from the returned queue.
-            pending = False
-            if not start_playback and current_before:
-                try:
-                    queue = list(getattr(getattr(self, "playlist", None), "tracks", []) or [])
-                    current_present = any(
-                        _playlist_same_video_core(
-                            current_before,
-                            str((item or {}).get("url") or (item or {}).get("video_id") or ""),
+        if start_playback:
+            # Defensive verification.  Normally the generation invalidation
+            # above is enough.  If another non-generation callback changed
+            # the queue synchronously, restore the requested item now.
+            try:
+                playlist = getattr(self, "playlist", None)
+                queue = list(getattr(playlist, "tracks", []) or []) if playlist else []
+                if queue:
+                    target_index = requested_index if 0 <= requested_index < len(queue) else 0
+                    target = queue[target_index]
+                    target_url = str((target or {}).get("url") or "")
+                    current_url = str(getattr(self, "_last_video_url", "") or "")
+                    actual_index = int(getattr(playlist, "index", 0) or 0)
+
+                    if actual_index != target_index:
+                        print(
+                            "[PLAYLIST-FIRST-V2] repaired opening index "
+                            f"{actual_index} -> {target_index}"
                         )
-                        for item in queue
-                        if isinstance(item, dict)
-                    )
-                    pending = bool(queue and not current_present)
-                except Exception:
-                    pending = False
+                        playlist.index = target_index
 
-            self._playlist_play_current_before_next_v1 = pending
-            if pending:
-                try:
-                    print(
-                        "[PLAYLIST-FIRST-V2] current seed is outside queue; "
-                        "first transition will play queue index 0"
-                    )
-                except Exception:
-                    pass
+                    if target_url and not _playlist_same_video_core(current_url, target_url):
+                        print(
+                            "[PLAYLIST-FIRST-V2] stale transition selected wrong track; "
+                            f"restoring index={target_index} url={target_url!r}"
+                        )
+                        self.play_audio(
+                            target_url,
+                            (target or {}).get("title") or "",
+                            (target or {}).get("channel") or "",
+                            (target or {}).get("thumb") or "",
+                            clear_playlist=False,
+                            hard_reset=True,
+                        )
+            except Exception as exc:
+                print("[PLAYLIST-FIRST-V2] opening verification failed:", exc)
 
-            if start_playback:
-                # Defensive verification.  Normally the generation invalidation
-                # above is enough.  If another non-generation callback changed
-                # the queue synchronously, restore the requested item now.
-                try:
-                    playlist = getattr(self, "playlist", None)
-                    queue = list(getattr(playlist, "tracks", []) or []) if playlist else []
-                    if queue:
-                        target_index = requested_index if 0 <= requested_index < len(queue) else 0
-                        target = queue[target_index]
-                        target_url = str((target or {}).get("url") or "")
-                        current_url = str(getattr(self, "_last_video_url", "") or "")
-                        actual_index = int(getattr(playlist, "index", 0) or 0)
-
-                        if actual_index != target_index:
-                            print(
-                                "[PLAYLIST-FIRST-V2] repaired opening index "
-                                f"{actual_index} -> {target_index}"
-                            )
-                            playlist.index = target_index
-
-                        if target_url and not _playlist_same_video_core(current_url, target_url):
-                            print(
-                                "[PLAYLIST-FIRST-V2] stale transition selected wrong track; "
-                                f"restoring index={target_index} url={target_url!r}"
-                            )
-                            self.play_audio(
-                                target_url,
-                                (target or {}).get("title") or "",
-                                (target or {}).get("channel") or "",
-                                (target or {}).get("thumb") or "",
-                                clear_playlist=False,
-                                hard_reset=True,
-                            )
-                except Exception as exc:
-                    print("[PLAYLIST-FIRST-V2] opening verification failed:", exc)
-
-            return result
+        return result
 
 
     def _download_art_async(self, url: str): 
@@ -5634,30 +5634,30 @@ class AudioPlayerScreen(Screen):
         print("[AUDIO] advance next fallback: playlist missing or single")
         return self._try_playlist_refresh_next()
 
-        def _advance_to_next_track(self) -> bool:
-            if bool(getattr(self, "_playlist_play_current_before_next_v1", False)):
-                self._playlist_play_current_before_next_v1 = False
-                try:
-                    playlist = getattr(self, "playlist", None)
-                    track = playlist.current() if playlist else None
-                    if track:
-                        print(
-                            f"[PLAYLIST-FIRST-V2] playing first queued track "
-                            f"index={getattr(playlist, 'index', 0)} "
-                            f"url={track.get('url')!r}"
-                        )
-                        self.play_audio(
-                            track["url"],
-                            track.get("title") or "",
-                            track.get("channel") or "",
-                            track.get("thumb") or "",
-                            clear_playlist=False,
-                            hard_reset=True,
-                        )
-                        return True
-                except Exception as exc:
-                    print("[PLAYLIST-FIRST-V2] first queued track failed:", exc)
-            return bool(self._advance_to_next_track_base())
+    def _advance_to_next_track(self) -> bool:
+        if bool(getattr(self, "_playlist_play_current_before_next_v1", False)):
+            self._playlist_play_current_before_next_v1 = False
+            try:
+                playlist = getattr(self, "playlist", None)
+                track = playlist.current() if playlist else None
+                if track:
+                    print(
+                        f"[PLAYLIST-FIRST-V2] playing first queued track "
+                        f"index={getattr(playlist, 'index', 0)} "
+                        f"url={track.get('url')!r}"
+                    )
+                    self.play_audio(
+                        track["url"],
+                        track.get("title") or "",
+                        track.get("channel") or "",
+                        track.get("thumb") or "",
+                        clear_playlist=False,
+                        hard_reset=True,
+                    )
+                    return True
+            except Exception as exc:
+                print("[PLAYLIST-FIRST-V2] first queued track failed:", exc)
+        return bool(self._advance_to_next_track_base())
 
 
     def _advance_to_next_track_base(self) -> bool:
