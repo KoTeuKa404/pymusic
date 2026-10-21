@@ -75,45 +75,7 @@ def _patch_watch_next_key() -> None:
     print("[STABILITY-V6] YouTube watch-next API key fallback enabled")
 
 
-def _patch_comment_loader() -> None:
-    """Keep the optional comments worker away from critical player startup."""
-    try:
-        import current_video_related_fix as current
-        import audio_screen
-    except Exception:
-        return
-
-    if bool(getattr(current, "_pymusic_comments_stable_v6", False)):
-        return
-
-    old_fetch = getattr(current, "_fetch_comments", None)
-    if not callable(old_fetch):
-        return
-    media = audio_screen.ma
-
-    def fetch_comments_stable(video_url: str, limit: int = 3):
-        # Playback extraction + video extraction + watch-next already start at
-        # track open. Give those workers priority and allow only one comment
-        # extractor process at a time.
-        time.sleep(2.5)
-        if not _network_available(media):
-            return [], None
-        if not _COMMENT_LOCK.acquire(blocking=False):
-            return [], None
-        try:
-            return old_fetch(video_url, min(max(int(limit or 3), 1), 3))
-        except BaseException as exc:
-            print("[STABILITY-V6] comments worker stopped safely:", exc)
-            return [], None
-        finally:
-            try:
-                _COMMENT_LOCK.release()
-            except Exception:
-                pass
-
-    current._fetch_comments = fetch_comments_stable
-    current._pymusic_comments_stable_v6 = True
-    print("[STABILITY-V6] comment loading serialized")
+# Comments are managed by the core AudioPlayerScreen worker.
 
 
 def _install_now() -> bool:
@@ -320,7 +282,6 @@ def _install_now() -> bool:
         cls._pymusic_stability_v6 = True
 
         _patch_watch_next_key()
-        _patch_comment_loader()
 
         _INSTALLED = True
         print("[STABILITY-V6] playlist/network/watch-next stability enabled")
