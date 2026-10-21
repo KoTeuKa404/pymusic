@@ -720,6 +720,8 @@ def _current_fetch_comments(video_url: str, limit: int = 3):
         print("[CURRENT-V4] comments failed:", exc)
         return [], None
 
+_current_comments_worker_lock = threading.Lock()
+
 # ==================== STABLE LOCAL THUMBNAIL WIDGET ====================
 
 class ThumbImage(Widget):
@@ -3611,13 +3613,39 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
 
         def job():
-            comments, count = _current_fetch_comments(url, limit=3)
-            if _current_video_url_of(self) != url:
-                return
-            self._current_comments_v4 = comments
-            self._current_comment_count_v4 = count
-            self._current_comments_loading_v4 = False
-            Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+            comments, count = [], None
+            try:
+                # Optional comments must not compete with audio startup or
+                # launch multiple yt-dlp comment extractors simultaneously.
+                time.sleep(2.5)
+                deadline = time.monotonic() + 6.0
+                while time.monotonic() < deadline:
+                    if _current_video_url_of(self) != url:
+                        return
+                    if not ma.is_network_available():
+                        return
+                    player = getattr(ma, "android_player", None)
+                    try:
+                        if player is not None and ma._is_prepared() and player.isPlaying():
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                if not _current_comments_worker_lock.acquire(blocking=False):
+                    return
+                try:
+                    if _current_video_url_of(self) == url:
+                        comments, count = _current_fetch_comments(url, limit=3)
+                finally:
+                    _current_comments_worker_lock.release()
+            except Exception as exc:
+                print("[CURRENT-V4] deferred comments failed:", exc)
+            finally:
+                if _current_video_url_of(self) == url:
+                    self._current_comments_v4 = comments
+                    self._current_comment_count_v4 = count
+                    self._current_comments_loading_v4 = False
+                    Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
 
         threading.Thread(target=job, name="pymusic-comments-v4", daemon=True).start()
 
