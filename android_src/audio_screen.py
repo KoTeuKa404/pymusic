@@ -21,6 +21,7 @@ import re
 import hashlib
 import urllib.request
 import urllib.parse
+from urllib.parse import parse_qs, urlparse
 import tempfile
 import ssl
 
