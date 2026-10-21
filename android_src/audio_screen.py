@@ -1998,7 +1998,7 @@ class AudioPlayerScreen(Screen):
                 getattr(self, "_pymusic_muxed_video_master", False)
                 and not getattr(self, "_app_in_background", False)
             ):
-                audio = getattr(media, "android_player", None)
+                audio = getattr(ma, "android_player", None)
                 vp = getattr(self, "_video_player", None)
                 native_video = getattr(vp, "player", None) if vp else None
                 if audio is not None and native_video is not None:
@@ -4495,7 +4495,7 @@ class AudioPlayerScreen(Screen):
                 if getattr(self, "_user_paused", False):
                     return
                 try:
-                    audio = getattr(media, "android_player", None)
+                    audio = getattr(ma, "android_player", None)
                     if audio is not None and bool(audio.isPlaying()):
                         break
                 except Exception:
@@ -5100,7 +5100,7 @@ class AudioPlayerScreen(Screen):
             ) + 1
             self._pymusic_muxed_handoff_pending = False
 
-            audio = getattr(media, "android_player", None)
+            audio = getattr(ma, "android_player", None)
             vp = getattr(self, "_video_player", None)
             native_video = getattr(vp, "player", None) if vp else None
 
