@@ -1837,66 +1837,105 @@ class AudioPlayerScreen(Screen):
             return False
 
     def _start_completion_guard(self, gen: int, dur_ms: int):
-        """Fallback for devices that do not reliably deliver MediaPlayer completion in background."""
         try:
             dur_ms = int(dur_ms or 0)
         except Exception:
             dur_ms = 0
         if dur_ms <= 0:
             return
-        self._completion_guard_gen = gen
 
-        def _job():
-            while self._is_current_gen(gen) and self._completion_guard_gen == gen:
+        self._completion_guard_gen = gen
+        if getattr(self, "_pymusic_end_lock", None) is None:
+            self._pymusic_end_lock = threading.Lock()
+
+        def fire_end_once(reason: str, pos: int, playing: bool) -> bool:
+            lock = self._pymusic_end_lock
+            with lock:
+                if not self._is_current_gen(gen):
+                    return False
+                if self._completion_guard_gen != gen:
+                    return False
+                if self._bg_endguard_fired_gen == gen:
+                    return False
+                self._bg_endguard_fired_gen = gen
+
+            print(
+                "[BG-NEXT] completion guard fired "
+                f"gen={gen} pos={pos} dur={dur_ms} playing={playing} "
+                f"reason={reason}"
+            )
+            self._resume_pos_ms = 0
+            if self.repeat:
+                # Keep repeat off the watcher thread too.
+                threading.Thread(target=self._restart_same, daemon=True).start()
+            elif self._auto_skip:
+                self._queue_auto_next()
+            else:
+                self._playback_desired = False
+                self._user_paused = True
+                Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
+            return True
+
+        def job():
+            while (
+                self._is_current_gen(gen)
+                and self._completion_guard_gen == gen
+            ):
                 if not self._playback_desired or self._user_paused:
                     return
+                if self._bg_endguard_fired_gen == gen:
+                    return
+
+                player = getattr(ma, "android_player", None)
+                if player is None:
+                    time.sleep(0.15)
+                    continue
+
                 try:
-                    pos = int(ma.android_player.getCurrentPosition() or 0) if ma.android_player else 0
+                    pos = max(0, int(player.getCurrentPosition() or 0))
                 except Exception:
                     pos = 0
+                try:
+                    playing = bool(player.isPlaying())
+                except Exception:
+                    playing = True
+
                 remaining = max(0, dur_ms - pos)
-                if remaining > 2500:
-                    time.sleep(min(10.0, max(1.0, (remaining - 1500) / 1000.0)))
-                    continue
 
-                time.sleep(2.0)
-                if not (
-                    self._is_current_gen(gen)
-                    and self._completion_guard_gen == gen
-                    and self._playback_desired
-                    and not self._user_paused
-                ):
+                # A missed Android onCompletion is detected immediately once
+                # MediaPlayer stops at the end.  Do not treat buffering in
+                # the middle of a track as completion.
+                if (not playing) and remaining <= 1500:
+                    fire_end_once("player-stopped-near-end", pos, playing)
                     return
-                try:
-                    pos2 = int(ma.android_player.getCurrentPosition() or 0) if ma.android_player else 0
-                except Exception:
-                    pos2 = 0
-                try:
-                    is_playing = bool(ma.android_player and ma.android_player.isPlaying())
-                except Exception:
-                    is_playing = False
-                near_end = dur_ms > 0 and pos2 >= max(0, dur_ms - 2500)
-                if (near_end or not is_playing) and self._bg_endguard_fired_gen != gen:
-                    self._bg_endguard_fired_gen = gen
-                    print(
-                        f"[AUDIO] completion guard auto-next gen={gen} pos={pos2} dur={dur_ms} playing={is_playing}"
-                    )
-                    self._resume_pos_ms = 0
-                    if self.repeat:
-                        self._restart_same()
-                    elif self._auto_skip:
-                        self._queue_auto_next()
-                    else:
-                        self._playback_desired = False
-                        self._user_paused = True
-                        Clock.schedule_once(lambda dt: self._ui_set_playing(False), 0)
-                    return
-                if is_playing:
-                    time.sleep(1.0)
-                    continue
-                return
 
-        threading.Thread(target=_job, daemon=True).start()
+                # Some vendor MediaPlayers keep reporting isPlaying() for a
+                # fraction of a second after their position reaches duration.
+                if remaining <= 80:
+                    time.sleep(0.08)
+                    try:
+                        pos2 = max(0, int(player.getCurrentPosition() or 0))
+                    except Exception:
+                        pos2 = pos
+                    try:
+                        playing2 = bool(player.isPlaying())
+                    except Exception:
+                        playing2 = playing
+                    if (not playing2) or pos2 >= max(0, dur_ms - 40):
+                        fire_end_once("position-reached-end", pos2, playing2)
+                        return
+
+                # Frequent enough for a seamless transition, cheap enough to
+                # keep a single daemon watcher alive for long tracks.
+                if remaining > 5000:
+                    delay = 0.75
+                elif remaining > 1500:
+                    delay = 0.35
+                else:
+                    delay = 0.12
+                time.sleep(delay)
+
+        threading.Thread(target=job, daemon=True).start()
 
     def _bind_keys(self):
         try:
@@ -3806,39 +3845,84 @@ class AudioPlayerScreen(Screen):
             ma.log(f"audio-only start err: {e}")
 
     def _prefetch_next_track_audio(self):
-        if not self.playlist or len(self.playlist) < 2:
-            return
         try:
-            next_idx = (int(self.playlist.index) + 1) % len(self.playlist.tracks)
-            nxt = self.playlist.tracks[next_idx]
-            next_url = str(nxt.get("url") or "")
+            playlist = getattr(self, "playlist", None)
+            tracks = getattr(playlist, "tracks", None) if playlist else None
+            if not tracks or len(tracks) < 2:
+                return None
+
+            current_index = int(getattr(playlist, "index", 0) or 0)
+            next_index = (current_index + 1) % len(tracks)
+            next_item = tracks[next_index] or {}
+            next_url = str(next_item.get("url") or "")
+            current_url = str(getattr(self, "_last_video_url", "") or "")
+            expected_gen = int(getattr(self, "_load_gen", 0) or 0)
+
+            if not next_url or next_url == current_url:
+                return None
+
+            cached = getattr(self, "_url_cache", {}).get(next_url)
+            if cached and cached.get("audio_url"):
+                return None
+
+            inflight = getattr(self, "_prefetch_inflight", None)
+            if inflight is None:
+                self._prefetch_inflight = set()
+                inflight = self._prefetch_inflight
+            if next_url in inflight:
+                return None
+            inflight.add(next_url)
         except Exception:
-            return
-        if not next_url or next_url == self._last_video_url:
-            return
-        if next_url in self._prefetch_inflight:
-            return
-        fast = self._url_cache.get(next_url)
-        if fast and fast.get("audio_url"):
-            return
+            return None
 
-        self._prefetch_inflight.add(next_url)
-
-        def _job():
+        def job():
             try:
-                info = ydlh.extract_audio_info(next_url)
-                aurl = info.get("audio_url") or ""
-                headers = info.get("http_headers") or {}
-                exp = info.get("expire_ts")
-                if aurl:
-                    self._put_cache(next_url, aurl, headers, exp)
-                    self._cache_audio_async(next_url, aurl, headers)
-            except Exception:
-                pass
-            finally:
-                self._prefetch_inflight.discard(next_url)
+                # A short delay avoids competing with the current track's
+                # prepare/start, but unlike Clock.schedule_once it continues
+                # to run when PythonActivity is paused by screen-off.
+                time.sleep(0.35)
 
-        threading.Thread(target=_job, daemon=True).start()
+                if int(getattr(self, "_load_gen", -1)) != expected_gen:
+                    return
+                if str(getattr(self, "_last_video_url", "") or "") != current_url:
+                    return
+
+                cached_now = getattr(self, "_url_cache", {}).get(next_url)
+                if cached_now and cached_now.get("audio_url"):
+                    return
+
+                try:
+                    info = ydlh.extract_audio_info(
+                        next_url,
+                        prefer_compat=bool(
+                            getattr(self, "_prefer_compat_audio", False)
+                        ),
+                    )
+                except TypeError:
+                    info = ydlh.extract_audio_info(next_url)
+
+                audio_url = str((info or {}).get("audio_url") or "")
+                if not audio_url:
+                    return
+
+                headers = dict((info or {}).get("http_headers") or {})
+                expire_ts = (info or {}).get("expire_ts")
+                self._put_cache(next_url, audio_url, headers, expire_ts)
+
+                # Do not download the whole next song here.  A full-file
+                # prefetch competes for mobile bandwidth with the current
+                # stream.  The direct URL cache is enough for instant start.
+                print(f"[BG-NEXT] prefetched next URL: {next_url}")
+            except Exception as exc:
+                print("[BG-NEXT] prefetch failed:", exc)
+            finally:
+                try:
+                    inflight.discard(next_url)
+                except Exception:
+                    pass
+
+        threading.Thread(target=job, daemon=True).start()
+        return None
 
     # ==================== extract & start ====================
 # TODO в нас дуже багато подібних екстаріктів і gen оптимізуй їх
@@ -4680,21 +4764,40 @@ class AudioPlayerScreen(Screen):
 
     def _queue_auto_next(self) -> bool:
         try:
-            print(f"[AUDIO] queue auto next bg={self._app_in_background} gen={self._load_gen}")
+            gen = int(getattr(self, "_load_gen", 0) or 0)
         except Exception:
-            pass
-        def _run(_dt):
-            if not self._advance_to_next_track():
+            gen = 0
+
+        if getattr(self, "_pymusic_next_lock", None) is None:
+            self._pymusic_next_lock = threading.Lock()
+
+        with self._pymusic_next_lock:
+            if int(getattr(self, "_pymusic_next_started_gen", -1)) == gen:
+                return True
+            self._pymusic_next_started_gen = gen
+
+        def run():
+            try:
+                # If another action already moved to a new generation, this
+                # stale completion event must not advance again.
+                if int(getattr(self, "_load_gen", -1)) != gen:
+                    return
+                print(
+                    f"[BG-NEXT] advancing playlist bg={bool(getattr(self, '_app_in_background', False))} gen={gen}"
+                )
+                if self._advance_to_next_track():
+                    return
+
                 self._playback_desired = False
                 self._user_paused = True
-                if self._app_in_background:
-                    Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
-                else:
-                    self._ui_set_playing(False)
-        if self._app_in_background:
-            _run(0)
+                Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
+            except Exception as exc:
+                print("[BG-NEXT] advance failed:", exc)
+
+        if bool(getattr(self, "_app_in_background", False)):
+            threading.Thread(target=run, daemon=True).start()
         else:
-            Clock.schedule_once(_run, 0)
+            Clock.schedule_once(lambda _dt: run(), 0)
         return True
 
     def _act_next(self, *a):
