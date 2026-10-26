@@ -1065,26 +1065,13 @@ class RootLayout(MDBoxLayout):
         )
 
     def set_screen(self, name: str):
-        # Offline fallback applies only on app startup / WebView load errors.
-        # Manual YT button must still be allowed; otherwise a false network check
-        # keeps the app stuck on the Web/search screen forever.
-        if name != "audio":
-            try:
-                audio = self.sm.get_screen("audio")
-                if hasattr(audio, "hide_video_overlay_fast"):
-                    audio.hide_video_overlay_fast()
-                    # Добиваємо race: інколи відкладений callback знову показує surface.
-                    Clock.schedule_once(lambda dt: audio.hide_video_overlay_fast(), 0.15)
-            except Exception:
-                pass
-
+        # ScreenManager calls on_pre_leave/on_pre_enter itself. Let each screen
+        # own one transition: running hide_video_overlay_fast() here *and*
+        # AudioPlayerScreen.on_pre_leave used to release MediaPlayer twice.
+        if name == self.sm.current:
+            return
         if name in ("web", "search"):
             self._active_tab = name
-        if name != "web":
-            try:
-                ma.webview_hide()
-            except Exception:
-                pass
         self.sm.current = name
         try:
             ma.apply_light_system_bars()
@@ -1092,15 +1079,8 @@ class RootLayout(MDBoxLayout):
             pass
 
     def open_audio(self):
-        try:
-            ma.webview_hide()
-        except Exception:
-            pass
-        self.sm.current = "audio"
-        try:
-            ma.apply_light_system_bars()
-        except Exception:
-            pass
+        # YoutubeWebScreen.on_pre_leave hides its WebView exactly once.
+        self.set_screen("audio")
 
     def go_to_active_tab(self):
         self.set_screen(self._active_tab)
