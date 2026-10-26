@@ -590,11 +590,10 @@ def webview_show(url: str | None = None):
             _webview.bringToFront()
         except Exception:
             pass
-        # Toggle only the SDL/Kivy surface. Walking the entire Activity
-        # view tree and toggling every SurfaceView destroys/recreates the
-        # video surface (and on some devices WebView compositor surfaces),
-        # causing severe stutter during player -> Web/YT navigation.
-        _set_sdl_surface_visible(False)
+        # WebView is a full-screen native View brought to front above SDL.
+        # Keep the Kivy SDL surface alive underneath: setting it GONE causes
+        # surfaceDestroyed/surfaceCreated and an expensive EGL/texture rebuild
+        # on some phones every time users switch between UI and Web/YT.
         if url:
             _webview.loadUrl(_force_mobile_youtube_url(url) or url)
         elif _webview.getUrl() is None:
@@ -619,7 +618,7 @@ def webview_hide():
             pass
         _webview_container.setVisibility(View.GONE)
         _webview_shown = False
-        _set_sdl_surface_visible(True)
+        # SDL was never detached; simply hide the native WebView layer.
         log("[WEB] WebView hidden")
     except Exception as e:
         log(f"[WEB] hide err: {e}")
