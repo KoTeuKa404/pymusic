@@ -1,6 +1,56 @@
 import os
 os.environ["KIVY_AUDIO"] = "sdl2"
 
+# Catch startup/import errors before Kivy, yt-dlp or JNI can be initialized.
+# The complete runtime crash collector is installed in media_android.py later.
+import sys
+import traceback
+from datetime import datetime as _crash_datetime
+
+_PYMUSIC_BOOT_DIAG = None
+
+
+def _pymusic_bootstrap_exception(exc_type, exc_value, exc_tb):
+    global _PYMUSIC_BOOT_DIAG
+    try:
+        if _PYMUSIC_BOOT_DIAG is None:
+            external = os.environ.get("EXTERNAL_STORAGE") or "/sdcard"
+            choices = [
+                os.path.join(
+                    external, "Android", "data",
+                    "org.koteuka404.pymusic", "files", "diagnostics",
+                ),
+                os.path.join(
+                    os.environ.get("ANDROID_PRIVATE") or os.getcwd(),
+                    "diagnostics",
+                ),
+            ]
+            for directory in choices:
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                    if os.path.isdir(directory):
+                        _PYMUSIC_BOOT_DIAG = directory
+                        break
+                except OSError:
+                    continue
+        if _PYMUSIC_BOOT_DIAG:
+            path = os.path.join(_PYMUSIC_BOOT_DIAG, "startup_crashes.log")
+            with open(path, "a", encoding="utf-8") as output:
+                output.write(
+                    "\n=== PyMusic Python startup failure "
+                    + _crash_datetime.now().isoformat() + " ===\n"
+                )
+                output.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+                output.flush()
+                os.fsync(output.fileno())
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+_pymusic_bootstrap_exception._pymusic_early = True
+sys.excepthook = _pymusic_bootstrap_exception
+
 import re
 import threading
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +75,7 @@ from android.runnable import run_on_ui_thread  # UI calls
 from kivy.app import App
 
 import media_android as ma  # <<< ДОДАНО
+ma.install_kivy_exception_logging()
 
 from recent_utils import load_recent, save_recent
 
@@ -1127,6 +1178,7 @@ class YoutubeSearchApp(MDApp):
         return RootLayout()
 
     def on_start(self):
+        ma.log("[LIFECYCLE] PyMusic on_start; crash logs: " + ma.LOG_DIR)
         _log_build_info()
         # Канал і пермішени для нотифікацій до першого показу
         ma.create_notification_channel()
@@ -1150,6 +1202,7 @@ class YoutubeSearchApp(MDApp):
             pass
 
     def on_pause(self):
+        ma.log("[LIFECYCLE] PyMusic on_pause")
         try:
             root = getattr(self, "root", None)
             if root and hasattr(root, "handle_app_pause"):
@@ -1159,6 +1212,7 @@ class YoutubeSearchApp(MDApp):
         return True
 
     def on_resume(self):
+        ma.log("[LIFECYCLE] PyMusic on_resume")
         try:
             ma.apply_light_system_bars()
         except Exception:
@@ -1173,6 +1227,10 @@ class YoutubeSearchApp(MDApp):
                 root.handle_app_resume()
         except Exception:
             pass
+
+    def on_stop(self):
+        ma.log("[LIFECYCLE] PyMusic clean on_stop")
+
 
 if __name__ == "__main__":
     YoutubeSearchApp().run()
