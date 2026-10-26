@@ -1433,12 +1433,14 @@ class AudioPlayerScreen(Screen):
         except Exception:
             pass
 
+        # Hand off muxed-video audio and release the SurfaceView once, before
+        # the WebView screen becomes visible. The old code stopped the video
+        # here, queued a second stop via _set_video_mode(False), and main.py
+        # also stopped it twice around the same navigation event.
         try:
-            if self._video_player:
-                self._video_player.stop()
-        except Exception:
-            pass
-        Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
+            self._set_video_mode(False)
+        except Exception as exc:
+            print("[PLAYER-NAV] video handoff failed:", exc)
 
     def handle_app_pause(self):
         self._app_in_background = True
@@ -1879,11 +1881,10 @@ class AudioPlayerScreen(Screen):
                 self._video_controls_ev = None
         except Exception:
             pass
-        try:
-            # Перераховуємо bounds оверлею, щоб не перекривати сенсорну зону контролів.
+        # A hidden overlay should never schedule another expensive native
+        # SurfaceView bounds/layout update during screen navigation.
+        if visible and self._is_screen_active():
             Clock.schedule_once(self._align_video_to_thumb, 0)
-        except Exception:
-            pass
         if visible and auto_hide:
             self._video_controls_ev = Clock.schedule_once(self._hide_video_controls, 5.0)
 
@@ -5165,25 +5166,19 @@ class AudioPlayerScreen(Screen):
 
 
     def hide_video_overlay_fast(self):
-        self._video_active = False
+        # Stale geometry callbacks can run after leaving this screen. Avoid
+        # re-stopping the native MediaPlayer after on_pre_leave already did so.
+        if not (
+            self._video_active
+            or self._video_controls_visible
+            or bool(getattr(self, "_pymusic_muxed_video_master", False))
+            or bool(getattr(self, "_pymusic_muxed_handoff_pending", False))
+        ):
+            return
         self._video_was_active = False
         self._video_resume_url = None
         self._video_resume_gen = -1
-        try:
-            self._set_video_controls_visible(False, auto_hide=False)
-        except Exception:
-            pass
-        try:
-            thumb = self.ids.get("audio_thumbnail")
-            if thumb:
-                thumb.opacity = 1.0
-        except Exception:
-            pass
-        try:
-            if self._video_player:
-                self._video_player.stop()
-        except Exception:
-            pass
+        self._set_video_mode(False)
 
     def _normalize_related(self, items):
         out = []
