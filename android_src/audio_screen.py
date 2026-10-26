@@ -1438,9 +1438,12 @@ class AudioPlayerScreen(Screen):
         # here, queued a second stop via _set_video_mode(False), and main.py
         # also stopped it twice around the same navigation event.
         try:
+            self._navigating_away_from_video = True
             self._set_video_mode(False)
         except Exception as exc:
             print("[PLAYER-NAV] video handoff failed:", exc)
+        finally:
+            self._navigating_away_from_video = False
 
     def handle_app_pause(self):
         self._app_in_background = True
@@ -1571,10 +1574,8 @@ class AudioPlayerScreen(Screen):
             if vp is None:
                 return
             if not self._is_screen_active():
-                try:
-                    self.hide_video_overlay_fast()
-                except Exception:
-                    pass
+                return
+            if not bool(getattr(self, "_video_active", False)):
                 return
 
             self._configure_video_block()
@@ -5066,10 +5067,28 @@ class AudioPlayerScreen(Screen):
             pass
         if not video_on:
             try:
-                if self._video_player:
-                    self._video_player.stop()
-            except Exception:
-                pass
+                vp = self._video_player
+                if vp is not None:
+                    if getattr(self, "_navigating_away_from_video", False):
+                        # WebView/SDL transitions must not wait for Android
+                        # MediaPlayer.stop/release on the UI thread. Hide
+                        # immediately and clean up after the destination is
+                        # already visible. Guard against a quick return/play.
+                        vp.hide_native_views()
+                        leaving_gen = int(getattr(vp, "_play_gen", -1))
+
+                        def finish_video_release(_dt):
+                            if (
+                                not self._is_screen_active()
+                                and int(getattr(vp, "_play_gen", -2)) == leaving_gen
+                            ):
+                                vp.stop()
+
+                        Clock.schedule_once(finish_video_release, 0.30)
+                    else:
+                        vp.stop()
+            except Exception as exc:
+                print("[PLAYER-NAV] native video release failed:", exc)
 
     def _set_video_mode(self, video_on: bool):
         if video_on:
