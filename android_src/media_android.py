@@ -581,6 +581,8 @@ def webview_show(url: str | None = None):
             _webview.setLayoutParams(lp)
         except Exception:
             pass
+        if _webview_shown and url is None:
+            return
         _webview_container.setVisibility(View.VISIBLE)
         _webview_shown = True
         try:
@@ -588,8 +590,11 @@ def webview_show(url: str | None = None):
             _webview.bringToFront()
         except Exception:
             pass
+        # Toggle only the SDL/Kivy surface. Walking the entire Activity
+        # view tree and toggling every SurfaceView destroys/recreates the
+        # video surface (and on some devices WebView compositor surfaces),
+        # causing severe stutter during player -> Web/YT navigation.
         _set_sdl_surface_visible(False)
-        _set_surface_views_visible(False)
         if url:
             _webview.loadUrl(_force_mobile_youtube_url(url) or url)
         elif _webview.getUrl() is None:
@@ -603,7 +608,10 @@ def webview_show(url: str | None = None):
 def webview_hide():
     global _webview_shown
     try:
-        if _webview_container is None:
+        # Screens change before the native UI thread always processes the
+        # request; duplicate hide calls must not re-run JavaScript/media
+        # cleanup or toggle SDL layers again.
+        if _webview_container is None or not _webview_shown:
             return
         try:
             _webview_stop_media()
@@ -612,7 +620,6 @@ def webview_hide():
         _webview_container.setVisibility(View.GONE)
         _webview_shown = False
         _set_sdl_surface_visible(True)
-        _set_surface_views_visible(True)
         log("[WEB] WebView hidden")
     except Exception as e:
         log(f"[WEB] hide err: {e}")
