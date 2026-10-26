@@ -1035,6 +1035,21 @@ class AndroidVideoPlayer:
         Clock.schedule_once(lambda dt: _check(), 0)
 
     @run_on_ui_thread
+    def hide_native_views(self):
+        """Cheap visual hide for navigation; MediaPlayer release runs later."""
+        try:
+            if self.surface_view is not None:
+                self.surface_view.setVisibility(View.GONE)
+        except Exception:
+            pass
+        try:
+            if self.controls_overlay is not None:
+                self.controls_overlay.setVisibility(View.GONE)
+        except Exception:
+            pass
+        self._controls_visible = False
+
+    @run_on_ui_thread
     def stop(self):
         self._play_gen += 1
         self._prepared = False
@@ -1113,6 +1128,10 @@ class AndroidVideoPlayer:
     @run_on_ui_thread
     def set_native_controls_visible(self, visible: bool) -> None:
         self._controls_visible = bool(visible)
+        # Hiding the video must not create a fresh native FrameLayout while
+        # Kivy is transitioning to WebView or the search screen.
+        if not visible and self.controls_overlay is None:
+            return
         try:
             self._ensure_controls_overlay()
             if self.controls_overlay is not None:
