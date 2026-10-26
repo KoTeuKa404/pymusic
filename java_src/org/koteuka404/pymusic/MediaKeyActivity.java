@@ -56,14 +56,16 @@ public class MediaKeyActivity extends PythonActivity {
                     int reports = 0;
                     for (File entry : entries) {
                         if (entry.isFile() && (entry.getName().startsWith("java_crash_")
-                                || entry.getName().startsWith("android_exit_"))) {
+                                || entry.getName().startsWith("android_exit_")
+                                || entry.getName().startsWith("android_trace_"))) {
                             reports++;
                         }
                     }
                     for (File entry : entries) {
                         if (reports <= 40) break;
                         if (entry.isFile() && (entry.getName().startsWith("java_crash_")
-                                || entry.getName().startsWith("android_exit_"))) {
+                                || entry.getName().startsWith("android_exit_")
+                                || entry.getName().startsWith("android_trace_"))) {
                             if (entry.delete()) reports--;
                         }
                     }
@@ -132,14 +134,15 @@ public class MediaKeyActivity extends PythonActivity {
                         + "description=" + exit.getDescription() + "\n";
                 String name = "android_exit_" + timestamp + "_" + exit.getPid() + ".log";
                 persistAndroidReport(this, name, header);
-                // On Android 11+ the OS sometimes provides an ANR/native stack
-                // trace. Preserve as much as possible without filling storage.
+                // ANR trace is text, native tombstones on API 31+ are a
+                // protobuf. Store original trace bytes separately from the
+                // human-readable exit report; the system may return null.
                 try (InputStream in = exit.getTraceInputStream()) {
                     if (in != null) {
-                        File outputFile = new File(diagnosticsDir(this), name);
-                        try (FileOutputStream out = new FileOutputStream(outputFile, true)) {
-                            out.write("\n--- Android trace (up to 256 KiB) ---\n"
-                                    .getBytes(StandardCharsets.UTF_8));
+                        String traceName = "android_trace_" + timestamp + "_" + exit.getPid() + ".bin";
+                        File outputFile = new File(diagnosticsDir(this), traceName);
+                        persistAndroidReport(this, name, "trace_file=" + traceName + "\n");
+                        try (FileOutputStream out = new FileOutputStream(outputFile, false)) {
                             byte[] data = new byte[8192];
                             int remaining = 256 * 1024;
                             while (remaining > 0) {
