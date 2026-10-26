@@ -99,23 +99,129 @@ except Exception:
 # HashMap для headers
 HashMap             = autoclass('java.util.HashMap')
 
-# ===================== Logging =====================
+# ===================== Persistent diagnostics =====================
+#
+# Keep this in media_android.py (not in another *_fix.py). App-specific
+# external storage survives process crashes and can be read using adb pull:
+# /sdcard/Android/data/org.koteuka404.pymusic/files/diagnostics/
+#
+# App-private fallback is still persisted; debug APK users can extract it
+# with adb run-as if external storage is unavailable.
+import faulthandler
+import logging
+
+_DIAGNOSTIC_LOCK = threading.RLock()
+_DIAG_MAX_BYTES = 2 * 1024 * 1024
+_SESSION_MAX_BYTES = 2 * 1024 * 1024
+_CRASH_MAX_REPORTS = 30
+_SESSION_MAX_FILES = 14
+_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(os.getpid())
 
 try:
     _ctx = PythonActivity.mActivity
-    _ext = _ctx.getExternalFilesDir(None)
-    LOG_PATH = (_ext.getAbsolutePath() if _ext else _ctx.getFilesDir().getAbsolutePath()) + "/pymusic_diag.txt"
+    _external = _ctx.getExternalFilesDir(None)
+    _internal = _ctx.getFilesDir()
+    _base_path = _external.getAbsolutePath() if _external else _internal.getAbsolutePath()
+    LOG_DIR = os.path.join(_base_path, "diagnostics")
+    os.makedirs(LOG_DIR, exist_ok=True)
+    if not os.path.isdir(LOG_DIR):
+        raise OSError("diagnostics directory unavailable")
 except Exception:
-    LOG_PATH = "/data/local/tmp/pymusic_diag.txt"
+    LOG_DIR = os.path.join(os.environ.get("ANDROID_PRIVATE") or os.getcwd(), "diagnostics")
+    os.makedirs(LOG_DIR, exist_ok=True)
 
+LOG_PATH = os.path.join(LOG_DIR, "pymusic_diag.txt")
+SESSION_LOG_PATH = os.path.join(LOG_DIR, "session_" + _SESSION_ID + ".log")
+_FAULT_LOG_PATH = os.path.join(LOG_DIR, "native_fatal_" + _SESSION_ID + ".log")
 DEBUG_VERBOSE = True
+
+_diag_stream = None
+_session_stream = None
+_diag_bytes = 0
+_session_bytes = 0
+_faulthandler_file = None
+_crash_hooks_installed = False
+_kivy_crash_handler = None
+
+
+def _prune_diagnostics():
+    """Bound disk usage while never deleting current session/fault files."""
+    try:
+        entries = [
+            os.path.join(LOG_DIR, name)
+            for name in os.listdir(LOG_DIR)
+            if name.startswith(("session_", "crash_python_", "native_fatal_"))
+            and os.path.isfile(os.path.join(LOG_DIR, name))
+        ]
+        sessions = sorted(
+            (p for p in entries if os.path.basename(p).startswith("session_")),
+            key=lambda p: os.path.getmtime(p), reverse=True,
+        )
+        reports = sorted(
+            (p for p in entries if not os.path.basename(p).startswith("session_")),
+            key=lambda p: os.path.getmtime(p), reverse=True,
+        )
+        for group, keep in ((sessions, _SESSION_MAX_FILES), (reports, _CRASH_MAX_REPORTS)):
+            for path in group[keep:]:
+                if path not in (SESSION_LOG_PATH, _FAULT_LOG_PATH):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+
+def _append_diagnostic_locked(value):
+    global _diag_stream, _diag_bytes
+    if _diag_stream is None:
+        _diag_bytes = os.path.getsize(LOG_PATH) if os.path.exists(LOG_PATH) else 0
+        _diag_stream = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+    data_bytes = len(value.encode("utf-8", "replace"))
+    if _diag_bytes + data_bytes > _DIAG_MAX_BYTES:
+        _diag_stream.close()
+        for i in range(3, 0, -1):
+            previous = LOG_PATH + ("." + str(i - 1) if i > 1 else "")
+            target = LOG_PATH + "." + str(i)
+            if os.path.exists(previous):
+                os.replace(previous, target)
+        _diag_stream = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+        _diag_bytes = 0
+    _diag_stream.write(value)
+    _diag_bytes += data_bytes
+
+
+def _append_session(value):
+    """Capture both print/stderr and error stacks, rotating even in long sessions."""
+    global _session_stream, _session_bytes
+    if not value:
+        return
+    try:
+        with _DIAGNOSTIC_LOCK:
+            if _session_stream is None:
+                _session_bytes = os.path.getsize(SESSION_LOG_PATH) if os.path.exists(SESSION_LOG_PATH) else 0
+                _session_stream = open(SESSION_LOG_PATH, "a", encoding="utf-8", buffering=1)
+            length = len(value.encode("utf-8", "replace"))
+            if _session_bytes + length > _SESSION_MAX_BYTES:
+                _session_stream.close()
+                if os.path.exists(SESSION_LOG_PATH):
+                    os.replace(SESSION_LOG_PATH, SESSION_LOG_PATH + ".1")
+                _session_stream = open(SESSION_LOG_PATH, "a", encoding="utf-8", buffering=1)
+                _session_bytes = 0
+            _session_stream.write(value)
+            _session_bytes += length
+    except Exception:
+        pass
 
 
 def log(msg: str):
+    """Keep the existing app diagnostics log bounded and crash-persistent."""
     try:
-        ts = datetime.now().strftime("%H:%M:%S")
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{ts} {msg}\n")
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        value = f"{stamp} {msg}\n"
+        with _DIAGNOSTIC_LOCK:
+            _append_diagnostic_locked(value)
+        _append_session(value)
     except Exception:
         pass
 
@@ -125,61 +231,155 @@ def vlog(msg: str):
         log(msg)
 
 
-_faulthandler_file = None
+def _write_python_crash(source, exc_type, exc_value, exc_tb):
+    """One separate fsynced report per Python/Kivy/thread crash."""
+    try:
+        trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        header = (
+            f"=== PyMusic {source} ===\n"
+            f"time={timestamp} pid={os.getpid()} thread={threading.current_thread().name}\n"
+        )
+        report = header + trace + "\n"
+        _append_session(report)
+        log(f"[CRASH] {source}: {exc_type.__name__}: {exc_value}")
+        path = os.path.join(
+            LOG_DIR,
+            "crash_python_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            + "_" + str(os.getpid()) + ".log",
+        )
+        with _DIAGNOSTIC_LOCK:
+            with open(path, "w", encoding="utf-8") as target:
+                target.write(report)
+                target.flush()
+                os.fsync(target.fileno())
+            _prune_diagnostics()
+    except Exception:
+        pass
+
+
+class _PyMusicOutputMirror:
+    """Mirror console/logcat messages without replacing their original sink."""
+
+    def __init__(self, original):
+        self._original = original
+        self._pymusic_mirror = True
+
+    def write(self, value):
+        if not isinstance(value, str):
+            value = str(value)
+        try:
+            if self._original is not None:
+                self._original.write(value)
+        except Exception:
+            pass
+        _append_session(value)
+        return len(value)
+
+    def flush(self):
+        try:
+            if self._original is not None:
+                self._original.flush()
+        except Exception:
+            pass
+        try:
+            with _DIAGNOSTIC_LOCK:
+                if _session_stream is not None:
+                    _session_stream.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
 
 
 def _install_crash_hooks():
-    global _faulthandler_file
-    try:
-        def _sys_excepthook(exc_type, exc_value, exc_tb):
+    global _faulthandler_file, _crash_hooks_installed
+    if _crash_hooks_installed:
+        return
+    _crash_hooks_installed = True
+    previous_sys_hook = sys.excepthook
+
+    def _sys_excepthook(exc_type, exc_value, exc_tb):
+        _write_python_crash("uncaught main exception", exc_type, exc_value, exc_tb)
+        try:
+            previous_sys_hook(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _sys_excepthook
+
+    if hasattr(threading, "excepthook"):
+        previous_thread_hook = threading.excepthook
+
+        def _thread_excepthook(args):
+            _write_python_crash(
+                "uncaught thread " + str(getattr(args.thread, "name", "unknown")),
+                args.exc_type, args.exc_value, args.exc_traceback,
+            )
             try:
-                log("[CRASH] uncaught exception:\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+                previous_thread_hook(args)
             except Exception:
                 pass
+
+        threading.excepthook = _thread_excepthook
+
+    if hasattr(sys, "unraisablehook"):
+        previous_unraisable = sys.unraisablehook
+
+        def _unraisable_hook(args):
+            _write_python_crash(
+                "unraisable exception " + str(getattr(args, "err_msg", "") or ""),
+                args.exc_type, args.exc_value, args.exc_traceback,
+            )
             try:
-                sys.__excepthook__(exc_type, exc_value, exc_tb)
+                previous_unraisable(args)
             except Exception:
                 pass
 
-        sys.excepthook = _sys_excepthook
-    except Exception:
-        pass
+        sys.unraisablehook = _unraisable_hook
 
+    if not getattr(sys.stdout, "_pymusic_mirror", False) and sys.stdout is not None:
+        sys.stdout = _PyMusicOutputMirror(sys.stdout)
+    if not getattr(sys.stderr, "_pymusic_mirror", False) and sys.stderr is not None:
+        sys.stderr = _PyMusicOutputMirror(sys.stderr)
+
+    # The C-level signal handler needs its own never-rotated file descriptor.
+    # It can save fatal Python/C extension stack traces for SIGSEGV/SIGABRT.
     try:
-        if hasattr(threading, "excepthook"):
-            _orig_thread_hook = threading.excepthook
-
-            def _thread_excepthook(args):
-                try:
-                    log(
-                        "[CRASH] thread exception:\n"
-                        + "".join(
-                            traceback.format_exception(
-                                args.exc_type,
-                                args.exc_value,
-                                args.exc_traceback,
-                            )
-                        )
-                    )
-                except Exception:
-                    pass
-                try:
-                    _orig_thread_hook(args)
-                except Exception:
-                    pass
-
-            threading.excepthook = _thread_excepthook
-    except Exception:
-        pass
-
-    try:
-        import faulthandler
-
-        _faulthandler_file = open(LOG_PATH, "a", buffering=1, encoding="utf-8")
+        _faulthandler_file = open(_FAULT_LOG_PATH, "a", buffering=1, encoding="utf-8")
+        _faulthandler_file.write(
+            f"PyMusic native fault capture started {datetime.now().isoformat()} pid={os.getpid()}\n"
+        )
+        _faulthandler_file.flush()
         faulthandler.enable(file=_faulthandler_file, all_threads=True)
-        log("[CRASH] faulthandler enabled")
-    except Exception:
-        pass
+        log("[CRASH] native faulthandler active")
+    except Exception as exc:
+        log(f"[CRASH] native faulthandler unavailable: {exc}")
+
+    _prune_diagnostics()
+    log(f"[CRASH] persistent diagnostics dir: {LOG_DIR}")
+    log(f"[CRASH] session log: {SESSION_LOG_PATH}")
+
+
+def install_kivy_exception_logging():
+    """Capture Kivy Clock/UI exceptions without swallowing them."""
+    global _kivy_crash_handler
+    if _kivy_crash_handler is not None:
+        return
+    try:
+        from kivy.base import ExceptionHandler, ExceptionManager
+
+        class PyMusicKivyExceptionHandler(ExceptionHandler):
+            def handle_exception(self, inst):
+                _write_python_crash("Kivy UI/Clock exception", type(inst), inst, inst.__traceback__)
+                return ExceptionManager.RAISE
+
+        _kivy_crash_handler = PyMusicKivyExceptionHandler()
+        ExceptionManager.add_handler(_kivy_crash_handler)
+        log("[CRASH] Kivy exception logging active")
+    except Exception as exc:
+        log(f"[CRASH] Kivy exception hook unavailable: {exc}")
 
 
 _install_crash_hooks()
