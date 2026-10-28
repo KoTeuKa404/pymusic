@@ -142,6 +142,8 @@ _session_bytes = 0
 _faulthandler_file = None
 _crash_hooks_installed = False
 _kivy_crash_handler = None
+_standard_logging_handler = None
+_warnings_original = None
 
 
 def _prune_diagnostics():
@@ -293,11 +295,62 @@ class _PyMusicOutputMirror:
         return getattr(self._original, name)
 
 
+class _PersistentPythonLogHandler(logging.Handler):
+    """Capture logging.warning/error/exception even without print() output."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s"
+        ))
+
+    def emit(self, record):
+        try:
+            # logging.Formatter.format appends exc_info and stack_info.
+            line = self.format(record) + "\n"
+            with _DIAGNOSTIC_LOCK:
+                _append_diagnostic_locked(line)
+            _append_session(line)
+        except Exception:
+            # A diagnostic handler must never recurse into logging or stop UI.
+            pass
+
+
+def _install_standard_python_logging():
+    global _standard_logging_handler, _warnings_original
+    if _standard_logging_handler is not None:
+        return
+    handler = _PersistentPythonLogHandler()
+    logging.getLogger().addHandler(handler)
+    # Kivy uses its own logger, which some versions configure without
+    # propagating records to the Python root logger.
+    kivy_logger = logging.getLogger("kivy")
+    if not kivy_logger.propagate:
+        kivy_logger.addHandler(handler)
+    _standard_logging_handler = handler
+    try:
+        import warnings
+        _warnings_original = warnings.showwarning
+
+        def _record_warning(message, category, filename, lineno, file=None, line=None):
+            try:
+                detail = f"{filename}:{lineno}: {category.__name__}: {message}"
+                _append_session("[PYTHON-WARNING] " + detail + "\n")
+            except Exception:
+                pass
+            return _warnings_original(message, category, filename, lineno, file=file, line=line)
+
+        warnings.showwarning = _record_warning
+    except Exception:
+        pass
+
+
 def _install_crash_hooks():
     global _faulthandler_file, _crash_hooks_installed
     if _crash_hooks_installed:
         return
     _crash_hooks_installed = True
+    _install_standard_python_logging()
     previous_sys_hook = sys.excepthook
 
     def _sys_excepthook(exc_type, exc_value, exc_tb):
@@ -360,6 +413,7 @@ def _install_crash_hooks():
     _prune_diagnostics()
     log(f"[CRASH] persistent diagnostics dir: {LOG_DIR}")
     log(f"[CRASH] session log: {SESSION_LOG_PATH}")
+    log("[CRASH] Python logging WARNING/ERROR and warnings mirror active")
 
 
 def install_kivy_exception_logging():
