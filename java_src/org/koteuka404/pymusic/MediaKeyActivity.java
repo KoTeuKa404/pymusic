@@ -109,6 +109,29 @@ public class MediaKeyActivity extends PythonActivity {
         }
     }
 
+    private static String exitReasonLabel(int reason) {
+        // ApplicationExitInfo covers terminations for which Python cannot
+        // reliably write a traceback (native crash, ANR, low-memory kill).
+        switch (reason) {
+            case ApplicationExitInfo.REASON_CRASH:
+                return "JAVA_CRASH";
+            case ApplicationExitInfo.REASON_CRASH_NATIVE:
+                return "NATIVE_CRASH";
+            case ApplicationExitInfo.REASON_ANR:
+                return "ANR_NOT_RESPONDING";
+            case ApplicationExitInfo.REASON_LOW_MEMORY:
+                return "LOW_MEMORY_KILL";
+            case ApplicationExitInfo.REASON_SIGNALED:
+                return "SIGNALLED";
+            case ApplicationExitInfo.REASON_USER_REQUESTED:
+                return "USER_REQUESTED";
+            case ApplicationExitInfo.REASON_USER_STOPPED:
+                return "USER_STOPPED";
+            default:
+                return "OTHER_" + reason;
+        }
+    }
+
     private void recordPreviousAndroidExits() {
         if (Build.VERSION.SDK_INT < 30) return;
         try {
@@ -129,7 +152,8 @@ public class MediaKeyActivity extends PythonActivity {
                         + "time_ms=" + timestamp + "\n"
                         + "pid=" + exit.getPid() + "\n"
                         + "process=" + exit.getProcessName() + "\n"
-                        + "reason=" + reason + " status=" + exit.getStatus() + "\n"
+                        + "reason=" + reason + " (" + exitReasonLabel(reason) + ")"
+                        + " status=" + exit.getStatus() + "\n"
                         + "importance=" + exit.getImportance() + "\n"
                         + "description=" + exit.getDescription() + "\n";
                 String name = "android_exit_" + timestamp + "_" + exit.getPid() + ".log";
@@ -144,7 +168,9 @@ public class MediaKeyActivity extends PythonActivity {
                         persistAndroidReport(this, name, "trace_file=" + traceName + "\n");
                         try (FileOutputStream out = new FileOutputStream(outputFile, false)) {
                             byte[] data = new byte[8192];
-                            int remaining = 256 * 1024;
+                            // ANR traces can exceed 256 KiB. Cap at 1 MiB
+                            // per exit to keep offline diagnosis useful.
+                            int remaining = 1024 * 1024;
                             while (remaining > 0) {
                                 int count = in.read(data, 0, Math.min(remaining, data.length));
                                 if (count < 0) break;
