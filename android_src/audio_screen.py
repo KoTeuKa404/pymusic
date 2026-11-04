@@ -629,6 +629,19 @@ class _CurrentTapLabel(ButtonBehavior, Label):
     pass
 
 
+def _verified_channel_name(value: str, video_title: str = "") -> str:
+    """Reject title/placeholder metadata masquerading as a channel name."""
+    name = str(value or "").strip()
+    title = str(video_title or "").strip()
+    if not name or name.casefold() in {"youtube", "unknown", "video", "playing audio"}:
+        return ""
+    # Some YouTube search/playlist fallbacks erroneously store item.title as
+    # item.channel. Never promote that unverified title to the channel field.
+    if title and name.casefold() == title.casefold():
+        return ""
+    return name[:200]
+
+
 def _current_canonical_video_url(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -2323,7 +2336,9 @@ class AudioPlayerScreen(Screen):
 
         for item in candidates:
             title = str(item.get("title") or "").strip()
-            channel = str(item.get("channel") or item.get("artist") or "").strip()
+            channel = _verified_channel_name(
+                item.get("channel") or item.get("artist"), title or self._title
+            )
             thumb = str(item.get("thumb") or item.get("thumbnail") or item.get("art_path") or "").strip()
             if title and (not self._title or self._title.lower() in {"playing", "playing audio"}):
                 self._title = title
@@ -2445,7 +2460,7 @@ class AudioPlayerScreen(Screen):
             pass
 
         self._title = title or ""
-        self._channel = channel or ""
+        self._channel = _verified_channel_name(channel, self._title)
         self._channel_thumb = ""
         self._channel_thumb_local = ""
         thumb_url = thumb or ""
@@ -3937,7 +3952,7 @@ class AudioPlayerScreen(Screen):
         _player_likes_ensure_likes_async(self, video_url)
         if not video_url:
             return
-        if video_url in self._metadata_loaded_urls and self._channel:
+        if video_url in self._metadata_loaded_urls and _verified_channel_name(self._channel, self._title):
             return
         if self._meta_inflight and self._meta_last_url == video_url:
             return
@@ -3952,7 +3967,11 @@ class AudioPlayerScreen(Screen):
                     info = {}
                 else:
                     info = ydlh.extract_audio_info(video_url)
-                if not (info.get("channel") or info.get("uploader") or self._channel):
+                if not (
+                    _verified_channel_name(info.get("channel"), info.get("title") or self._title)
+                    or _verified_channel_name(info.get("uploader"), info.get("title") or self._title)
+                    or _verified_channel_name(self._channel, self._title)
+                ):
                     # Official YouTube oEmbed gives author_name even when the
                     # Android player response omits owner/channel metadata.
                     # This runs only in the metadata worker, never in audio
@@ -3975,7 +3994,9 @@ class AudioPlayerScreen(Screen):
     def _apply_info_metadata_base(self, info: dict):
         updated = False
         title = info.get("title") or ""
-        channel = info.get("channel") or info.get("uploader") or ""
+        channel = _verified_channel_name(
+            info.get("channel") or info.get("uploader"), title or self._title
+        )
         try:
             ma.log(f"[META] info title={title!r} channel={channel!r} cthumb={(info.get('channel_thumb') or '')!r}")
         except Exception:
@@ -3983,7 +4004,7 @@ class AudioPlayerScreen(Screen):
         if title and (not self._title or self._title.lower() == "playing"):
             self._title = title
             updated = True
-        if channel and (not self._channel or self._channel.lower() in {"youtube", "unknown"}):
+        if channel and not _verified_channel_name(self._channel, self._title):
             self._channel = channel
             updated = True
         cthumb = info.get("channel_thumb") or info.get("uploader_thumb") or ""
@@ -5009,7 +5030,10 @@ class AudioPlayerScreen(Screen):
                     self._title = t
                     updated_meta = True
             if not self._channel:
-                ch = info.get("channel") or info.get("uploader") or ""
+                ch = _verified_channel_name(
+                    info.get("channel") or info.get("uploader"),
+                    info.get("title") or self._title,
+                )
                 if ch:
                     self._channel = ch
                     updated_meta = True
@@ -5474,7 +5498,10 @@ class AudioPlayerScreen(Screen):
             seen.add(key)
 
             title = str(e.get("title") or "").strip()
-            channel = str(e.get("uploader") or e.get("channel") or e.get("creator") or "").strip()
+            channel = _verified_channel_name(
+                e.get("uploader") or e.get("channel") or e.get("creator"),
+                title,
+            )
             thumb = Playlist._normalize_img_url(raw_thumb)
             if vid:
                 thumb = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
