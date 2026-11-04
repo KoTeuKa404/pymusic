@@ -80,6 +80,7 @@ class PlaybackRegressionTests(unittest.TestCase):
 
         old_player, new_player = Player("old"), Player("new")
         listeners = (object(), object())
+        retired = []
         media = SimpleNamespace(
             run_on_ui_thread=deferred_ui,
             _mp_state_lock=threading.RLock(),
@@ -89,6 +90,7 @@ class PlaybackRegressionTests(unittest.TestCase):
             _mp_prepared=True,
             is_playing=True,
             _mp_detach_listeners=lambda player: events.append((player.name, "detach")),
+            _mp_retire_listeners=retired.append,
             log=lambda _msg: None,
         )
         fast_switch._patch_media_release(media)
@@ -107,6 +109,7 @@ class PlaybackRegressionTests(unittest.TestCase):
              ("old", "pause"), ("old", "release")],
         )
         self.assertIs(media.android_player, new_player)
+        self.assertEqual(retired, [listeners])
 
     def test_current_panel_accepts_two_dimensional_kivy_spacing(self):
         namespace = {"dp": float}
@@ -249,6 +252,85 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertTrue(calls[0].startswith("https://www.youtube.com/oembed?"))
         self.assertEqual(channel("http://127.0.0.1/secrets"), "")
         self.assertEqual(len(calls), 1)
+
+
+    def test_notification_intent_callback_bound_only_once_after_many_tracks(self):
+        bound, unbound = [], []
+        callback = object()
+        state = {
+            "_action_owner": None,
+            "_intent_router_bound": False,
+            "_intent_router_lock": threading.RLock(),
+            "_py_activity": SimpleNamespace(
+                bind=lambda **kwargs: bound.append(kwargs),
+                unbind=lambda **kwargs: unbound.append(kwargs),
+            ),
+            "_on_new_intent": callback,
+            "log": lambda _message: None,
+        }
+        bind_intent = isolated_definition(
+            "media_android.py", "bind_intent_router", state
+        )
+        bind_owner = isolated_definition(
+            "media_android.py", "bind_notification_action_router", state
+        )
+        unbind = isolated_definition(
+            "media_android.py", "unbind_notification_action_router", state
+        )
+        state["bind_intent_router"] = bind_intent
+        for index in range(50):
+            bind_owner(index)
+            bind_intent()
+        self.assertEqual(len(bound), 1)
+        self.assertIs(bound[0]["on_new_intent"], callback)
+        self.assertEqual(state["_action_owner"], 49)
+        unbind()
+        unbind()
+        self.assertEqual(len(unbound), 1)
+        bind_owner(51)
+        self.assertEqual(len(bound), 2)
+
+    def test_webview_repeated_navigation_is_delivered_once(self):
+        clock = SimpleNamespace(now=10.0)
+        state = {
+            "threading": threading,
+            "time": SimpleNamespace(monotonic=lambda: clock.now),
+            "_web_dispatch_lock": threading.Lock(),
+            "_web_dispatch_last": ("", 0.0),
+        }
+        should = isolated_definition(
+            "media_android.py", "_should_dispatch_webview_video", state
+        )
+        first = (
+            "https://m.youtube.com/watch?v=LTsbyX-l06Y"
+            "&list=RDLTsbyX-l06Y&start_radio=1"
+        )
+        duplicate_with_different_tracking = (
+            "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+            "&list=RDLTsbyX-l06Y&pp=tracking"
+        )
+        second = "https://m.youtube.com/watch?v=BSxesC31kto"
+        self.assertTrue(should(first))
+        self.assertEqual([should(duplicate_with_different_tracking)
+                          for _ in range(60)], [False] * 60)
+        self.assertTrue(should(second))
+        clock.now += 2.0
+        self.assertTrue(should(first))
+
+    def test_retired_jni_proxies_remain_bounded_and_strongly_referenced(self):
+        from collections import deque
+        retained = deque(maxlen=64)
+        state = {"_mp_retired_listeners": retained}
+        retire = isolated_definition(
+            "media_android.py", "_mp_retire_listeners", state
+        )
+        callbacks = [(object(),) for _ in range(100)]
+        for callback in callbacks:
+            retire(callback)
+        self.assertEqual(len(retained), 64)
+        self.assertIs(retained[-1], callbacks[-1])
+        self.assertIs(retained[0], callbacks[-64])
+
 
 
 if __name__ == "__main__":
