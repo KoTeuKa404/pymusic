@@ -4739,9 +4739,17 @@ class AudioPlayerScreen(Screen):
                     # never wait for onPrepared to move from the old 1x1 view.
                     self._align_video_to_thumb()
 
+                    # A MediaPlayer may stay forever in prepareAsync()
+                    # without producing an error callback. Bound each
+                    # candidate so the next HLS resolution can be tried.
+                    attempt_state = {"failed": False, "watchdog": None}
+
                     def ready():
-                        if not current_request():
+                        if attempt_state["failed"] or not current_request():
                             return
+                        timer = attempt_state.get("watchdog")
+                        if timer is not None:
+                            timer.cancel()
                         self._pymusic_video_starting = False
                         self._set_video_mode(True)
                         self._align_video_to_thumb()
@@ -4752,14 +4760,30 @@ class AudioPlayerScreen(Screen):
                         )
 
                     def failed(reason):
+                        if attempt_state["failed"]:
+                            return
+                        attempt_state["failed"] = True
+                        timer = attempt_state.get("watchdog")
+                        if timer is not None:
+                            timer.cancel()
                         if not current_request():
                             return
                         print(
                             f"[VIDEO] candidate {choice.get('format_id')} "
                             f"failed ({reason}); trying next source"
                         )
+                        if reason == "prepare timeout":
+                            # The native error callback didn't fire; retire
+                            # the stuck decoder before trying another stream.
+                            try:
+                                self._video_player.stop()
+                            except Exception:
+                                pass
                         start_candidate(index + 1)
 
+                    attempt_state["watchdog"] = Clock.schedule_once(
+                        lambda _dt: failed("prepare timeout"), 13.0
+                    )
                     self._play_video_if_screen_active(
                         video_stream,
                         video_headers,
