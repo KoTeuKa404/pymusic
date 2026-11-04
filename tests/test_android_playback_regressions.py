@@ -196,5 +196,60 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(len(info["formats"]), 2)
 
 
+    def test_healthy_tracks_keep_android_client_and_only_recover_on_failure(self):
+        from typing import Tuple
+        chooser = isolated_definition(
+            "ytdlp_helpers.py", "_audio_client_order",
+            {"Tuple": Tuple, "_env_bool": lambda *_args: False},
+        )
+        self.assertEqual(chooser(False), ("android",))
+        self.assertEqual(
+            chooser(True), ("web_embedded", "android", "web_embedded")
+        )
+
+    def test_channel_name_fallback_uses_official_oembed_and_validated_id(self):
+        import json
+        import re
+        import urllib.parse
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _bytes):
+                return b'{"author_name":"Grimwind"}'
+
+        def fake_request(url, headers):
+            calls.append(url)
+            self.assertEqual(headers["Accept"], "application/json")
+            return url
+
+        network = SimpleNamespace(request=SimpleNamespace(
+            Request=fake_request,
+            urlopen=lambda _request, timeout=12: FakeResponse(),
+        ))
+        namespace = {
+            "re": re, "json": json, "urllib": network,
+            "urlparse": urllib.parse,
+            "_ANDROID_WEB_UA": "Mozilla/5.0",
+            "_extract_video_id_from_url": lambda url: (
+                "LTsbyX-l06Y" if url.endswith("watch?v=LTsbyX-l06Y") else ""
+            ),
+        }
+        channel = isolated_definition(
+            "ytdlp_helpers.py", "_channel_name_from_oembed", namespace
+        )
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        self.assertEqual(channel(url), "Grimwind")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("https://www.youtube.com/oembed?"))
+        self.assertEqual(channel("http://127.0.0.1/secrets"), "")
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
