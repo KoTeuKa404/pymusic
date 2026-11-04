@@ -99,6 +99,11 @@ class AndroidVideoPlayer:
         self._native_seek_dragging = False
         self._native_current_time = None
         self._native_total_time = None
+        # An Android SurfaceView can exist while its native Surface has been
+        # destroyed (especially after GONE/INVISIBLE during navigation).
+        # Never attach MediaPlayer to a released Surface.
+        self._surface_attach_rebuild_gen = -1
+        self._surface_retry_limit = 42
 
     class _OnPreparedListener(PythonJavaClass):
         __javainterfaces__ = ['android/media/MediaPlayer$OnPreparedListener']
@@ -613,14 +618,24 @@ class AndroidVideoPlayer:
     def create_surface(self):
         activity = PythonActivity.mActivity
 
-        # REUSE EXISTING SURFACE
+        # REUSE EXISTING VIEW only while still attached to Activity. A
+        # detached SurfaceView's Holder must not be used for setDisplay().
+        if self.surface_view is not None:
+            try:
+                if self.surface_view.getParent() is None:
+                    self.surface_view = None
+            except Exception:
+                self.surface_view = None
         if self.surface_view is not None:
             try:
                 sv = self.surface_view
                 if self._frame_bounds:
                     self._apply_surface_bounds()
                 else:
-                    sv.setVisibility(4)
+                    # INVISIBLE keeps destroying native surfaces on some
+                    # Android 13 devices. Retain a visible 1px placeholder
+                    # until real frame bounds arrive.
+                    sv.setVisibility(View.VISIBLE)
                 parent = sv.getParent()
                 if parent is not None:
                     try:
@@ -701,7 +716,9 @@ class AndroidVideoPlayer:
             print("[VIDEO] addContentView error:", e)
             return
 
-        sv.setVisibility(4)
+        # Don't immediately hide the new SurfaceView: visibility=INVISIBLE
+        # may destroy the native Surface before MediaPlayer.setDisplay().
+        sv.setVisibility(View.VISIBLE)
 
         self.surface_view = sv
         self._bind_surface_tap()
@@ -983,59 +1000,62 @@ class AndroidVideoPlayer:
             print(f"[VIDEO] apply bounds error: {e}")
 
     def _attach_and_prepare_when_surface_ready(self, gen: int):
+        """Wait until Android has a real, valid Surface before setDisplay().
 
-        @run_on_ui_thread
-        def _check(*_):
-            if gen != self._play_gen:
-                return
-            if self.player is None:
-                return
-            if self.surface_view is None:
-                Clock.schedule_once(lambda dt: _check(), 0.05)
-                return
-
-            if gen != self._play_gen:
+        SurfaceView's Java object outlives its underlying Surface on
+        Android 13. Calling setDisplay() on a released holder produced
+        'The surface has been released' and silently killed video controls.
+        """
+        def _attempt(_dt=0, attempt=0):
+            if gen != self._play_gen or self.player is None:
                 return
 
-            try:
-                holder = self.surface_view.getHolder()
-                self.player.setDisplay(holder)
-
+            @run_on_ui_thread
+            def on_android_ui():
+                if gen != self._play_gen or self.player is None:
+                    return
                 try:
-                    self.surface_view.setVisibility(View.VISIBLE)
-                    parent = self.surface_view.getParent()
-                    if parent is not None:
-                        try:
-                            parent.bringChildToFront(self.surface_view)
-                        except Exception:
-                            pass
-                        try:
-                            parent.requestLayout()
-                        except Exception:
-                            try:
-                                self.surface_view.requestLayout()
-                            except Exception:
-                                pass
-                        try:
-                            parent.invalidate()
-                        except Exception:
-                            try:
-                                self.surface_view.invalidate()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                self._bring_controls_or_surface_front()
-                print("[VIDEO] calling prepareAsync()")
-                self.player.prepareAsync()
-            except Exception as e:
-                print("[VIDEO] play() error (attach/prepare):", e)
-                try:
-                    self.surface_view.setVisibility(4)
-                except Exception:
-                    pass
+                    if self.surface_view is None:
+                        self.create_surface()
+                        raise RuntimeError("surface view pending")
+                    sv = self.surface_view
+                    if sv.getParent() is None:
+                        raise RuntimeError("surface view detached")
+                    sv.setVisibility(View.VISIBLE)
+                    # Restore real dimensions after stop() shrank the old
+                    # view to 1x1; a 1x1 holder may never become usable.
+                    if self._frame_bounds:
+                        self._apply_surface_bounds()
+                    holder = sv.getHolder()
+                    native_surface = holder.getSurface() if holder else None
+                    if native_surface is None or not bool(native_surface.isValid()):
+                        raise RuntimeError("native surface not valid yet")
 
-        Clock.schedule_once(lambda dt: _check(), 0)
+                    self.player.setDisplay(holder)
+                    self._bring_controls_or_surface_front()
+                    print(f"[VIDEO] native surface attached gen={gen} retries={attempt}")
+                    self.player.prepareAsync()
+                    return
+                except Exception as exc:
+                    if gen != self._play_gen:
+                        return
+                    if attempt < int(self._surface_retry_limit):
+                        if attempt in (0, 10, 25):
+                            print(f"[VIDEO] waiting for valid surface attempt={attempt}: {exc}")
+                        Clock.schedule_once(
+                            lambda dt, n=attempt + 1: _attempt(dt, n), 0.08
+                        )
+                        return
+                    print(f"[VIDEO] surface unavailable; cancelling video gen={gen}: {exc}")
+                    # Keep audio and thumbnail alive if native video cannot
+                    # attach after bounded attempts. A future play may retry.
+                    self._prepared = False
+                    self._surface_ready_to_show = False
+                    self.stop()
+
+            on_android_ui()
+
+        Clock.schedule_once(lambda _dt: _attempt(_dt, 0), 0)
 
     @run_on_ui_thread
     def hide_native_views(self):
