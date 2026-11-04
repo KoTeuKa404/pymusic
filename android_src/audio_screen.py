@@ -3712,7 +3712,7 @@ class AudioPlayerScreen(Screen):
         _player_likes_ensure_likes_async(self, video_url)
         if not video_url:
             return
-        if video_url in self._metadata_loaded_urls:
+        if video_url in self._metadata_loaded_urls and self._channel:
             return
         if self._meta_inflight and self._meta_last_url == video_url:
             return
@@ -3721,13 +3721,27 @@ class AudioPlayerScreen(Screen):
 
         def _job():
             try:
-                info = ydlh.extract_audio_info(video_url)
+                # A cached track may already have the title/thumb but no
+                # channel. Avoid a second full yt-dlp extraction in that case.
+                if video_url in self._metadata_loaded_urls:
+                    info = {}
+                else:
+                    info = ydlh.extract_audio_info(video_url)
+                if not (info.get("channel") or info.get("uploader") or self._channel):
+                    # Official YouTube oEmbed gives author_name even when the
+                    # Android player response omits owner/channel metadata.
+                    # This runs only in the metadata worker, never in audio
+                    # extraction or the Kivy rendering thread.
+                    name = ydlh._channel_name_from_oembed(video_url)
+                    if name:
+                        info["channel"] = name
                 if video_url != self._last_video_url:
                     return
-                self._apply_info_metadata(info)
-                self._metadata_loaded_urls.add(video_url)
-            except Exception:
-                pass
+                if info:
+                    self._apply_info_metadata(info)
+                    self._metadata_loaded_urls.add(video_url)
+            except Exception as exc:
+                print("[META] async channel lookup failed:", exc)
             finally:
                 self._meta_inflight = False
 
