@@ -112,20 +112,33 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(retired, [listeners])
 
     def test_current_panel_accepts_two_dimensional_kivy_spacing(self):
-        namespace = {"dp": float}
+        namespace = {
+            "dp": float,
+            "_current_video_url_of": lambda screen: "https://www.youtube.com/watch?v=LTsbyX-l06Y",
+        }
         apply_height = isolated_definition(
             "audio_screen.py", "_current_apply_height", namespace
         )
         listing = SimpleNamespace(
             children=[SimpleNamespace(height=160), SimpleNamespace(height=160)],
-            spacing=[2, 7], height=0,
+            spacing=[2, 7], height=0, minimum_height=0,
         )
         scroll = SimpleNamespace(height=0, opacity=0, disabled=True)
-        screen = SimpleNamespace(ids={})
+        controls = []
+        screen = SimpleNamespace(
+            ids={}, _similar_collapsed=False,
+            _sync_current_lower_controls=lambda has_video: controls.append(has_video),
+        )
         apply_height(screen, scroll, listing)
-        self.assertEqual(listing.height, 341)
-        self.assertEqual(scroll.height, 341)
-        self.assertEqual(scroll._current_v4_height, 341)
+        self.assertEqual(listing.height, 343)
+        self.assertEqual(scroll.height, 280)
+        self.assertEqual(scroll._current_v4_height, 280)
+        self.assertTrue(scroll.do_scroll_y)
+        self.assertEqual(controls, [True])
+        screen._similar_collapsed = True
+        apply_height(screen, scroll, listing)
+        self.assertEqual(scroll.height, 0)
+        self.assertTrue(scroll.disabled)
 
     def test_recommendation_render_is_deferred_off_kivy_thread(self):
         jobs = []
@@ -331,6 +344,68 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIs(retained[-1], callbacks[-1])
         self.assertIs(retained[0], callbacks[-64])
 
+
+
+    def test_comments_are_never_extracted_before_sheet_open(self):
+        # A track/metadata refresh must be a no-op until the user taps.
+        calls = []
+        namespace = {
+            "_current_video_url_of": lambda _screen: "https://www.youtube.com/watch?v=LTsbyX-l06Y",
+        }
+        ensure = isolated_definition(
+            "audio_screen.py", "_current_ensure_comments", namespace
+        )
+        screen = SimpleNamespace(
+            _current_ensure_state=lambda: calls.append("ensure"),
+            _current_comments_popup_v4=None,
+            _app_in_background=False,
+        )
+        ensure(screen)
+        self.assertEqual(calls, ["ensure"])
+
+    def test_similar_swipe_owns_touch_and_restores_parent_scroll(self):
+        bindings = {}
+        window_handlers = {}
+
+        class FakeWidget:
+            def bind(self, **kwargs):
+                bindings.update(kwargs)
+
+            def collide_point(self, *_pos):
+                return True
+
+        class FakeWindow:
+            def bind(self, **kwargs):
+                window_handlers.update(kwargs)
+
+        inner = FakeWidget()
+        inner.height = 280
+        outer = SimpleNamespace(do_scroll_y=True)
+        namespace = {"Window": FakeWindow()}
+        bind = isolated_definition(
+            "audio_screen.py", "_bind_similar_scroll_input", namespace
+        )
+        screen = SimpleNamespace(
+            ids={"similar_scroll": inner, "player_details_scroll": outer},
+            _similar_collapsed=False,
+            _is_screen_active=lambda: True,
+        )
+        bind(screen)
+        self.assertTrue(inner._pymusic_touch_ownership_bound)
+        touch = SimpleNamespace(uid="finger-1", pos=(10, 10))
+        bindings["on_touch_down"](inner, touch)
+        self.assertFalse(outer.do_scroll_y)
+        window_handlers["on_touch_up"](None, touch)
+        self.assertTrue(outer.do_scroll_y)
+        self.assertIsNone(inner._pymusic_active_touch_uid)
+
+    def test_current_player_kv_has_compact_autoplay_and_tap_to_open_comments(self):
+        kv = (ROOT / "youtube_gui.kv").read_text(encoding="utf-8")
+        self.assertIn("id: autoplay_btn", kv)
+        self.assertIn("on_release: root.toggle_autoskip()", kv)
+        self.assertIn("id: comments_trigger", kv)
+        self.assertIn("on_release: root.open_comments_sheet()", kv)
+        self.assertIn("id: similar_scroll", kv)
 
 
 if __name__ == "__main__":
