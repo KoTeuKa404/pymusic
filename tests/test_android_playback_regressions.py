@@ -170,6 +170,7 @@ class PlaybackRegressionTests(unittest.TestCase):
     def test_youtube_clients_preserve_author_and_continue_until_audio_only(self):
         from typing import Any, Dict, Optional, Tuple
         queries = []
+        formats_by_client = {}
         muxed = {"url": "https://cdn.example/18", "format_id": "18",
                  "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a.40.2"}
         aac = {"url": "https://cdn.example/140", "format_id": "140",
@@ -178,6 +179,8 @@ class PlaybackRegressionTests(unittest.TestCase):
         class FakeYoutubeDL:
             def __init__(self, options):
                 self.client = options["extractor_args"]["youtube"]["player_client"][0]
+                self.selected_format = options.get("format")
+                formats_by_client[self.client] = self.selected_format
 
             def __enter__(self):
                 return self
@@ -202,11 +205,13 @@ class PlaybackRegressionTests(unittest.TestCase):
         )
         info, error = choose(
             "https://www.youtube.com/watch?v=LTsbyX-l06Y",
-            {"quiet": True},
+            {"quiet": True, "format": "bestaudio[ext=m4a]/best"},
             ("android", "web_embedded"),
         )
         self.assertIsNone(error)
         self.assertEqual(queries, ["android", "web_embedded"])
+        self.assertEqual(formats_by_client["android"], "bestaudio[ext=m4a]/best")
+        self.assertIsNone(formats_by_client["web_embedded"])
         self.assertEqual(info["channel"], "Grimwind")
         self.assertEqual(info["thumbnail"], "https://images.example/cover")
         self.assertEqual(len(info["formats"]), 2)
@@ -220,7 +225,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         )
         self.assertEqual(chooser(False), ("android",))
         self.assertEqual(
-            chooser(True), ("web_embedded", "android", "web_embedded")
+            chooser(True), ("web_embedded", "tv_embedded", "android", "ios")
         )
 
     def test_channel_name_fallback_uses_official_oembed_and_validated_id(self):
@@ -406,6 +411,149 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn("id: comments_trigger", kv)
         self.assertIn("on_release: root.open_comments_sheet()", kv)
         self.assertIn("id: similar_scroll", kv)
+
+
+    def test_video_surface_attach_waits_for_valid_native_surface(self):
+        jobs = []
+        valid_checks = []
+        attached = []
+        prepared = []
+
+        class Surface:
+            def isValid(self):
+                valid_checks.append(True)
+                return len(valid_checks) >= 4
+
+        class Holder:
+            def getSurface(self):
+                return Surface()
+
+        class SurfaceView:
+            def getParent(self):
+                return object()
+
+            def setVisibility(self, _value):
+                pass
+
+            def getHolder(self):
+                return Holder()
+
+        class Player:
+            def setDisplay(self, holder):
+                attached.append(holder)
+
+            def prepareAsync(self):
+                prepared.append(True)
+
+        namespace = {
+            "Clock": SimpleNamespace(
+                schedule_once=lambda cb, _delay=0: jobs.append(cb)),
+            "run_on_ui_thread": lambda fn: fn,
+            "View": SimpleNamespace(VISIBLE=0),
+        }
+        method = isolated_definition(
+            "video_player.py", "_attach_and_prepare_when_surface_ready",
+            namespace,
+        )
+        owner = SimpleNamespace(
+            _play_gen=12, player=Player(),
+            surface_view=SurfaceView(),
+            _frame_bounds=(10, 20, 160, 90),
+            _surface_retry_limit=7,
+            _apply_surface_bounds=lambda: None,
+            _bring_controls_or_surface_front=lambda: None,
+            create_surface=lambda: None,
+            stop=lambda: self.fail("unexpected stop"),
+        )
+        method(owner, 12)
+        for _ in range(10):
+            if not jobs:
+                break
+            jobs.pop(0)(0)
+        self.assertEqual(len(valid_checks), 4)
+        self.assertEqual(len(attached), 1)
+        self.assertEqual(prepared, [True])
+        self.assertFalse(jobs)
+
+    def test_video_surface_never_attaches_released_surface(self):
+        jobs, calls = [], []
+
+        class Surface:
+            def isValid(self):
+                return False
+
+        class Holder:
+            def getSurface(self):
+                return Surface()
+
+        class SurfaceView:
+            def getParent(self):
+                return object()
+
+            def setVisibility(self, _value):
+                pass
+
+            def getHolder(self):
+                return Holder()
+
+        namespace = {
+            "Clock": SimpleNamespace(
+                schedule_once=lambda cb, _delay=0: jobs.append(cb)),
+            "run_on_ui_thread": lambda fn: fn,
+            "View": SimpleNamespace(VISIBLE=0),
+        }
+        method = isolated_definition(
+            "video_player.py", "_attach_and_prepare_when_surface_ready",
+            namespace,
+        )
+        owner = SimpleNamespace(
+            _play_gen=3, player=SimpleNamespace(
+                setDisplay=lambda holder: calls.append("attached"),
+                prepareAsync=lambda: calls.append("prepared"),
+            ), surface_view=SurfaceView(), _frame_bounds=None,
+            _surface_retry_limit=2, _prepared=True,
+            _apply_surface_bounds=lambda: None,
+            _bring_controls_or_surface_front=lambda: None,
+            create_surface=lambda: None,
+            stop=lambda: calls.append("stopped"),
+        )
+        method(owner, 3)
+        for _ in range(8):
+            if not jobs:
+                break
+            jobs.pop(0)(0)
+        self.assertEqual(calls, ["stopped"])
+        self.assertFalse(owner._prepared)
+
+    def test_video_title_never_becomes_channel_from_recommendations(self):
+        verified = isolated_definition(
+            "audio_screen.py", "_verified_channel_name", {}
+        )
+        title = "Grimwind - Гвардия! Только Вперед!"
+        self.assertEqual(verified(title, title), "")
+        self.assertEqual(verified("Grimwind", title), "Grimwind")
+        self.assertEqual(verified("YouTube", title), "")
+        self.assertEqual(verified("", title), "")
+
+    def test_failed_format18_recovery_does_not_reuse_same_muxed_url(self):
+        from typing import Any, Dict, Optional
+        muxed = {
+            "url": "https://cdn.example/18", "format_id": "18",
+            "ext": "mp4", "acodec": "mp4a.40.2", "vcodec": "avc1"
+        }
+        ns = {
+            "Any": Any, "Dict": Dict, "Optional": Optional,
+            "YDLLogger": lambda: None, "_ANDROID_YT_UA": "Android",
+            "_audio_client_order": lambda _: ("web_embedded", "android"),
+            "_extract_info_with_clients": lambda *_a: (
+                {"formats": [muxed], "format_id": "18"}, None),
+            "_pick_best_audio": lambda *_a, **_k: None,
+            "_best_effort_headers": lambda src, defaults: defaults,
+        }
+        extract = isolated_definition("ytdlp_helpers.py", "extract_audio_info", ns)
+        with self.assertRaisesRegex(RuntimeError, "Alternative audio-only"):
+            extract("https://www.youtube.com/watch?v=LTsbyX-l06Y",
+                    prefer_compat=True)
 
 
 if __name__ == "__main__":

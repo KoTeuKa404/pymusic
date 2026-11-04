@@ -286,7 +286,9 @@ def _install_now() -> bool:
                 return
             try:
                 if (url in getattr(self, "_metadata_loaded_urls", set())
-                        and str(getattr(self, "_channel", "") or "").strip()):
+                        and audio_screen._verified_channel_name(
+                                getattr(self, "_channel", ""), getattr(self, "_title", "")
+                            )):
                     return
             except Exception:
                 pass
@@ -312,7 +314,9 @@ def _install_now() -> bool:
                         ):
                             return
                         if (expected_url in getattr(self, "_metadata_loaded_urls", set())
-                            and str(getattr(self, "_channel", "") or "").strip()):
+                            and audio_screen._verified_channel_name(
+                                getattr(self, "_channel", ""), getattr(self, "_title", "")
+                            )):
                             return
                         if _audio_ready(media):
                             break
@@ -326,7 +330,9 @@ def _install_now() -> bool:
                     ):
                         return
                     if (expected_url in getattr(self, "_metadata_loaded_urls", set())
-                        and str(getattr(self, "_channel", "") or "").strip()):
+                        and audio_screen._verified_channel_name(
+                                getattr(self, "_channel", ""), getattr(self, "_title", "")
+                            )):
                         return
                     old_metadata(self, expected_url)
                 finally:
