@@ -1,0 +1,31 @@
+name: Python playback regressions
+
+on:
+  pull_request:
+    paths:
+      - "android_src/**"
+      - "tests/**"
+      - ".github/workflows/python-playback-tests.yml"
+  push:
+    branches: ["fix/**"]
+    paths:
+      - "android_src/**"
+      - "tests/**"
+      - ".github/workflows/python-playback-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  playback-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax validation
+        run: python -m compileall -q android_src
+      - name: Offline regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
