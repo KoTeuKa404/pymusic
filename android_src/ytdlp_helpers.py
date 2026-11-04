@@ -614,6 +614,14 @@ def py_headers_to_javamap(headers: Dict[str, str], HashMapClass) -> Any:
 
 
 # ============================ AUDIO API ================================
+def _audio_client_order(prefer_compat: bool = False) -> Tuple[str, ...]:
+    """Leave healthy Android streams alone; fallback only after a failure."""
+    clients = ("web_embedded", "android", "web_embedded") if prefer_compat else ("android",)
+    if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
+        clients += ("web",)
+    return clients
+
+
 def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[str, Any]:
     """
     Повертає:
@@ -663,12 +671,7 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
     # Only after an actual playback failure (prefer_compat=True) ask embedded
     # clients for an alternative audio-only stream, usually AAC/M4A format 140.
     # Do not make healthy tracks wait for extra YouTube requests.
-    if prefer_compat:
-        clients = ("web_embedded", "android", "web_embedded")
-    else:
-        clients = ("android",)
-    if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
-        clients += ("web",)
+    clients = _audio_client_order(prefer_compat)
     info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
     if not info:
         print(f"[AUDIO] extract failed: {repr(err)}")
