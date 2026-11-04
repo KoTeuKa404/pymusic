@@ -40,6 +40,9 @@ def _patch_audio_screen() -> bool:
         Clock = module.Clock
         dp = module.dp
 
+        def on_kivy_thread():
+            return threading.current_thread() is threading.main_thread()
+
         def ensure_state(self) -> None:
             if not hasattr(self, "_hotfix_related_cache"):
                 self._hotfix_related_cache = {}
@@ -163,6 +166,9 @@ def _patch_audio_screen() -> bool:
         # Section geometry and lightweight playlist rendering.
         # ------------------------------------------------------------------
         def set_playlist_visibility(self) -> None:
+            if not on_kivy_thread():
+                Clock.schedule_once(lambda _dt: set_playlist_visibility(self), 0)
+                return
             ensure_state(self)
             visible = bool(self.playlist and self.playlist.tracks)
             collapsed = bool(getattr(self, "_playlist_collapsed", False))
@@ -188,6 +194,9 @@ def _patch_audio_screen() -> bool:
                 scroll.do_scroll_y = True
 
         def set_similar_visibility(self) -> None:
+            if not on_kivy_thread():
+                Clock.schedule_once(lambda _dt: set_similar_visibility(self), 0)
+                return
             ensure_state(self)
             has_items = bool(getattr(self, "_related_items", None))
             loading = bool(self._hotfix_related_loading)
@@ -336,6 +345,11 @@ def _patch_audio_screen() -> bool:
                 return None
 
         def render_similar(self, force=False):
+            # Background MediaPlayer callbacks may trigger auto-next. Kivy
+            # canvas/opacity updates must only occur on the Kivy main thread.
+            if not on_kivy_thread():
+                Clock.schedule_once(lambda _dt: render_similar(self, force=force), 0)
+                return None
             ensure_state(self)
             listing = self.ids.get("similar_list")
             if listing is None:
