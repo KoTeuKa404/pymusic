@@ -544,6 +544,13 @@ def _extract_info_with_clients(
     for client in clients:
         opts = dict(base_opts)
         opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        # _pick_best_audio() and _pick_best_video() select from the FULL
+        # formats list. Let yt-dlp extract metadata without prematurely
+        # raising "Requested format is not available" on SABR-only clients.
+        # In particular web_embedded exposes AAC format 140 for some videos
+        # whose Android player client exposes only broken muxed format 18.
+        if client != "android":
+            opts["format"] = None
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -577,6 +584,10 @@ def _extract_info_with_clients(
             for fmt in formats
         )
         rank = 3 if aac else (2 if audio_only else (1 if hls else 0))
+        print(
+            f"[YTDLP] client={client} formats={len(formats)} "
+            f"audio_only={len(audio_only)} aac={aac} hls={hls} rank={rank}"
+        )
         if rank > best_rank:
             best_info, best_rank = info, rank
         if rank == 3:
@@ -616,7 +627,12 @@ def py_headers_to_javamap(headers: Dict[str, str], HashMapClass) -> Any:
 # ============================ AUDIO API ================================
 def _audio_client_order(prefer_compat: bool = False) -> Tuple[str, ...]:
     """Leave healthy Android streams alone; fallback only after a failure."""
-    clients = ("web_embedded", "android", "web_embedded") if prefer_compat else ("android",)
+    # Each client is attempted once; repeating web_embedded with identical
+    # extractor settings cannot repair a failed/empty result.
+    clients = (
+        ("web_embedded", "tv_embedded", "android", "ios")
+        if prefer_compat else ("android",)
+    )
     if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
         clients += ("web",)
     return clients
@@ -690,6 +706,16 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
     selected_format_id = str((chosen or {}).get("format_id") or info.get("format_id") or "")
     selected_ext = str((chosen or {}).get("ext") or info.get("ext") or "")
     selected_acodec = str((chosen or {}).get("acodec") or info.get("acodec") or "")
+
+    if prefer_compat and selected_format_id == "18":
+        # The caller is specifically recovering from format-18 playback
+        # failure. Returning the same muxed stream as an "AAC fallback"
+        # creates a slow retry loop and cannot fix that CDN/decoder error.
+        # Make the missing alternative visible to the recovery UI instead.
+        raise RuntimeError(
+            "Alternative audio-only stream is not available; "
+            "YouTube still returned failing muxed format 18"
+        )
 
     if not url:
         # типовий випадок "Only images are available"
