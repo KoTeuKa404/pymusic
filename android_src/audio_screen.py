@@ -1120,6 +1120,7 @@ class AudioPlayerScreen(Screen):
         self._last_video_sync_ts = 0.0
         self._bg_stall_since = 0.0
         self._video_active = False
+        self._pymusic_video_starting = False
         self._video_was_active = False
         self._video_resume_url = None
         self._video_resume_gen = -1
@@ -1636,7 +1637,11 @@ class AudioPlayerScreen(Screen):
                 return
             if not self._is_screen_active():
                 return
-            if not bool(getattr(self, "_video_active", False)):
+            # Native SurfaceView needs real viewport bounds *before*
+            # MediaPlayer.prepareAsync(). Waiting until video_active (set
+            # only after onPrepared) left a 1x1 surface and no visible video.
+            if not (bool(getattr(self, "_video_active", False))
+                    or bool(getattr(self, "_pymusic_video_starting", False))):
                 return
 
             self._configure_video_block()
@@ -4672,68 +4677,108 @@ class AudioPlayerScreen(Screen):
                 self._start_audio_only_after_prepared(gen)
             return
 
+        # Capture the selected track and its request ID. A late yt-dlp or
+        # Android MediaPlayer callback must not resurrect the previous video.
+        track_url = str(self._last_video_url or "")
+        request_id = int(getattr(self, "_pymusic_video_start_request", 0) or 0)
+
+        def current_request():
+            return (
+                self._is_current_gen(gen)
+                and int(getattr(self, "_pymusic_video_start_request", -1)) == request_id
+                and str(self._last_video_url or "") == track_url
+                and self._video_enabled
+                and self._playback_desired
+                and not self._user_paused
+                and not self._app_in_background
+                and self._is_screen_active()
+            )
+
         def _job():
             try:
-                if self._app_in_background or not self._is_screen_active():
+                if not current_request():
                     return
-                info_v = ydlh.safe_extract_video_info(self._last_video_url)
-                if not info_v:
-                    print("[VIDEO] no video info from yt_dlp")
-                    Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
-                    if sync_start:
-                        self._start_audio_only_after_prepared(gen)
+                info_v = ydlh.safe_extract_video_info(track_url) or {}
+                if not current_request():
                     return
+                streams = list(info_v.get("streams") or [])
+                if not streams and info_v.get("video_url"):
+                    streams = [{
+                        "video_url": info_v["video_url"],
+                        "http_headers": info_v.get("http_headers") or {},
+                        "format_id": info_v.get("format_id") or "",
+                        "protocol": "legacy",
+                    }]
 
-                vurl = info_v.get("video_url") or info_v.get("url")
-                vheaders = info_v.get("http_headers") or {}
-                print("[VIDEO] got vurl:", vurl)
-                if not vurl:
-                    Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
-                    if sync_start:
-                        self._start_audio_only_after_prepared(gen)
-                    return
-                if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
-                    return
-
-                vurl_final = vurl
-                vheaders_final = vheaders
-
-                if self._video_player and getattr(self._video_player, "_video_cache_enabled", False):
-                    if vurl.startswith("http") and "m3u8" not in vurl:
-                        local_path = self._download_video_locally(vurl, headers=vheaders)
-                        if local_path:
-                            print("[VIDEO] using buffered local file:", local_path)
-                            vurl_final = local_path
-                            vheaders_final = {}
-                        else:
-                            print("[VIDEO] buffering failed, streaming remote url")
-
-                if not self._is_current_gen(gen) or not self._playback_desired or not self._is_screen_active():
-                    return
-
-                if not self._video_enabled or not self._is_screen_active():
-                    Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
-                    if sync_start:
-                        self._start_audio_only_after_prepared(gen)
-                    return
-
-                # Превʼю лишається видимим, доки відео реально не підготувалось.
-                # Інакше SurfaceView показує порожній/білий кадр замість заставки.
-                if sync_start:
-                    self._start_synced_audio_and_video(gen, vurl_final, vheaders_final or {})
-                else:
-                    if self._video_player:
-                        Clock.schedule_once(self._align_video_to_thumb, 0)
-                        Clock.schedule_once(
-                            lambda dt: self._play_video_if_screen_active(vurl_final, vheaders_final or {}),
-                            0,
+                def start_candidate(index: int):
+                    if not current_request():
+                        return
+                    if index >= len(streams):
+                        self._pymusic_video_starting = False
+                        print(
+                            f"[VIDEO] all {len(streams)} video formats failed; "
+                            "keeping audio and thumbnail"
                         )
-            except Exception as e:
-                try:
-                    print("[VIDEO] auto fail:", e)
-                except Exception:
-                    pass
-                Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
+                        self._set_video_mode(False)
+                        return
+
+                    choice = streams[index]
+                    video_stream = str(choice.get("video_url") or "")
+                    if not video_stream:
+                        start_candidate(index + 1)
+                        return
+                    video_headers = dict(choice.get("http_headers") or {})
+                    self._pymusic_video_starting = True
+                    print(
+                        "[VIDEO] native candidate "
+                        f"{index+1}/{len(streams)} "
+                        f"format={choice.get('format_id')} "
+                        f"protocol={choice.get('protocol')}"
+                    )
+                    # Set native viewport geometry *before* play/prepareAsync;
+                    # never wait for onPrepared to move from the old 1x1 view.
+                    self._align_video_to_thumb()
+
+                    def ready():
+                        if not current_request():
+                            return
+                        self._pymusic_video_starting = False
+                        self._set_video_mode(True)
+                        self._align_video_to_thumb()
+                        self._set_video_controls_visible(True)
+                        print(
+                            f"[VIDEO] native playback ready "
+                            f"format={choice.get('format_id')}"
+                        )
+
+                    def failed(reason):
+                        if not current_request():
+                            return
+                        print(
+                            f"[VIDEO] candidate {choice.get('format_id')} "
+                            f"failed ({reason}); trying next source"
+                        )
+                        start_candidate(index + 1)
+
+                    self._play_video_if_screen_active(
+                        video_stream,
+                        video_headers,
+                        on_ready=ready,
+                        on_error=failed,
+                    )
+
+                if not streams:
+                    Clock.schedule_once(
+                        lambda _dt: start_candidate(0), 0
+                    )
+                    return
+                Clock.schedule_once(lambda _dt: start_candidate(0), 0)
+            except Exception as exc:
+                print(f"[VIDEO] automatic video extraction failed: {exc}")
+                if current_request():
+                    Clock.schedule_once(
+                        lambda _dt: self._set_video_mode(False), 0
+                    )
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -4796,14 +4841,17 @@ class AudioPlayerScreen(Screen):
                 pass
             self._set_video_mode(False)
 
-    def _play_video_if_screen_active(self, vurl: str, vheaders: dict):
+    def _play_video_if_screen_active(self, vurl: str, vheaders: dict, *, on_ready=None, on_error=None):
         if not self._is_screen_active() or self._app_in_background or not self._video_enabled:
             self._set_video_mode(False)
             return
         if self._video_player:
             def _show_video_after_first_frame():
                 try:
-                    Clock.schedule_once(lambda dt: self._set_video_mode(True), 0)
+                    if callable(on_ready):
+                        Clock.schedule_once(lambda dt: on_ready(), 0)
+                    else:
+                        Clock.schedule_once(lambda dt: self._set_video_mode(True), 0)
                 except Exception:
                     pass
 
@@ -4813,6 +4861,7 @@ class AudioPlayerScreen(Screen):
                 loop=False,
                 start_pos_provider=self._audio_pos_ms,
                 on_prepared=_show_video_after_first_frame,
+                on_error=on_error,
             )
 
     def _start_synced_audio_and_video(self, gen: int, vurl: str, vheaders: dict):
@@ -4852,10 +4901,13 @@ class AudioPlayerScreen(Screen):
 
             ma._mp_start()
             try:
-                if not (self._video_enabled and getattr(self._video_player, "is_embed", False)):
+                # Native video starts independently after audio. Do not
+                # stop a video that is already preparing merely because the
+                # shadow audio MediaPlayer has just become ready.
+                if not self._video_enabled or self._app_in_background:
                     Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
             except Exception:
-                Clock.schedule_once(lambda dt: self._set_video_mode(False), 0)
+                pass
 
             try:
                 ma.set_media_metadata(
