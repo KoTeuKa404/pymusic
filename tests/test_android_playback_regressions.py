@@ -138,5 +138,63 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(jobs[0][1], 0)
 
 
+    def test_prefers_real_aac_over_muxed_format_18(self):
+        from typing import Any, Dict, List, Optional
+        namespace = {"Any": Any, "Dict": Dict, "List": List, "Optional": Optional}
+        pick = isolated_definition("ytdlp_helpers.py", "_pick_best_audio", namespace)
+        muxed = {"url": "https://cdn.example/18", "format_id": "18",
+                 "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a.40.2"}
+        opus = {"url": "https://cdn.example/251", "format_id": "251",
+                "ext": "webm", "vcodec": "none", "acodec": "opus"}
+        aac = {"url": "https://cdn.example/140", "format_id": "140",
+               "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2"}
+        self.assertEqual(pick([muxed, opus, aac])["format_id"], "140")
+        self.assertEqual(pick([muxed, opus, aac], prefer_compat=True)["format_id"], "140")
+
+    def test_youtube_clients_preserve_author_and_continue_until_audio_only(self):
+        from typing import Any, Dict, Optional, Tuple
+        queries = []
+        muxed = {"url": "https://cdn.example/18", "format_id": "18",
+                 "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a.40.2"}
+        aac = {"url": "https://cdn.example/140", "format_id": "140",
+               "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2"}
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.client = options["extractor_args"]["youtube"]["player_client"][0]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                queries.append(self.client)
+                if self.client == "android":
+                    return {"formats": [muxed], "thumbnail": "https://images.example/cover"}
+                if self.client == "web_embedded":
+                    return {"formats": [muxed, aac], "channel": "Grimwind"}
+                raise AssertionError(self.client)
+
+        namespace = {
+            "Any": Any, "Dict": Dict, "Optional": Optional,
+            "Tuple": Tuple, "YoutubeDL": FakeYoutubeDL,
+        }
+        choose = isolated_definition(
+            "ytdlp_helpers.py", "_extract_info_with_clients", namespace
+        )
+        info, error = choose(
+            "https://www.youtube.com/watch?v=LTsbyX-l06Y",
+            {"quiet": True},
+            ("android", "web_embedded"),
+        )
+        self.assertIsNone(error)
+        self.assertEqual(queries, ["android", "web_embedded"])
+        self.assertEqual(info["channel"], "Grimwind")
+        self.assertEqual(info["thumbnail"], "https://images.example/cover")
+        self.assertEqual(len(info["formats"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
