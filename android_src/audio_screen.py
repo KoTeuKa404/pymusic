@@ -11,7 +11,10 @@ from kivy.metrics import dp
 from kivy.factory import Factory
 from kivy.uix.widget import Widget
 from kivy.properties import ObjectProperty, StringProperty, BooleanProperty
-from kivy.graphics import Color, Rectangle
+from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.uix.modalview import ModalView
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.button import Button
 from kivymd.uix.list import OneLineListItem, TwoLineListItem
 
 import threading
@@ -1274,6 +1277,7 @@ class AudioPlayerScreen(Screen):
             pass
 
         self._bind_playlist_scroll_input()
+        self._bind_similar_scroll_input()
         self._configure_player_scroll_bounds()
         for delay in (0.0, 0.10, 0.35):
             Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
@@ -1361,6 +1365,47 @@ class AudioPlayerScreen(Screen):
         inner.bind(on_touch_down=playlist_down, on_touch_up=playlist_up)
         Window.bind(on_touch_down=window_down, on_touch_up=window_up)
 
+    def _bind_similar_scroll_input(self):
+        """Reserve swipes inside recommendations for their own ScrollView."""
+        inner = self.ids.get("similar_scroll")
+        outer = self.ids.get("player_details_scroll")
+        if inner is None or outer is None:
+            return
+        if getattr(inner, "_pymusic_touch_ownership_bound", False):
+            return
+
+        def release():
+            inner._pymusic_active_touch_uid = None
+            outer.do_scroll_y = True
+
+        def touch_down(widget, touch):
+            try:
+                if (self._is_screen_active()
+                        and not getattr(self, "_similar_collapsed", False)
+                        and widget.height > 0
+                        and widget.collide_point(*touch.pos)):
+                    inner._pymusic_active_touch_uid = touch.uid
+                    outer.do_scroll_y = False
+            except Exception as exc:
+                print("[SIMILAR] gesture down error:", exc)
+            return False
+
+        def touch_up(_widget, touch):
+            if getattr(inner, "_pymusic_active_touch_uid", None) == touch.uid:
+                release()
+            return False
+
+        def window_down(_window, touch):
+            prev = getattr(inner, "_pymusic_active_touch_uid", None)
+            if prev is not None and prev != touch.uid:
+                release()
+            return False
+
+        inner._pymusic_touch_ownership_bound = True
+        inner._pymusic_window_input_handlers = (touch_down, touch_up, window_down)
+        inner.bind(on_touch_down=touch_down, on_touch_up=touch_up)
+        Window.bind(on_touch_down=window_down, on_touch_up=touch_up)
+
     def _set_scrubbing(self, active: bool):
         self._is_scrubbing = bool(active)
 
@@ -1420,6 +1465,9 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(self._align_video_to_thumb, 0.3)
 
     def on_pre_leave(self):
+        sheet = getattr(self, "_current_comments_popup_v4", None)
+        if sheet is not None:
+            sheet.dismiss()
         self._unbind_keys()
         self._unbind_headset()
         try:
@@ -1540,7 +1588,6 @@ class AudioPlayerScreen(Screen):
             pass
         if _current_video_url_of(self):
             self._ensure_related_current_v4(force=False)
-            self._current_ensure_comments()
         for delay in (0.0, 0.12, 0.5):
             Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
 
@@ -2484,11 +2531,23 @@ class AudioPlayerScreen(Screen):
     def play_audio(self, video_url, *args, **kwargs):
         self._current_ensure_state()
         canonical = _current_canonical_video_url(video_url)
+        previous_video = _current_video_url_of(self)
+        # A comments sheet belongs to one specific video. Dismiss it before
+        # switching tracks; do not auto-fetch the next video's comments.
+        if canonical and canonical != previous_video:
+            sheet = self._current_comments_popup_v4
+            if sheet is not None:
+                if threading.current_thread() is threading.main_thread():
+                    sheet.dismiss()
+                else:
+                    Clock.schedule_once(lambda _dt, popup=sheet: popup.dismiss(), 0)
         self._current_video_url_v4 = canonical
         self._current_related_url_v4 = ""
         self._current_auto_next_pending_v4 = False
         self._current_comments_url_v4 = ""
         self._current_comments_v4 = []
+        self._current_comment_count_v4 = None
+        self._current_comments_loading_v4 = False
         print(f"[CURRENT-V4] current video set url={canonical!r}")
         result = self._play_audio_base( video_url, *args, **kwargs)
         final_url = _current_canonical_video_url(getattr(self, "_last_video_url", "") or canonical)
@@ -2497,8 +2556,6 @@ class AudioPlayerScreen(Screen):
             if not getattr(self, "_last_video_url", None):
                 self._last_video_url = final_url
         self._ensure_related_current_v4( force=False)
-        if not bool(getattr(self, "_app_in_background", False)):
-            self._current_ensure_comments()
         for delay in (0.0, 0.10, 0.40):
             Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
         return result
@@ -3311,187 +3368,175 @@ class AudioPlayerScreen(Screen):
             self._current_comments_url_v4 = ""
         if not hasattr(self, "_current_comments_loading_v4"):
             self._current_comments_loading_v4 = False
+        if not hasattr(self, "_current_comments_popup_v4"):
+            self._current_comments_popup_v4 = None
+        if not hasattr(self, "_current_comments_rows_v4"):
+            self._current_comments_rows_v4 = None
+        if not hasattr(self, "_current_comments_sheet_count_v4"):
+            self._current_comments_sheet_count_v4 = None
 
     def _current_get_slot(self):
-        """Use the plain similar_list when the player has one real scroll.
-
-        The previous similar_scroll (nested MDScrollView) no longer exists
-        in the static KV tree. For compatibility the list itself can also
-        act as this panel's height/opacity target.
-        """
+        """Use a *bounded* independent ScrollView exclusively for related videos."""
+        scroll = self.ids.get("similar_scroll")
         listing = self.ids.get("similar_list")
-        scroll = self.ids.get("similar_scroll") or listing
-        header = self.ids.get("similar_header_row")
         if scroll is None or listing is None:
             return None, None
         try:
-            if header is not None:
-                header.height = 0
-                header.opacity = 0
-                header.disabled = True
-            if scroll is not listing:
-                scroll.size_hint_y = None
-                scroll.do_scroll_x = False
-                scroll.do_scroll_y = False
-                scroll.bar_width = 0
-                try:
-                    scroll.always_overscroll = False
-                except Exception:
-                    pass
-            scroll.opacity = 1
-            scroll.disabled = False
+            scroll.size_hint_y = None
+            scroll.do_scroll_x = False
+            scroll.do_scroll_y = True
+            scroll.bar_width = dp(3)
+            scroll.scroll_distance = dp(5)
+            scroll.scroll_timeout = 180
+            scroll.scroll_type = ["bars", "content"]
+            try:
+                scroll.always_overscroll = False
+            except Exception:
+                pass
             listing.size_hint_y = None
-            listing.padding = (0, 0, 0, dp(12))
-            listing.spacing = dp(2)
-        except Exception:
-            pass
-        if not bool(getattr(scroll, "_current_v4_height_guard", False)):
-            def guard(instance, value):
-                wanted = float(getattr(instance, "_current_v4_height", 0) or 0)
-                if wanted > 0 and float(value or 0) + 0.5 < wanted:
-                    Clock.schedule_once(
-                        lambda _dt: setattr(instance, "height", wanted), 0
-                    )
-            scroll.bind(height=guard)
-            scroll._current_v4_height_guard = True
+            listing.padding = (dp(6), dp(6))
+            listing.spacing = dp(4)
+        except Exception as exc:
+            print("[SIMILAR] scroll config error:", exc)
         return scroll, listing
 
+    def _sync_current_lower_controls(self, has_video: bool):
+        """Update lightweight buttons without recreating the related rows."""
+        try:
+            trigger = self.ids.get("comments_trigger")
+            if trigger is not None:
+                trigger.height = dp(60) if has_video else 0
+                trigger.opacity = 1 if has_video else 0
+                trigger.disabled = not has_video
+            description = self.ids.get("comments_preview_meta")
+            if description is not None:
+                count = getattr(self, "_current_comment_count_v4", None)
+                if count is not None:
+                    description.text = f"{int(count):,} коментарів".replace(",", " ")
+                else:
+                    description.text = "Натисніть, щоб переглянути"
+            autoplay_button = self.ids.get("autoplay_btn")
+            if autoplay_button is not None:
+                enabled = bool(getattr(self, "_auto_skip", True))
+                autoplay_button.icon = "autorenew" if enabled else "play-circle-outline"
+                autoplay_button.text_color = (
+                    (0.12, 0.48, 0.86, 1) if enabled
+                    else (0.56, 0.56, 0.56, 1)
+                )
+                autoplay_button.disabled = not has_video
+            collapsed = bool(getattr(self, "_similar_collapsed", False))
+            self._set_collapsible_header(
+                self.ids.get("similar_header_row"),
+                self.ids.get("similar_header"),
+                self.ids.get("similar_toggle_btn"),
+                has_video,
+                "Схожі відео",
+                collapsed,
+            )
+        except Exception as exc:
+            print("[CURRENT-V4] control refresh failed:", exc)
+
     def _current_apply_height(self, scroll, listing):
+        """Keep only recommendations in a 280dp nested swipe viewport."""
         try:
             children = list(getattr(listing, "children", []) or [])
-            height = sum(max(0.0, float(getattr(child, "height", 0) or 0)) for child in children)
+            content_h = sum(
+                max(0.0, float(getattr(child, "height", 0) or 0))
+                for child in children
+            )
             spacing = getattr(listing, "spacing", 0) or 0
-            # Kivy BoxLayout.spacing may be a two-element VariableListProperty.
             if isinstance(spacing, (tuple, list)):
                 spacing = spacing[1] if len(spacing) > 1 else (spacing[0] if spacing else 0)
-            height += max(0, len(children) - 1) * float(spacing or 0)
-            height += dp(14)
-            height = max(dp(210), height)
-            listing.height = height
-            scroll._current_v4_height = height
-            scroll.height = height
-            scroll.opacity = 1
-            scroll.disabled = False
-            outer = self.ids.get("player_details_scroll")
-            if outer is not None:
-                outer.do_scroll_y = True
-                outer.disabled = False
-                content = outer.children[0] if outer.children else None
-                trigger = getattr(content, "_trigger_layout", None)
-                if callable(trigger):
-                    trigger()
+            content_h += max(0, len(children) - 1) * float(spacing or 0)
+            content_h += dp(16)
+            content_h = max(content_h, float(getattr(listing, "minimum_height", 0) or 0))
+            listing.height = content_h
+            has_video = bool(_current_video_url_of(self))
+            collapsed = bool(getattr(self, "_similar_collapsed", False))
+            expanded = has_video and not collapsed
+            viewport_h = min(dp(280), max(dp(70), content_h)) if expanded else 0
+            scroll._current_v4_height = viewport_h
+            scroll.height = viewport_h
+            scroll.opacity = 1 if expanded else 0
+            scroll.disabled = not expanded
+            scroll.do_scroll_y = bool(expanded)
+            self._sync_current_lower_controls(has_video)
         except Exception as exc:
             print("[CURRENT-V4] panel height failed:", exc)
 
     def _render_current_lower_v4(self, *_args, **_kwargs):
+        # Network/MediaPlayer callbacks also arrive on non-Kivy threads.
+        if threading.current_thread() is not threading.main_thread():
+            Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+            return
         self._current_ensure_state()
         scroll, listing = self._current_get_slot()
         if scroll is None or listing is None:
-            print("[CURRENT-V4] lower KV slot missing")
             return
         url = _current_video_url_of(self)
-        try:
-            title = str(getattr(self.ids.get("audio_title"), "text", "") or "").strip()
-        except Exception:
-            title = ""
-        if not url and not title:
+        has_video = bool(url)
+        self._sync_current_lower_controls(has_video)
+        if not has_video:
+            listing.clear_widgets()
             scroll._current_v4_height = 0
             scroll.height = 0
             scroll.opacity = 0
+            scroll.disabled = True
+            self._current_v4_render_signature = None
             return
 
-        # Updating current-video metadata can call this repeatedly.
-        # Recreating every ButtonBehavior row while the user is dragging
-        # cancels the active Kivy touch stream. Rebuild only for a genuine
-        # content change (track, comments, autoplay or related entries).
-        comments_key = tuple(
-            (str(x.get("author") or ""), str(x.get("text") or ""))
-            for x in (getattr(self, "_current_comments_v4", []) or [])[:3]
+        related = list(getattr(self, "_related_items", []) or [])[:8]
+        signature = (
+            url,
+            tuple(
+                (str(item.get("url") or ""), str(item.get("video_id") or ""),
+                 str(item.get("title") or ""), str(item.get("thumb") or ""))
+                for item in related
+            ),
         )
-        related_key = tuple(
-            (str(x.get("url") or ""), str(x.get("video_id") or ""),
-             str(x.get("title") or ""))
-            for x in (getattr(self, "_related_items", []) or [])[:8]
-        )
-        panel_signature = (
-            url, title, bool(getattr(self, "_auto_skip", True)),
-            bool(getattr(self, "_current_comments_loading_v4", False)),
-            comments_key, related_key,
-        )
-        if (
-            getattr(self, "_current_v4_render_signature", None) == panel_signature
-            and bool(listing.children)
-        ):
+        if (getattr(self, "_current_v4_render_signature", None) == signature
+                and bool(listing.children)):
+            self._current_apply_height(scroll, listing)
             return
-        self._current_v4_render_signature = panel_signature
+
+        previous_signature = getattr(self, "_current_v4_render_signature", None)
+        self._current_v4_render_signature = signature
         listing.clear_widgets()
-
-        autoplay = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(54),
-            padding=(dp(16), 0, dp(14), 0),
-            spacing=dp(8),
-        )
-        text_box = BoxLayout(orientation="vertical")
-        text_box.add_widget(_current_make_label("Автовідтворення", height=30, font_size="16sp", bold=True))
-        text_box.add_widget(_current_make_label("Автоматично вмикати наступне схоже відео", height=20, font_size="11sp", color=(0.45, 0.45, 0.45, 1)))
-        autoplay.add_widget(text_box)
-        toggle = _CurrentTapLabel(
-            text="Увімк." if bool(getattr(self, "_auto_skip", True)) else "Вимк.",
-            size_hint=(None, None),
-            size=(dp(72), dp(38)),
-            font_size="13sp",
-            halign="center",
-            valign="middle",
-            color=(0.12, 0.42, 0.95, 1),
-        )
-        toggle.text_size = toggle.size
-        toggle.bind(on_release=lambda *_a: self.toggle_autoskip())
-        autoplay.add_widget(toggle)
-        listing.add_widget(autoplay)
-
-        listing.add_widget(_current_make_label("Коментарі", height=44, font_size="16sp", bold=True))
-        comments = list(getattr(self, "_current_comments_v4", []) or [])
-        if comments:
-            for item in comments[:3]:
-                row = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(72), padding=(dp(16), dp(4), dp(16), dp(4)))
-                row.add_widget(_current_make_label(item.get("author") or "Користувач YouTube", height=20, font_size="11sp", color=(0.45, 0.45, 0.45, 1)))
-                text = str(item.get("text") or "").replace("\n", " ")
-                row.add_widget(_current_make_label(text, height=44, font_size="13sp"))
-                listing.add_widget(row)
-        elif bool(getattr(self, "_current_comments_loading_v4", False)):
-            listing.add_widget(_current_make_label("Завантаження коментарів…", height=42, font_size="13sp", color=(0.48, 0.48, 0.48, 1)))
-        else:
-            listing.add_widget(_current_make_label("Коментарі недоступні або ще не завантажені", height=42, font_size="13sp", color=(0.48, 0.48, 0.48, 1)))
-
-        listing.add_widget(_current_make_label("Схожі відео", height=46, font_size="17sp", bold=True))
-        related = list(getattr(self, "_related_items", []) or [])
         if related:
-            for index, item in enumerate(related[:8]):
+            for index, item in enumerate(related):
                 try:
-                    row = self._make_similar_row(index, item)
-                    listing.add_widget(row)
-                except Exception:
-                    title_text = str(item.get("title") or "Відео")
+                    listing.add_widget(self._make_similar_row(index, item))
+                except Exception as exc:
+                    print("[SIMILAR] row fallback:", exc)
+                    title = str(item.get("title") or "Відео")
                     row = _CurrentTapLabel(
-                        text=title_text,
-                        size_hint_y=None,
-                        height=dp(64),
-                        font_size="15sp",
-                        halign="left",
-                        valign="middle",
+                        text=title, size_hint_y=None, height=dp(64),
+                        font_size="15sp", halign="left", valign="middle",
                         color=(0.12, 0.12, 0.12, 1),
                     )
-                    row.bind(width=lambda instance, width: setattr(instance, "text_size", (max(dp(1), width - dp(24)), None)))
+                    row.bind(
+                        width=lambda instance, width: setattr(
+                            instance, "text_size", (max(dp(1), width - dp(24)), None)
+                        )
+                    )
                     row.bind(on_release=lambda _instance, i=index: self._play_from_related_index(i))
                     listing.add_widget(row)
         else:
-            listing.add_widget(_current_make_label("Завантаження рекомендацій…", height=54, font_size="13sp", color=(0.48, 0.48, 0.48, 1)))
+            listing.add_widget(_current_make_label(
+                "Завантаження рекомендацій…", height=54,
+                font_size="13sp", color=(0.48, 0.48, 0.48, 1),
+            ))
 
-        for delay in (0.0, 0.04, 0.14):
-            Clock.schedule_once(lambda _dt, s=scroll, l=listing: self._current_apply_height( s, l), delay)
-        print(f"[CURRENT-V4] panel rendered url={url!r} related={len(related)}")
+        # Reset only after the actual current-video/related list changed.
+        if previous_signature != signature:
+            scroll.scroll_y = 1.0
+        self._current_apply_height(scroll, listing)
+        for delay in (0.04, 0.14):
+            Clock.schedule_once(
+                lambda _dt, s=scroll, l=listing: self._current_apply_height(s, l),
+                delay,
+            )
+        print(f"[CURRENT-V4] related list rendered url={url!r} count={len(related)}")
 
     def _current_play_related_item(self, item) -> bool:
         if not isinstance(item, dict):
@@ -3594,8 +3639,183 @@ class AudioPlayerScreen(Screen):
         threading.Thread(target=job, name="pymusic-current-related-v4", daemon=True).start()
         return True
 
+    def open_comments_sheet(self):
+        """Mobile-style bottom sheet: comments are requested on tap only."""
+        if threading.current_thread() is not threading.main_thread():
+            Clock.schedule_once(lambda _dt: self.open_comments_sheet(), 0)
+            return
+        self._current_ensure_state()
+        url = _current_video_url_of(self)
+        if not url:
+            return
+        existing = self._current_comments_popup_v4
+        if existing is not None:
+            return
+
+        # Full-screen transparent modal with a *bottom-aligned* child:
+        # ModalView itself is always centered by Kivy, so changing its
+        # pos_hint would not actually create a YouTube-style bottom sheet.
+        sheet = ModalView(
+            size_hint=(1, 1),
+            auto_dismiss=False,
+            background="",
+            background_color=(0, 0, 0, 0),
+            overlay_color=(0, 0, 0, 0.55),
+        )
+        backdrop = FloatLayout()
+        panel = BoxLayout(
+            orientation="vertical",
+            size_hint=(1, None),
+            height=min(float(Window.height) * 0.82, dp(740)),
+            pos_hint={"x": 0, "y": 0},
+            padding=(dp(12), dp(10), dp(12), dp(14)),
+            spacing=dp(8),
+        )
+        with panel.canvas.before:
+            Color(1, 1, 1, 1)
+            panel_bg = RoundedRectangle(
+                pos=panel.pos,
+                size=panel.size,
+                radius=[dp(16), dp(16), 0, 0],
+            )
+        def resize_panel(widget, *_args):
+            panel_bg.pos = widget.pos
+            panel_bg.size = widget.size
+        panel.bind(pos=resize_panel, size=resize_panel)
+
+        header = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(48),
+            spacing=dp(6),
+        )
+        title = Label(
+            text="Коментарі",
+            color=(0.08, 0.08, 0.08, 1),
+            bold=True, font_size="19sp",
+            halign="left", valign="middle",
+        )
+        title.bind(width=lambda widget, value: setattr(
+            widget, "text_size", (value, None)
+        ))
+        count_label = Label(
+            text="",
+            color=(0.45, 0.45, 0.45, 1),
+            font_size="12sp",
+            size_hint_x=None, width=dp(76),
+        )
+        close = Button(
+            text="×", font_size="24sp",
+            size_hint=(None, None), size=(dp(40), dp(40)),
+            background_normal="",
+            background_color=(0.94, 0.94, 0.94, 1),
+            color=(0.12, 0.12, 0.12, 1),
+        )
+        close.bind(on_release=lambda *_a: sheet.dismiss())
+        header.add_widget(title)
+        header.add_widget(count_label)
+        header.add_widget(close)
+        panel.add_widget(header)
+
+        scroller = ScrollView(
+            do_scroll_x=False, do_scroll_y=True,
+            scroll_type=["content", "bars"],
+            scroll_distance=dp(6), bar_width=dp(3),
+        )
+        rows = BoxLayout(
+            orientation="vertical",
+            size_hint_y=None,
+            spacing=dp(12),
+            padding=(dp(4), dp(6), dp(4), dp(18)),
+        )
+        rows.bind(minimum_height=rows.setter("height"))
+        scroller.add_widget(rows)
+        panel.add_widget(scroller)
+        backdrop.add_widget(panel)
+        sheet.add_widget(backdrop)
+
+        def dismiss_outside(_widget, touch):
+            if not panel.collide_point(*touch.pos):
+                sheet.dismiss()
+                return True
+            return False
+        backdrop.bind(on_touch_down=dismiss_outside)
+
+        self._current_comments_popup_v4 = sheet
+        self._current_comments_rows_v4 = rows
+        self._current_comments_sheet_count_v4 = count_label
+
+        def dismissed(_sheet):
+            if self._current_comments_popup_v4 is sheet:
+                self._current_comments_popup_v4 = None
+                self._current_comments_rows_v4 = None
+                self._current_comments_sheet_count_v4 = None
+        sheet.bind(on_dismiss=dismissed)
+        sheet.open()
+        self._current_ensure_comments()
+        self._refresh_comments_sheet_v4()
+
+    def _refresh_comments_sheet_v4(self):
+        """Only touch Kivy widgets from the UI thread."""
+        if threading.current_thread() is not threading.main_thread():
+            Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
+            return
+        sheet = getattr(self, "_current_comments_popup_v4", None)
+        rows = getattr(self, "_current_comments_rows_v4", None)
+        if sheet is None or rows is None:
+            return
+        count = getattr(self, "_current_comment_count_v4", None)
+        count_label = getattr(self, "_current_comments_sheet_count_v4", None)
+        if count_label is not None:
+            count_label.text = (
+                f"{int(count):,}".replace(",", " ") if count is not None else ""
+            )
+        rows.clear_widgets()
+
+        comments = list(getattr(self, "_current_comments_v4", []) or [])
+        if not comments:
+            message = (
+                "Завантаження коментарів…"
+                if bool(getattr(self, "_current_comments_loading_v4", False))
+                else "Коментарі недоступні для цього відео"
+            )
+            rows.add_widget(_current_make_label(
+                message, height=68, font_size="14sp",
+                color=(0.45, 0.45, 0.45, 1),
+            ))
+            return
+
+        for item in comments:
+            row = BoxLayout(
+                orientation="vertical",
+                size_hint_y=None,
+                spacing=dp(4),
+                padding=(dp(8), dp(5), dp(8), dp(8)),
+            )
+            row.bind(minimum_height=row.setter("height"))
+            author = _current_make_label(
+                str(item.get("author") or "Користувач YouTube"),
+                height=24, font_size="13sp", bold=True,
+            )
+            comment_text = _current_make_label(
+                str(item.get("text") or "")[:1500],
+                height=32, font_size="14sp",
+                color=(0.16, 0.16, 0.16, 1),
+            )
+            comment_text.valign = "top"
+            comment_text.bind(texture_size=lambda widget, texture: setattr(
+                widget, "height", max(dp(28), float(texture[1]) + dp(8))
+            ))
+            row.add_widget(author)
+            row.add_widget(comment_text)
+            rows.add_widget(row)
+
     def _current_ensure_comments(self):
         self._current_ensure_state()
+        # No background comment extraction on every play/metadata refresh.
+        # A user must explicitly open the comments sheet first.
+        if self._current_comments_popup_v4 is None:
+            return
         if bool(getattr(self, "_app_in_background", False)):
             return
         url = _current_video_url_of(self)
@@ -3609,15 +3829,17 @@ class AudioPlayerScreen(Screen):
         self._current_comments_v4 = []
         self._current_comment_count_v4 = None
         self._current_comments_loading_v4 = True
-        Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+        Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
 
         def job():
             comments, count = [], None
             try:
                 # Optional comments must not compete with audio startup or
                 # launch multiple yt-dlp comment extractors simultaneously.
-                time.sleep(2.5)
-                deadline = time.monotonic() + 6.0
+                # Opening the sheet is an explicit user request. Do not
+                # impose the old 2.5-second delay; still yield briefly if
+                # native playback is preparing to avoid resource contention.
+                deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline:
                     if _current_video_url_of(self) != url:
                         return
@@ -3634,7 +3856,7 @@ class AudioPlayerScreen(Screen):
                     return
                 try:
                     if _current_video_url_of(self) == url:
-                        comments, count = _current_fetch_comments(url, limit=3)
+                        comments, count = _current_fetch_comments(url, limit=24)
                 finally:
                     _current_comments_worker_lock.release()
             except Exception as exc:
@@ -3644,7 +3866,8 @@ class AudioPlayerScreen(Screen):
                     self._current_comments_v4 = comments
                     self._current_comment_count_v4 = count
                     self._current_comments_loading_v4 = False
-                    Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+                    Clock.schedule_once(lambda _dt: self._sync_current_lower_controls(True), 0)
+                    Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
 
         threading.Thread(target=job, name="pymusic-comments-v4", daemon=True).start()
 
@@ -3818,8 +4041,6 @@ class AudioPlayerScreen(Screen):
             self._current_video_url_v4 = info_url
         if not getattr(self, "_related_items", None):
             self._ensure_related_current_v4( force=True)
-        if not bool(getattr(self, "_app_in_background", False)):
-            self._current_ensure_comments()
         Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
         return result
 
