@@ -4,6 +4,7 @@ from jnius import autoclass, cast, PythonJavaClass, java_method
 from android.runnable import run_on_ui_thread
 
 from kivy.clock import Clock
+from collections import deque
 
 import ytdlp_helpers as ydlh
 try:
@@ -81,6 +82,9 @@ class AndroidVideoPlayer:
         self._start_paused = False
         self._on_prepared_cb = None
         self._on_error_cb = None
+        # Retain Java callback proxies across a bounded number of retired
+        # MediaPlayers; their already-queued native callbacks may still fire.
+        self._retired_video_listeners = deque(maxlen=64)
         self._prepared_listener = None
         self._video_size_listener = None
         self._error_listener = None
@@ -766,6 +770,7 @@ class AndroidVideoPlayer:
         gen = self._play_gen
 
         if self.player is not None:
+            self._retain_video_listeners()
             try:
                 self.player.stop()
             except Exception:
@@ -1080,6 +1085,17 @@ class AndroidVideoPlayer:
             pass
         self._controls_visible = False
 
+    def _retain_video_listeners(self):
+        callbacks = tuple(
+            value for value in (
+                self._prepared_listener,
+                self._video_size_listener,
+                self._error_listener,
+            ) if value is not None
+        )
+        if callbacks:
+            self._retired_video_listeners.append(callbacks)
+
     @staticmethod
     def _detach_player_listeners(player):
         """Detach Java callbacks before releasing a native MediaPlayer."""
@@ -1096,6 +1112,7 @@ class AndroidVideoPlayer:
         self._surface_ready_to_show = False
         try:
             if self.player is not None:
+                self._retain_video_listeners()
                 try:
                     self.player.stop()
                 except Exception:
