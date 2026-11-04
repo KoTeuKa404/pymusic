@@ -659,12 +659,16 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "ignoreerrors": "only_download",
     }
 
-    # Android sometimes returns only format 18, which can fail with 503.
-    # The embedded client can expose audio-only format 140 and channel names.
-    # Retry embedded once because YouTube A/B replies can vary per request.
-    clients = ("web_embedded", "android", "web_embedded")
+    # Keep the proven Android-client path for normally playable videos.
+    # Only after an actual playback failure (prefer_compat=True) ask embedded
+    # clients for an alternative audio-only stream, usually AAC/M4A format 140.
+    # Do not make healthy tracks wait for extra YouTube requests.
+    if prefer_compat:
+        clients = ("web_embedded", "android", "web_embedded")
+    else:
+        clients = ("android",)
     if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
-        clients = ("web_embedded", "android", "web", "web_embedded")
+        clients += ("web",)
     info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
     if not info:
         print(f"[AUDIO] extract failed: {repr(err)}")
