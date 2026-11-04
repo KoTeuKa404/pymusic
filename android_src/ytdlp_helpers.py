@@ -369,6 +369,38 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
         return "", ""
 
 
+def _channel_name_from_oembed(video_url: str) -> str:
+    """Fallback for YouTube A/B responses that omit author/channel metadata.
+
+    Request only the official YouTube oEmbed API with a validated video ID.
+    The endpoint returns author_name without JavaScript or a PO token.
+    """
+    video_id = _extract_video_id_from_url(video_url)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return ""
+    endpoint = (
+        "https://www.youtube.com/oembed?"
+        + urlparse.urlencode({
+            "url": "https://www.youtube.com/watch?v=" + video_id,
+            "format": "json",
+        })
+    )
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            headers={
+                "User-Agent": _ANDROID_WEB_UA,
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6) as response:
+            data = json.loads(response.read(8192).decode("utf-8"))
+        name = str(data.get("author_name") or "").strip()
+        return name[:200]
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
     if not channel_url:
         return ""
@@ -683,6 +715,8 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
             channel = page_channel
         if (not channel_thumb) and page_thumb:
             channel_thumb = _normalize_img_url(page_thumb)
+    if not channel:
+        channel = _channel_name_from_oembed(str(video_url or ""))
     if not channel_thumb:
         channel_thumb = _extract_channel_thumb_from_watch_page(
             str(video_url or ""),
