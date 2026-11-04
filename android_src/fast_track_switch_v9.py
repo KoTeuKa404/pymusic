@@ -112,9 +112,15 @@ def _patch_media_release(media) -> None:
         from android.runnable import run_on_ui_thread
 
     @run_on_ui_thread
-    def release_snapshot(player):
+    def release_snapshot(player, listeners):
         if player is None:
             return
+        # Hold the PythonJavaClass listeners alive until native teardown.
+        # Detaching first prevents stale JNI callbacks after release.
+        try:
+            media._mp_detach_listeners(player)
+        except Exception:
+            pass
         # Silence first. release() can occasionally take noticeable time on a
         # remote MediaPlayer, but the old track must stop being audible at once.
         try:
@@ -138,13 +144,16 @@ def _patch_media_release(media) -> None:
         # Detach the global player synchronously on the Python side.  The UI
         # runnable only owns this snapshot, so a late release can never destroy
         # a newly-created MediaPlayer.
-        with _RELEASE_LOCK:
+        with getattr(media, "_mp_state_lock", _RELEASE_LOCK):
             player = getattr(media, "android_player", None)
+            listeners = getattr(media, "_mp_listeners", None)
             media.android_player = None
+            media._mp_listeners = None
+            media._mp_generation = int(getattr(media, "_mp_generation", 0)) + 1
             media.is_playing = False
             media._mp_prepared = False
         if player is not None:
-            release_snapshot(player)
+            release_snapshot(player, listeners)
 
     media._mp_reset_release = fast_reset_release
     media._pymusic_fast_release_v9 = True
