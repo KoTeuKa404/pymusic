@@ -4,6 +4,8 @@
 import os
 import sys
 import threading, socket
+import time
+from collections import deque
 import traceback
 from datetime import datetime
 
@@ -453,6 +455,15 @@ _mp_volume     = 1.0
 _mp_state_lock = threading.RLock()
 _mp_generation = 0
 _mp_listeners = None  # Strong refs to PythonJavaClass callbacks for the active player.
+# Android's MediaPlayer event queue can invoke a listener *after* release().
+# Retain a bounded number of detached PythonJavaClass proxies until queued
+# callbacks have drained; otherwise PyJNIus can reuse a dead proxy pointer.
+_mp_retired_listeners = deque(maxlen=64)
+
+
+def _mp_retire_listeners(listeners):
+    if listeners:
+        _mp_retired_listeners.append(listeners)
 
 
 @run_on_ui_thread
@@ -705,8 +716,40 @@ def _is_youtube_watch_url(url: str) -> bool:
     )
 
 
+_web_dispatch_lock = threading.Lock()
+_web_dispatch_last = ("", 0.0)
+
+
+def _should_dispatch_webview_video(url: str) -> bool:
+    """Collapse duplicate WebView/on_new_intent callbacks for one user tap."""
+    global _web_dispatch_last
+    try:
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(str(url or ""))
+        query = parse_qs(parsed.query or "")
+        video_id = str((query.get("v") or [""])[0] or "")
+        playlist_id = str((query.get("list") or [""])[0] or "")
+        # Identical playback intent with different tracking parameters is
+        # still the same selection; a playlist ID changes that selection.
+        key = ("watch", video_id, playlist_id) if video_id else (
+            parsed.netloc.lower(), parsed.path, parsed.query
+        )
+        now = time.monotonic()
+        with _web_dispatch_lock:
+            old_key, old_ts = _web_dispatch_last
+            if key == old_key and (now - old_ts) < 1.5:
+                return False
+            _web_dispatch_last = (key, now)
+        return True
+    except Exception:
+        # On unexpected parsing failures, keep navigation functional.
+        return True
+
+
 def _dispatch_webview_video(url: str):
     try:
+        if not _should_dispatch_webview_video(url):
+            return
         try:
             print(f"[WEB] dispatch url {url}")
         except Exception:
@@ -1078,7 +1121,9 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
                 old_player.release()
             except Exception as exc:
                 log(f"[MP] old player release error: {exc}")
-        # Retain old callbacks until after native release, not before.
+        # Keep detached proxies for pending native events, including callbacks
+        # already posted by MediaPlayer before release().
+        _mp_retire_listeners(old_listeners)
         old_listeners = None
 
         player = None
@@ -1145,6 +1190,7 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
                 except Exception:
                     pass
             if android_player is player:
+                _mp_retire_listeners(_mp_listeners)
                 android_player = None
                 _mp_listeners = None
                 _mp_prepared = False
@@ -1214,7 +1260,8 @@ def _mp_reset_release():
                 log("[media_android] MediaPlayer released")
             except Exception as exc:
                 log(f"[MP] release err: {exc}")
-        # Keep listeners alive until native teardown completes.
+        # Keep listeners alive until Android's queued JNI events have drained.
+        _mp_retire_listeners(listeners)
         listeners = None
 
 # ===================== Notifications / MediaStyle =====================
@@ -1834,6 +1881,7 @@ _action_owner = None
 _action_receiver = None
 _action_receiver_registered = False
 _intent_router_bound = False
+_intent_router_lock = threading.RLock()
 
 
 def _route_action_intent(intent):
@@ -1985,32 +2033,36 @@ def consume_current_activity_intent():
         return False
 
 def bind_notification_action_router(owner):
-    """Доставка PendingIntent дій у _ms_* через BroadcastReceiver / on_new_intent."""
-    global _action_owner, _action_receiver, _action_receiver_registered
+    """Bind the Activity callback only once, regardless of track switches."""
+    global _action_owner
     _action_owner = owner
-    try:
-        _py_activity.bind(on_new_intent=_on_new_intent)
-    except Exception as e:
-        log(f"[NOTIF] bind router err: {e}")
+    bind_intent_router()
 
 
 def bind_intent_router():
     global _intent_router_bound
-    if _intent_router_bound:
-        return
-    try:
-        _py_activity.bind(on_new_intent=_on_new_intent)
-        _intent_router_bound = True
-    except Exception as e:
-        log(f"[NOTIF] bind intent router err: {e}")
+    with _intent_router_lock:
+        if _intent_router_bound:
+            return
+        try:
+            _py_activity.bind(on_new_intent=_on_new_intent)
+            _intent_router_bound = True
+            log("[NOTIF] intent router bound once")
+        except Exception as exc:
+            log(f"[NOTIF] bind intent router err: {exc}")
 
 
 def unbind_notification_action_router():
-    try:
-        _py_activity.unbind(on_new_intent=_on_new_intent)
-        log("[NOTIF] action router unbound")
-    except Exception:
-        pass
+    global _intent_router_bound
+    with _intent_router_lock:
+        if not _intent_router_bound:
+            return
+        try:
+            _py_activity.unbind(on_new_intent=_on_new_intent)
+            _intent_router_bound = False
+            log("[NOTIF] action router unbound")
+        except Exception as exc:
+            log(f"[NOTIF] unbind router err: {exc}")
 
 
 def _on_new_intent(intent):
@@ -2078,6 +2130,7 @@ def video_overlay_show(media_url, headers=None):
                 log("[VIDEO] old video_player released")
         except Exception as e:
             log(f"[VIDEO] old video_player release err: {e}")
+        _mp_retire_listeners(previous_listeners)
         previous_listeners = None
         _video_prepared_video = False
 
@@ -2191,6 +2244,7 @@ def video_overlay_hide():
             log("[VIDEO] video_player released")
     except Exception as e:
         log(f"[VIDEO] video_player release err: {e}")
+    _mp_retire_listeners(previous_listeners)
     previous_listeners = None
     _video_prepared_video = False
 
