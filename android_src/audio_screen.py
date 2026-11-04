@@ -3652,17 +3652,22 @@ class AudioPlayerScreen(Screen):
         if existing is not None:
             return
 
+        # Full-screen transparent modal with a *bottom-aligned* child:
+        # ModalView itself is always centered by Kivy, so changing its
+        # pos_hint would not actually create a YouTube-style bottom sheet.
         sheet = ModalView(
-            size_hint=(1, None),
-            height=min(float(Window.height) * 0.82, dp(740)),
-            pos_hint={"center_x": 0.5, "y": 0},
-            auto_dismiss=True,
+            size_hint=(1, 1),
+            auto_dismiss=False,
             background="",
             background_color=(0, 0, 0, 0),
             overlay_color=(0, 0, 0, 0.55),
         )
+        backdrop = FloatLayout()
         panel = BoxLayout(
             orientation="vertical",
+            size_hint=(1, None),
+            height=min(float(Window.height) * 0.82, dp(740)),
+            pos_hint={"x": 0, "y": 0},
             padding=(dp(12), dp(10), dp(12), dp(14)),
             spacing=dp(8),
         )
@@ -3726,7 +3731,15 @@ class AudioPlayerScreen(Screen):
         rows.bind(minimum_height=rows.setter("height"))
         scroller.add_widget(rows)
         panel.add_widget(scroller)
-        sheet.add_widget(panel)
+        backdrop.add_widget(panel)
+        sheet.add_widget(backdrop)
+
+        def dismiss_outside(_widget, touch):
+            if not panel.collide_point(*touch.pos):
+                sheet.dismiss()
+                return True
+            return False
+        backdrop.bind(on_touch_down=dismiss_outside)
 
         self._current_comments_popup_v4 = sheet
         self._current_comments_rows_v4 = rows
