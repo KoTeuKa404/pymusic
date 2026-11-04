@@ -7,6 +7,9 @@
 <VideoTapArea@ButtonBehavior+Widget>:
     size_hint: 1, 1
 
+<CommentsPreview@ButtonBehavior+BoxLayout>:
+    orientation: 'horizontal'
+
 <CircularAvatar@AsyncImage>:
     source: ''
     size_hint: None, None
@@ -621,6 +624,55 @@
                         size_hint_y: None
                         height: dp(4)
     
+                    # Comments are loaded only when this row is tapped.
+                    # The comment list opens in a bottom sheet, not in the
+                    # scrolling recommendation list.
+                    CommentsPreview:
+                        id: comments_trigger
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        disabled: True
+                        spacing: dp(8)
+                        padding: dp(14), 0, dp(8), 0
+                        on_release: root.open_comments_sheet()
+                        canvas.before:
+                            Color:
+                                rgba: 0.96, 0.96, 0.97, 1
+                            RoundedRectangle:
+                                pos: self.pos
+                                size: self.size
+                                radius: [dp(10), dp(10), dp(10), dp(10)]
+
+                        BoxLayout:
+                            orientation: 'vertical'
+                            padding: 0, dp(8)
+                            spacing: dp(2)
+                            Label:
+                                text: 'Коментарі'
+                                bold: True
+                                font_size: '16sp'
+                                halign: 'left'
+                                valign: 'middle'
+                                text_size: self.size
+                                color: 0.10, 0.10, 0.10, 1
+                            Label:
+                                id: comments_preview_meta
+                                text: 'Натисніть, щоб переглянути'
+                                font_size: '12sp'
+                                halign: 'left'
+                                valign: 'middle'
+                                text_size: self.size
+                                color: 0.42, 0.42, 0.42, 1
+                        MDIconButton:
+                            icon: 'chevron-right'
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            pos_hint: {'center_y': 0.5}
+                            theme_text_color: 'Custom'
+                            text_color: 0.30, 0.30, 0.30, 1
+                            disabled: True
+
                     BoxLayout:
                         id: similar_header_row
                         orientation: 'horizontal'
@@ -650,6 +702,26 @@
                             text_size: self.width, self.height
                             color: 0.12, 0.12, 0.12, 1
     
+                        Label:
+                            text: 'Авто'
+                            size_hint_x: None
+                            width: dp(30)
+                            font_size: '11sp'
+                            halign: 'right'
+                            valign: 'middle'
+                            text_size: self.size
+                            color: 0.42, 0.42, 0.42, 1
+
+                        MDIconButton:
+                            id: autoplay_btn
+                            icon: 'autorenew'
+                            theme_text_color: 'Custom'
+                            text_color: 0.12, 0.48, 0.86, 1
+                            user_font_size: '22sp'
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            on_release: root.toggle_autoskip()
+
                         MDIconButton:
                             id: similar_toggle_btn
                             icon: 'chevron-up'
