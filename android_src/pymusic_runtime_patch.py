@@ -201,7 +201,13 @@ def _patch_audio_screen() -> bool:
             has_items = bool(getattr(self, "_related_items", None))
             loading = bool(self._hotfix_related_loading)
             failed = bool(self._hotfix_related_failed)
-            visible = bool(has_items or loading or failed)
+            # Keep the compact autoplay button and comments opener visible
+            # while recommendations for the current video are loading.
+            visible = bool(
+                has_items or loading or failed
+                or getattr(self, "_last_video_url", "")
+                or getattr(self, "_current_video_url_v4", "")
+            )
             collapsed = bool(getattr(self, "_similar_collapsed", False))
             if loading and not has_items:
                 title = "Схожі відео · завантаження…"
@@ -218,11 +224,18 @@ def _patch_audio_screen() -> bool:
                 collapsed,
             )
             scroll = self.ids.get("similar_scroll")
-            expanded = bool(has_items and not collapsed)
+            expanded = bool(visible and not collapsed)
             if scroll is not None:
-                scroll.height = dp(220) if expanded else 0
+                listing = self.ids.get("similar_list")
+                content_height = float(getattr(listing, "height", 0) or 0)
+                scroll.height = (
+                    min(dp(280), max(dp(70), content_height))
+                    if expanded else 0
+                )
                 scroll.opacity = 1 if expanded else 0
                 scroll.disabled = not expanded
+                scroll.do_scroll_y = expanded
+                scroll.do_scroll_x = False
 
         def toggle_playlist(self):
             self._playlist_collapsed = not bool(
