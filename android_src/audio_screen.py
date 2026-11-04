@@ -1465,6 +1465,9 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(self._align_video_to_thumb, 0.3)
 
     def on_pre_leave(self):
+        sheet = getattr(self, "_current_comments_popup_v4", None)
+        if sheet is not None:
+            sheet.dismiss()
         self._unbind_keys()
         self._unbind_headset()
         try:
@@ -1585,7 +1588,6 @@ class AudioPlayerScreen(Screen):
             pass
         if _current_video_url_of(self):
             self._ensure_related_current_v4(force=False)
-            self._current_ensure_comments()
         for delay in (0.0, 0.12, 0.5):
             Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
 
@@ -2529,11 +2531,23 @@ class AudioPlayerScreen(Screen):
     def play_audio(self, video_url, *args, **kwargs):
         self._current_ensure_state()
         canonical = _current_canonical_video_url(video_url)
+        previous_video = _current_video_url_of(self)
+        # A comments sheet belongs to one specific video. Dismiss it before
+        # switching tracks; do not auto-fetch the next video's comments.
+        if canonical and canonical != previous_video:
+            sheet = self._current_comments_popup_v4
+            if sheet is not None:
+                if threading.current_thread() is threading.main_thread():
+                    sheet.dismiss()
+                else:
+                    Clock.schedule_once(lambda _dt, popup=sheet: popup.dismiss(), 0)
         self._current_video_url_v4 = canonical
         self._current_related_url_v4 = ""
         self._current_auto_next_pending_v4 = False
         self._current_comments_url_v4 = ""
         self._current_comments_v4 = []
+        self._current_comment_count_v4 = None
+        self._current_comments_loading_v4 = False
         print(f"[CURRENT-V4] current video set url={canonical!r}")
         result = self._play_audio_base( video_url, *args, **kwargs)
         final_url = _current_canonical_video_url(getattr(self, "_last_video_url", "") or canonical)
@@ -2542,8 +2556,6 @@ class AudioPlayerScreen(Screen):
             if not getattr(self, "_last_video_url", None):
                 self._last_video_url = final_url
         self._ensure_related_current_v4( force=False)
-        if not bool(getattr(self, "_app_in_background", False)):
-            self._current_ensure_comments()
         for delay in (0.0, 0.10, 0.40):
             Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), delay)
         return result
@@ -3755,7 +3767,7 @@ class AudioPlayerScreen(Screen):
                 else "Коментарі недоступні для цього відео"
             )
             rows.add_widget(_current_make_label(
-                message, height=dp(68), font_size="14sp",
+                message, height=68, font_size="14sp",
                 color=(0.45, 0.45, 0.45, 1),
             ))
             return
@@ -4016,8 +4028,6 @@ class AudioPlayerScreen(Screen):
             self._current_video_url_v4 = info_url
         if not getattr(self, "_related_items", None):
             self._ensure_related_current_v4( force=True)
-        if not bool(getattr(self, "_app_in_background", False)):
-            self._current_ensure_comments()
         Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
         return result
 
