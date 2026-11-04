@@ -3627,8 +3627,170 @@ class AudioPlayerScreen(Screen):
         threading.Thread(target=job, name="pymusic-current-related-v4", daemon=True).start()
         return True
 
+    def open_comments_sheet(self):
+        """Mobile-style bottom sheet: comments are requested on tap only."""
+        if threading.current_thread() is not threading.main_thread():
+            Clock.schedule_once(lambda _dt: self.open_comments_sheet(), 0)
+            return
+        self._current_ensure_state()
+        url = _current_video_url_of(self)
+        if not url:
+            return
+        existing = self._current_comments_popup_v4
+        if existing is not None:
+            return
+
+        sheet = ModalView(
+            size_hint=(1, None),
+            height=min(float(Window.height) * 0.82, dp(740)),
+            pos_hint={"center_x": 0.5, "y": 0},
+            auto_dismiss=True,
+            background="",
+            background_color=(0, 0, 0, 0),
+            overlay_color=(0, 0, 0, 0.55),
+        )
+        panel = BoxLayout(
+            orientation="vertical",
+            padding=(dp(12), dp(10), dp(12), dp(14)),
+            spacing=dp(8),
+        )
+        with panel.canvas.before:
+            Color(1, 1, 1, 1)
+            panel_bg = RoundedRectangle(
+                pos=panel.pos,
+                size=panel.size,
+                radius=[dp(16), dp(16), 0, 0],
+            )
+        def resize_panel(widget, *_args):
+            panel_bg.pos = widget.pos
+            panel_bg.size = widget.size
+        panel.bind(pos=resize_panel, size=resize_panel)
+
+        header = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(48),
+            spacing=dp(6),
+        )
+        title = Label(
+            text="Коментарі",
+            color=(0.08, 0.08, 0.08, 1),
+            bold=True, font_size="19sp",
+            halign="left", valign="middle",
+        )
+        title.bind(width=lambda widget, value: setattr(
+            widget, "text_size", (value, None)
+        ))
+        count_label = Label(
+            text="",
+            color=(0.45, 0.45, 0.45, 1),
+            font_size="12sp",
+            size_hint_x=None, width=dp(76),
+        )
+        close = Button(
+            text="×", font_size="24sp",
+            size_hint=(None, None), size=(dp(40), dp(40)),
+            background_normal="",
+            background_color=(0.94, 0.94, 0.94, 1),
+            color=(0.12, 0.12, 0.12, 1),
+        )
+        close.bind(on_release=lambda *_a: sheet.dismiss())
+        header.add_widget(title)
+        header.add_widget(count_label)
+        header.add_widget(close)
+        panel.add_widget(header)
+
+        scroller = ScrollView(
+            do_scroll_x=False, do_scroll_y=True,
+            scroll_type=["content", "bars"],
+            scroll_distance=dp(6), bar_width=dp(3),
+        )
+        rows = BoxLayout(
+            orientation="vertical",
+            size_hint_y=None,
+            spacing=dp(12),
+            padding=(dp(4), dp(6), dp(4), dp(18)),
+        )
+        rows.bind(minimum_height=rows.setter("height"))
+        scroller.add_widget(rows)
+        panel.add_widget(scroller)
+        sheet.add_widget(panel)
+
+        self._current_comments_popup_v4 = sheet
+        self._current_comments_rows_v4 = rows
+        self._current_comments_sheet_count_v4 = count_label
+
+        def dismissed(_sheet):
+            if self._current_comments_popup_v4 is sheet:
+                self._current_comments_popup_v4 = None
+                self._current_comments_rows_v4 = None
+                self._current_comments_sheet_count_v4 = None
+        sheet.bind(on_dismiss=dismissed)
+        sheet.open()
+        self._current_ensure_comments()
+        self._refresh_comments_sheet_v4()
+
+    def _refresh_comments_sheet_v4(self):
+        """Only touch Kivy widgets from the UI thread."""
+        if threading.current_thread() is not threading.main_thread():
+            Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
+            return
+        sheet = getattr(self, "_current_comments_popup_v4", None)
+        rows = getattr(self, "_current_comments_rows_v4", None)
+        if sheet is None or rows is None:
+            return
+        count = getattr(self, "_current_comment_count_v4", None)
+        count_label = getattr(self, "_current_comments_sheet_count_v4", None)
+        if count_label is not None:
+            count_label.text = (
+                f"{int(count):,}".replace(",", " ") if count is not None else ""
+            )
+        rows.clear_widgets()
+
+        comments = list(getattr(self, "_current_comments_v4", []) or [])
+        if not comments:
+            message = (
+                "Завантаження коментарів…"
+                if bool(getattr(self, "_current_comments_loading_v4", False))
+                else "Коментарі недоступні для цього відео"
+            )
+            rows.add_widget(_current_make_label(
+                message, height=dp(68), font_size="14sp",
+                color=(0.45, 0.45, 0.45, 1),
+            ))
+            return
+
+        for item in comments:
+            row = BoxLayout(
+                orientation="vertical",
+                size_hint_y=None,
+                spacing=dp(4),
+                padding=(dp(8), dp(5), dp(8), dp(8)),
+            )
+            row.bind(minimum_height=row.setter("height"))
+            author = _current_make_label(
+                str(item.get("author") or "Користувач YouTube"),
+                height=24, font_size="13sp", bold=True,
+            )
+            comment_text = _current_make_label(
+                str(item.get("text") or "")[:1500],
+                height=32, font_size="14sp",
+                color=(0.16, 0.16, 0.16, 1),
+            )
+            comment_text.valign = "top"
+            comment_text.bind(texture_size=lambda widget, texture: setattr(
+                widget, "height", max(dp(28), float(texture[1]) + dp(8))
+            ))
+            row.add_widget(author)
+            row.add_widget(comment_text)
+            rows.add_widget(row)
+
     def _current_ensure_comments(self):
         self._current_ensure_state()
+        # No background comment extraction on every play/metadata refresh.
+        # A user must explicitly open the comments sheet first.
+        if self._current_comments_popup_v4 is None:
+            return
         if bool(getattr(self, "_app_in_background", False)):
             return
         url = _current_video_url_of(self)
@@ -3642,15 +3804,17 @@ class AudioPlayerScreen(Screen):
         self._current_comments_v4 = []
         self._current_comment_count_v4 = None
         self._current_comments_loading_v4 = True
-        Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+        Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
 
         def job():
             comments, count = [], None
             try:
                 # Optional comments must not compete with audio startup or
                 # launch multiple yt-dlp comment extractors simultaneously.
-                time.sleep(2.5)
-                deadline = time.monotonic() + 6.0
+                # Opening the sheet is an explicit user request. Do not
+                # impose the old 2.5-second delay; still yield briefly if
+                # native playback is preparing to avoid resource contention.
+                deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline:
                     if _current_video_url_of(self) != url:
                         return
@@ -3667,7 +3831,7 @@ class AudioPlayerScreen(Screen):
                     return
                 try:
                     if _current_video_url_of(self) == url:
-                        comments, count = _current_fetch_comments(url, limit=3)
+                        comments, count = _current_fetch_comments(url, limit=24)
                 finally:
                     _current_comments_worker_lock.release()
             except Exception as exc:
@@ -3677,7 +3841,8 @@ class AudioPlayerScreen(Screen):
                     self._current_comments_v4 = comments
                     self._current_comment_count_v4 = count
                     self._current_comments_loading_v4 = False
-                    Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
+                    Clock.schedule_once(lambda _dt: self._sync_current_lower_controls(True), 0)
+                    Clock.schedule_once(lambda _dt: self._refresh_comments_sheet_v4(), 0)
 
         threading.Thread(target=job, name="pymusic-comments-v4", daemon=True).start()
 
