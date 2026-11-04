@@ -277,7 +277,8 @@ def _install_now() -> bool:
             if not url:
                 return
             try:
-                if url in getattr(self, "_metadata_loaded_urls", set()):
+                if (url in getattr(self, "_metadata_loaded_urls", set())
+                        and str(getattr(self, "_channel", "") or "").strip()):
                     return
             except Exception:
                 pass
@@ -302,7 +303,8 @@ def _install_now() -> bool:
                             expected_url,
                         ):
                             return
-                        if expected_url in getattr(self, "_metadata_loaded_urls", set()):
+                        if (expected_url in getattr(self, "_metadata_loaded_urls", set())
+                            and str(getattr(self, "_channel", "") or "").strip()):
                             return
                         if _audio_ready(media):
                             break
@@ -315,7 +317,8 @@ def _install_now() -> bool:
                         expected_url,
                     ):
                         return
-                    if expected_url in getattr(self, "_metadata_loaded_urls", set()):
+                    if (expected_url in getattr(self, "_metadata_loaded_urls", set())
+                        and str(getattr(self, "_channel", "") or "").strip()):
                         return
                     old_metadata(self, expected_url)
                 finally:

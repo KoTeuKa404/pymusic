@@ -1127,6 +1127,7 @@ class AudioPlayerScreen(Screen):
         self._stream_error_hits = 0
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
+        self._stream_format_id = ""
         self._recover_loop_url = ""
         self._recover_loop_hits = 0
         self._recover_loop_ts = 0.0
@@ -2355,6 +2356,7 @@ class AudioPlayerScreen(Screen):
         self._stream_error_hits = 0
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
+        self._stream_format_id = ""
         self._views_text = ""
         self._related_items = []
         if ui_allowed:
@@ -3712,7 +3714,7 @@ class AudioPlayerScreen(Screen):
         _player_likes_ensure_likes_async(self, video_url)
         if not video_url:
             return
-        if video_url in self._metadata_loaded_urls:
+        if video_url in self._metadata_loaded_urls and self._channel:
             return
         if self._meta_inflight and self._meta_last_url == video_url:
             return
@@ -3721,13 +3723,27 @@ class AudioPlayerScreen(Screen):
 
         def _job():
             try:
-                info = ydlh.extract_audio_info(video_url)
+                # A cached track may already have the title/thumb but no
+                # channel. Avoid a second full yt-dlp extraction in that case.
+                if video_url in self._metadata_loaded_urls:
+                    info = {}
+                else:
+                    info = ydlh.extract_audio_info(video_url)
+                if not (info.get("channel") or info.get("uploader") or self._channel):
+                    # Official YouTube oEmbed gives author_name even when the
+                    # Android player response omits owner/channel metadata.
+                    # This runs only in the metadata worker, never in audio
+                    # extraction or the Kivy rendering thread.
+                    name = ydlh._channel_name_from_oembed(video_url)
+                    if name:
+                        info["channel"] = name
                 if video_url != self._last_video_url:
                     return
-                self._apply_info_metadata(info)
-                self._metadata_loaded_urls.add(video_url)
-            except Exception:
-                pass
+                if info:
+                    self._apply_info_metadata(info)
+                    self._metadata_loaded_urls.add(video_url)
+            except Exception as exc:
+                print("[META] async channel lookup failed:", exc)
             finally:
                 self._meta_inflight = False
 
@@ -4108,8 +4124,9 @@ class AudioPlayerScreen(Screen):
                 return True
 
             now = time.time()
-            if (now - self._last_stream_error_ts) > 5.0:
-                self._stream_error_hits = 0
+            # Count consecutive errors for the current track, not only errors
+            # within five seconds: YouTube/CDN requests commonly take >5 s,
+            # otherwise we retry the same broken format forever.
             self._stream_error_hits += 1
             self._last_stream_error_ts = now
 
@@ -4121,15 +4138,20 @@ class AudioPlayerScreen(Screen):
                 pass
 
             # типові помилки нестабільного інтернету
-            NETWORK_ERRORS = (-1004, -110, 1)
+            NETWORK_ERRORS = (-1004, -110, -38, 1)
 
             if what in NETWORK_ERRORS or extra in NETWORK_ERRORS:
                 # Частий кейс проблемних треків: Unknown error(1,-2147483648).
                 # Після кількох помилок форсимо сумісний AAC/M4A профіль.
-                if self._stream_error_hits >= 3 and not self._prefer_compat_audio:
-                    self._prefer_compat_audio = True
-                    print("[AUDIO] switch to compat audio profile (m4a/aac)")
-                if self._stream_error_hits >= 8:
+                # A failed muxed format 18 should immediately try the
+                # alternative audio-only client instead of retrying the same
+                # broken Googlevideo/CDN URL for this specific track.
+                if (self._stream_error_hits >= 2
+                        or str(getattr(self, "_stream_format_id", "")) == "18"):
+                    if not self._prefer_compat_audio:
+                        self._prefer_compat_audio = True
+                        print("[AUDIO] switch to alternate audio-only AAC/M4A source")
+                if self._stream_error_hits >= 6:
                     print("[AUDIO] too many stream errors, skip/stop track")
                     if self._auto_skip:
                         self._queue_auto_next()
@@ -4140,7 +4162,10 @@ class AudioPlayerScreen(Screen):
                     return True
                 print("[AUDIO] Network stream failed, re-extracting fresh URL...")
                 if self._last_video_url:
-                    force_fresh = what == -1004 or extra == -1004
+                    # Do not reuse cached 503/invalid-state CDN URLs. Refresh
+                    # stream extraction, which now tries audio-only AAC clients.
+                    force_fresh = (what in (1, -38, -1004)
+                                   or extra in (-1004, -2147483648))
                     self._recover_stream("media_error", self._resume_pos_ms, force_fresh=force_fresh)
                 return True
 
@@ -4747,6 +4772,7 @@ class AudioPlayerScreen(Screen):
                 return
 
             self._stream_url = info["audio_url"]
+            self._stream_format_id = str(info.get("format_id") or "")
             self._expire_ts = info.get("expire_ts")
             self._headers = info.get("http_headers", {})
             print(

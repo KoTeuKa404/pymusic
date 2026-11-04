@@ -369,6 +369,38 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
         return "", ""
 
 
+def _channel_name_from_oembed(video_url: str) -> str:
+    """Fallback for YouTube A/B responses that omit author/channel metadata.
+
+    Request only the official YouTube oEmbed API with a validated video ID.
+    The endpoint returns author_name without JavaScript or a PO token.
+    """
+    video_id = _extract_video_id_from_url(video_url)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return ""
+    endpoint = (
+        "https://www.youtube.com/oembed?"
+        + urlparse.urlencode({
+            "url": "https://www.youtube.com/watch?v=" + video_id,
+            "format": "json",
+        })
+    )
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=12) as response:
+            data = json.loads(response.read(8192).decode("utf-8"))
+        name = str(data.get("author_name") or "").strip()
+        return name[:200]
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
     if not channel_url:
         return ""
@@ -444,19 +476,13 @@ def _pick_best_audio(
             if is_audio(f) and f.get("ext") in ("mp3", "aac"):
                 return f
     else:
-        # 1) opus/webm
+        # Android MediaPlayer plays AAC/M4A most consistently.
+        for f in formats:
+            ac = str(f.get("acodec") or "").lower()
+            if is_audio(f) and (f.get("ext") in ("m4a", "mp4", "aac") or "mp4a" in ac):
+                return f
         for f in formats:
             if is_audio(f) and (str(f.get("acodec", "")).lower().startswith("opus") or f.get("ext") == "webm"):
-                return f
-
-        # 2) webm будь-який аудіо
-        for f in formats:
-            if is_audio(f) and f.get("ext") == "webm":
-                return f
-
-        # 3) m4a
-        for f in formats:
-            if is_audio(f) and f.get("ext") == "m4a":
                 return f
 
     # 4) інший audio-only
@@ -512,17 +538,55 @@ def _extract_info_with_clients(
     Повертаємо (info_dict | None, last_exception | None)
     """
     last_err: Optional[Exception] = None
+    best_info: Optional[Dict[str, Any]] = None
+    best_rank = -1
+    known_meta: Dict[str, Any] = {}
     for client in clients:
         opts = dict(base_opts)
         opts["extractor_args"] = {"youtube": {"player_client": [client]}}
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                if isinstance(info, dict):
-                    return info, None
-        except Exception as e:
-            last_err = e
-    return None, last_err
+        except Exception as exc:
+            last_err = exc
+            continue
+        if not isinstance(info, dict):
+            continue
+
+        # SABR experiments can return only muxed format 18 for some clients.
+        # Continue until an actual audio-only stream is available.
+        for key in ("channel", "uploader", "creator", "artist",
+                    "channel_url", "channel_id", "channel_thumbnail",
+                    "uploader_thumbnail", "title", "thumbnail"):
+            if info.get(key) and not known_meta.get(key):
+                known_meta[key] = info[key]
+        formats = info.get("formats") or []
+        audio_only = [
+            fmt for fmt in formats
+            if fmt.get("url") and fmt.get("vcodec") in (None, "none")
+            and fmt.get("acodec") not in (None, "none")
+        ]
+        aac = any(
+            fmt.get("ext") in ("m4a", "mp4", "aac")
+            or "mp4a" in str(fmt.get("acodec") or "").lower()
+            for fmt in audio_only
+        )
+        hls = any(
+            fmt.get("url") and fmt.get("acodec") not in (None, "none")
+            and "m3u8" in str(fmt.get("protocol") or "")
+            for fmt in formats
+        )
+        rank = 3 if aac else (2 if audio_only else (1 if hls else 0))
+        if rank > best_rank:
+            best_info, best_rank = info, rank
+        if rank == 3:
+            break
+
+    if best_info is not None:
+        for key, value in known_meta.items():
+            if not best_info.get(key):
+                best_info[key] = value
+    return best_info, last_err
 
 
 # ==================== PUBLIC: HEADERS → Java HashMap ====================
@@ -550,6 +614,14 @@ def py_headers_to_javamap(headers: Dict[str, str], HashMapClass) -> Any:
 
 
 # ============================ AUDIO API ================================
+def _audio_client_order(prefer_compat: bool = False) -> Tuple[str, ...]:
+    """Leave healthy Android streams alone; fallback only after a failure."""
+    clients = ("web_embedded", "android", "web_embedded") if prefer_compat else ("android",)
+    if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
+        clients += ("web",)
+    return clients
+
+
 def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[str, Any]:
     """
     Повертає:
@@ -595,14 +667,11 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "ignoreerrors": "only_download",
     }
 
-    # На Android часто ламається web-client через PO Token/EJS,
-    # що дає "Only images are available" і цикл -1004/-38 у MediaPlayer.
-    # Тому за замовчуванням НЕ використовуємо web-client.
-    allow_web_client = _env_bool("YTDLP_ALLOW_WEB_CLIENT", False)
-    if allow_web_client:
-        clients = ("android", "web")
-    else:
-        clients = ("android",)
+    # Keep the proven Android-client path for normally playable videos.
+    # Only after an actual playback failure (prefer_compat=True) ask embedded
+    # clients for an alternative audio-only stream, usually AAC/M4A format 140.
+    # Do not make healthy tracks wait for extra YouTube requests.
+    clients = _audio_client_order(prefer_compat)
     info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
     if not info:
         print(f"[AUDIO] extract failed: {repr(err)}")
@@ -647,21 +716,23 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
     if (not channel) or (not channel_thumb):
         page_channel, page_thumb = _extract_channel_meta_from_watch_page(
             str(video_url or ""),
-            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+            _ANDROID_WEB_UA,
         )
         if (not channel) and page_channel:
             channel = page_channel
         if (not channel_thumb) and page_thumb:
             channel_thumb = _normalize_img_url(page_thumb)
+    # Do not block the audio-critical extraction path on oEmbed. A separate
+    # metadata worker requests the channel name when yt-dlp omits it.
     if not channel_thumb:
         channel_thumb = _extract_channel_thumb_from_watch_page(
             str(video_url or ""),
-            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+            _ANDROID_WEB_UA,
         )
     if not channel_thumb:
         channel_thumb = _extract_channel_thumb_from_channel_page(
             str(channel_url or ""),
-            BASE_OPTS.get("http_headers", {}).get("User-Agent", _ANDROID_WEB_UA),
+            _ANDROID_WEB_UA,
         )
     channel_thumb = _normalize_img_url(channel_thumb or "")
     related_videos = info.get("related_videos") or []

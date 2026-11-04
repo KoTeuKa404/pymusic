@@ -138,5 +138,118 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(jobs[0][1], 0)
 
 
+    def test_prefers_real_aac_over_muxed_format_18(self):
+        from typing import Any, Dict, List, Optional
+        namespace = {"Any": Any, "Dict": Dict, "List": List, "Optional": Optional}
+        pick = isolated_definition("ytdlp_helpers.py", "_pick_best_audio", namespace)
+        muxed = {"url": "https://cdn.example/18", "format_id": "18",
+                 "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a.40.2"}
+        opus = {"url": "https://cdn.example/251", "format_id": "251",
+                "ext": "webm", "vcodec": "none", "acodec": "opus"}
+        aac = {"url": "https://cdn.example/140", "format_id": "140",
+               "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2"}
+        self.assertEqual(pick([muxed, opus, aac])["format_id"], "140")
+        self.assertEqual(pick([muxed, opus, aac], prefer_compat=True)["format_id"], "140")
+
+    def test_youtube_clients_preserve_author_and_continue_until_audio_only(self):
+        from typing import Any, Dict, Optional, Tuple
+        queries = []
+        muxed = {"url": "https://cdn.example/18", "format_id": "18",
+                 "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a.40.2"}
+        aac = {"url": "https://cdn.example/140", "format_id": "140",
+               "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2"}
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.client = options["extractor_args"]["youtube"]["player_client"][0]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                queries.append(self.client)
+                if self.client == "android":
+                    return {"formats": [muxed], "thumbnail": "https://images.example/cover"}
+                if self.client == "web_embedded":
+                    return {"formats": [muxed, aac], "channel": "Grimwind"}
+                raise AssertionError(self.client)
+
+        namespace = {
+            "Any": Any, "Dict": Dict, "Optional": Optional,
+            "Tuple": Tuple, "YoutubeDL": FakeYoutubeDL,
+        }
+        choose = isolated_definition(
+            "ytdlp_helpers.py", "_extract_info_with_clients", namespace
+        )
+        info, error = choose(
+            "https://www.youtube.com/watch?v=LTsbyX-l06Y",
+            {"quiet": True},
+            ("android", "web_embedded"),
+        )
+        self.assertIsNone(error)
+        self.assertEqual(queries, ["android", "web_embedded"])
+        self.assertEqual(info["channel"], "Grimwind")
+        self.assertEqual(info["thumbnail"], "https://images.example/cover")
+        self.assertEqual(len(info["formats"]), 2)
+
+
+    def test_healthy_tracks_keep_android_client_and_only_recover_on_failure(self):
+        from typing import Tuple
+        chooser = isolated_definition(
+            "ytdlp_helpers.py", "_audio_client_order",
+            {"Tuple": Tuple, "_env_bool": lambda *_args: False},
+        )
+        self.assertEqual(chooser(False), ("android",))
+        self.assertEqual(
+            chooser(True), ("web_embedded", "android", "web_embedded")
+        )
+
+    def test_channel_name_fallback_uses_official_oembed_and_validated_id(self):
+        import json
+        import re
+        import urllib.parse
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _bytes):
+                return b'{"author_name":"Grimwind"}'
+
+        def fake_request(url, headers):
+            calls.append(url)
+            self.assertEqual(headers["Accept"], "application/json")
+            return url
+
+        network = SimpleNamespace(request=SimpleNamespace(
+            Request=fake_request,
+            urlopen=lambda _request, timeout=12: FakeResponse(),
+        ))
+        namespace = {
+            "re": re, "json": json, "urllib": network,
+            "urlparse": urllib.parse,
+            "_ANDROID_WEB_UA": "Mozilla/5.0",
+            "_extract_video_id_from_url": lambda url: (
+                "LTsbyX-l06Y" if url.endswith("watch?v=LTsbyX-l06Y") else ""
+            ),
+        }
+        channel = isolated_definition(
+            "ytdlp_helpers.py", "_channel_name_from_oembed", namespace
+        )
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        self.assertEqual(channel(url), "Grimwind")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("https://www.youtube.com/oembed?"))
+        self.assertEqual(channel("http://127.0.0.1/secrets"), "")
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
