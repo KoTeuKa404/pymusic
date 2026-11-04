@@ -1127,6 +1127,7 @@ class AudioPlayerScreen(Screen):
         self._stream_error_hits = 0
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
+        self._stream_format_id = ""
         self._recover_loop_url = ""
         self._recover_loop_hits = 0
         self._recover_loop_ts = 0.0
@@ -2355,6 +2356,7 @@ class AudioPlayerScreen(Screen):
         self._stream_error_hits = 0
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
+        self._stream_format_id = ""
         self._views_text = ""
         self._related_items = []
         if ui_allowed:
@@ -4141,9 +4143,14 @@ class AudioPlayerScreen(Screen):
             if what in NETWORK_ERRORS or extra in NETWORK_ERRORS:
                 # Частий кейс проблемних треків: Unknown error(1,-2147483648).
                 # Після кількох помилок форсимо сумісний AAC/M4A профіль.
-                if self._stream_error_hits >= 2 and not self._prefer_compat_audio:
-                    self._prefer_compat_audio = True
-                    print("[AUDIO] switch to compat audio profile (m4a/aac)")
+                # A failed muxed format 18 should immediately try the
+                # alternative audio-only client instead of retrying the same
+                # broken Googlevideo/CDN URL for this specific track.
+                if (self._stream_error_hits >= 2
+                        or str(getattr(self, "_stream_format_id", "")) == "18"):
+                    if not self._prefer_compat_audio:
+                        self._prefer_compat_audio = True
+                        print("[AUDIO] switch to alternate audio-only AAC/M4A source")
                 if self._stream_error_hits >= 6:
                     print("[AUDIO] too many stream errors, skip/stop track")
                     if self._auto_skip:
@@ -4765,6 +4772,7 @@ class AudioPlayerScreen(Screen):
                 return
 
             self._stream_url = info["audio_url"]
+            self._stream_format_id = str(info.get("format_id") or "")
             self._expire_ts = info.get("expire_ts")
             self._headers = info.get("http_headers", {})
             print(
