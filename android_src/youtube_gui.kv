@@ -664,14 +664,14 @@
                                 valign: 'middle'
                                 text_size: self.size
                                 color: 0.42, 0.42, 0.42, 1
-                        MDIconButton:
-                            icon: 'chevron-right'
-                            size_hint: None, None
-                            size: dp(36), dp(36)
-                            pos_hint: {'center_y': 0.5}
-                            theme_text_color: 'Custom'
-                            text_color: 0.30, 0.30, 0.30, 1
-                            disabled: True
+                        Label:
+                            text: '›'
+                            size_hint_x: None
+                            width: dp(30)
+                            font_size: '28sp'
+                            color: 0.30, 0.30, 0.30, 1
+                            halign: 'center'
+                            valign: 'middle'
 
                     BoxLayout:
                         id: similar_header_row
