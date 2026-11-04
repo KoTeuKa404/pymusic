@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from jnius import autoclass, PythonJavaClass, java_method
+from jnius import autoclass, cast, PythonJavaClass, java_method
 from android.runnable import run_on_ui_thread
 
 from kivy.clock import Clock
@@ -393,9 +393,11 @@ class AndroidVideoPlayer:
             total = self._native_total_time
             if overlay is None or seek_bar is None:
                 return
-            row = seek_bar.getParent()
-            if row is None:
+            parent = seek_bar.getParent()
+            if parent is None:
                 return
+            # getParent() exposes ViewParent; the actual container is a LinearLayout.
+            row = cast('android.widget.LinearLayout', parent)
             activity = PythonActivity.mActivity
             px = self._native_dp_px
             for label, alpha in ((current, 245), (total, 220)):
@@ -750,6 +752,7 @@ class AndroidVideoPlayer:
             except Exception:
                 pass
             try:
+                self._detach_player_listeners(self.player)
                 self.player.release()
             except Exception:
                 pass
@@ -1049,6 +1052,15 @@ class AndroidVideoPlayer:
             pass
         self._controls_visible = False
 
+    @staticmethod
+    def _detach_player_listeners(player):
+        """Detach Java callbacks before releasing a native MediaPlayer."""
+        for method in ("setOnPreparedListener", "setOnVideoSizeChangedListener", "setOnErrorListener"):
+            try:
+                getattr(player, method)(None)
+            except Exception:
+                pass
+
     @run_on_ui_thread
     def stop(self):
         self._play_gen += 1
@@ -1061,6 +1073,7 @@ class AndroidVideoPlayer:
                 except Exception:
                     pass
                 try:
+                    self._detach_player_listeners(self.player)
                     self.player.release()
                 except Exception:
                     pass
@@ -1087,6 +1100,9 @@ class AndroidVideoPlayer:
         except Exception:
             pass
         self._controls_visible = False
+        self._prepared_listener = None
+        self._video_size_listener = None
+        self._error_listener = None
 
     @run_on_ui_thread
     def seek_to(self, ms: int):

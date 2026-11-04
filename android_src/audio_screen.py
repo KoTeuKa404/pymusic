@@ -2914,6 +2914,10 @@ class AudioPlayerScreen(Screen):
                     Clock.schedule_once(_safe_reapply_thumb, 0.08)
                 except Exception:
                     pass
+            except ReferenceError:
+                # The list can recycle its Kivy weak proxies before a delayed
+                # thumbnail callback runs. This is normal and needs no retry.
+                return
             except Exception as e:
                 try:
                     ma.log(f"[PLAYLIST] apply thumb fail: path={path} err={e}")
@@ -3354,7 +3358,11 @@ class AudioPlayerScreen(Screen):
         try:
             children = list(getattr(listing, "children", []) or [])
             height = sum(max(0.0, float(getattr(child, "height", 0) or 0)) for child in children)
-            height += max(0, len(children) - 1) * float(getattr(listing, "spacing", 0) or 0)
+            spacing = getattr(listing, "spacing", 0) or 0
+            # Kivy BoxLayout.spacing may be a two-element VariableListProperty.
+            if isinstance(spacing, (tuple, list)):
+                spacing = spacing[1] if len(spacing) > 1 else (spacing[0] if spacing else 0)
+            height += max(0, len(children) - 1) * float(spacing or 0)
             height += dp(14)
             height = max(dp(210), height)
             listing.height = height
@@ -5313,6 +5321,16 @@ class AudioPlayerScreen(Screen):
         self._start_buffer_watchdog()
 
     def _recover_stream(self, reason: str, pos: int, *, force_fresh: bool = False):
+        # MediaPlayer error callbacks run in worker threads. Recovery can skip
+        # tracks and rebuild visible Kivy widgets; marshal that path to Kivy.
+        # In background mode the Clock may be paused, so leave audio-only
+        # recovery on the worker and keep UI mutations guarded separately.
+        if (threading.current_thread() is not threading.main_thread()
+                and not bool(getattr(self, "_app_in_background", False))):
+            Clock.schedule_once(
+                lambda _dt: self._recover_stream(reason, pos, force_fresh=force_fresh), 0
+            )
+            return
         now = time.time()
         if (now - self._last_stream_recover_ts) < 3.0:
             return

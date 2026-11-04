@@ -450,6 +450,9 @@ android_player = None   # основний плеєр для аудіо
 is_playing     = False
 _mp_prepared   = False
 _mp_volume     = 1.0
+_mp_state_lock = threading.RLock()
+_mp_generation = 0
+_mp_listeners = None  # Strong refs to PythonJavaClass callbacks for the active player.
 
 
 @run_on_ui_thread
@@ -908,6 +911,7 @@ def bind_mode_router(handler):
 # окремий MediaPlayer тільки для відео (без звуку)
 video_player          = None
 _video_prepared_video = False
+_video_listeners      = None
 
 # ===================== AudioAttributes for "music" =====================
 
@@ -976,13 +980,17 @@ class OnPreparedListener(PythonJavaClass):
     __javainterfaces__ = ['android/media/MediaPlayer$OnPreparedListener']
     __javacontext__ = 'app'
 
-    def __init__(self, callback):
+    def __init__(self, callback, player):
         super().__init__()
         self.callback = callback
+        # A JNI callback parameter is only valid during that callback. Keep
+        # the Python-owned MediaPlayer proxy, never pass the borrowed mp to
+        # a new thread after the JNI frame has returned.
+        self.player = player
 
     @java_method('(Landroid/media/MediaPlayer;)V')
-    def onPrepared(self, mp):
-        threading.Thread(target=lambda: self.callback(mp), daemon=True).start()
+    def onPrepared(self, _mp):
+        threading.Thread(target=self.callback, args=(self.player,), daemon=True).start()
 
 
 class OnErrorListener(PythonJavaClass):
@@ -1037,53 +1045,109 @@ def release_wake_lock():
 
 # ===================== MediaPlayer wrappers (audio) =====================
 
-@run_on_ui_thread
-def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_completed, on_error, on_info):
-    global android_player, _mp_prepared, is_playing, _mp_volume
-    try:
-        _mp_prepared = False
-        android_player = MediaPlayer()
-
-        # set AudioAttributes to mark this as "music" playback
+def _mp_detach_listeners(player):
+    """Detach callbacks before releasing a MediaPlayer JNI proxy."""
+    if player is None:
+        return
+    for name in ("setOnPreparedListener", "setOnCompletionListener",
+                 "setOnErrorListener", "setOnInfoListener"):
         try:
-            android_player.setAudioAttributes(_ensure_audio_attrs())
-        except Exception as e:
-            log(f"[MP] setAudioAttributes err: {e}")
-        try:
-            android_player.setVolume(float(_mp_volume), float(_mp_volume))
+            getattr(player, name)(None)
         except Exception:
             pass
 
-        def _wrap_on_prepared(mp):
-            global _mp_prepared
-            _mp_prepared = True
-            threading.Thread(target=lambda: on_prepared(mp), daemon=True).start()
 
-        _py_on_prepared = OnPreparedListener(_wrap_on_prepared)
-        _py_on_completed = OnCompletionListener(on_completed) if on_completed else None
-        _py_on_error = OnErrorListener(on_error)
-        _py_on_info = OnInfoListener(on_info)
+@run_on_ui_thread
+def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_completed, on_error, on_info):
+    global android_player, _mp_prepared, is_playing, _mp_volume
+    global _mp_listeners, _mp_generation
+    # fast_track_switch_v9 can invalidate the current player from another
+    # Python thread. Hold the same lock until this new player is registered.
+    with _mp_state_lock:
+        old_player = android_player
+        old_listeners = _mp_listeners
+        android_player = None
+        _mp_listeners = None
+        _mp_generation += 1
+        generation = _mp_generation
+        _mp_prepared = False
+        is_playing = False
+        if old_player is not None:
+            _mp_detach_listeners(old_player)
+            try:
+                old_player.release()
+            except Exception as exc:
+                log(f"[MP] old player release error: {exc}")
+        # Retain old callbacks until after native release, not before.
+        old_listeners = None
 
-        android_player._py_on_prepared = _py_on_prepared
-        android_player._py_on_completed = _py_on_completed
-        android_player._py_on_error = _py_on_error
-        android_player._py_on_info = _py_on_info
+        player = None
+        try:
+            player = MediaPlayer()
+            android_player = player
+            try:
+                player.setAudioAttributes(_ensure_audio_attrs())
+            except Exception as exc:
+                log(f"[MP] setAudioAttributes err: {exc}")
+            try:
+                player.setVolume(float(_mp_volume), float(_mp_volume))
+            except Exception:
+                pass
 
-        android_player.setOnPreparedListener(_py_on_prepared)
-        if _py_on_completed:
-            android_player.setOnCompletionListener(_py_on_completed)
-        android_player.setOnErrorListener(_py_on_error)
-        android_player.setOnInfoListener(_py_on_info)
+            def is_current():
+                return android_player is player and _mp_generation == generation
 
-        ctx = cast('android.content.Context', PythonActivity.mActivity)
-        if headers:
-            android_player.setDataSource(ctx, Uri.parse(audio_url), headers)
-        else:
-            android_player.setDataSource(ctx, Uri.parse(audio_url))
-        android_player.prepareAsync()
-        log("[media_android] MediaPlayer preparing async")
-    except Exception as e:
-        log(f"[MP] prepareAsync error: {e}")
+            def prepared_callback(_stable_player):
+                global _mp_prepared
+                if not is_current():
+                    return
+                _mp_prepared = True
+                if on_prepared:
+                    on_prepared(player)
+
+            def completed_callback():
+                if is_current() and on_completed:
+                    on_completed()
+
+            def error_callback(what, extra):
+                if is_current() and on_error:
+                    on_error(what, extra)
+
+            def info_callback(what, extra):
+                if is_current() and on_info:
+                    on_info(what, extra)
+
+            prepared = OnPreparedListener(prepared_callback, player)
+            completed = OnCompletionListener(completed_callback)
+            error = OnErrorListener(error_callback)
+            info = OnInfoListener(info_callback)
+            # Do not store Python attributes on a Java proxy. Keeping strong
+            # Python refs prevents premature proxy reuse/callback confusion.
+            _mp_listeners = (prepared, completed, error, info)
+            player.setOnPreparedListener(prepared)
+            player.setOnCompletionListener(completed)
+            player.setOnErrorListener(error)
+            player.setOnInfoListener(info)
+
+            ctx = cast('android.content.Context', PythonActivity.mActivity)
+            if headers:
+                player.setDataSource(ctx, Uri.parse(audio_url), headers)
+            else:
+                player.setDataSource(ctx, Uri.parse(audio_url))
+            player.prepareAsync()
+            log("[media_android] MediaPlayer preparing async")
+        except Exception as exc:
+            log(f"[MP] prepareAsync error: {exc}")
+            if player is not None:
+                _mp_detach_listeners(player)
+                try:
+                    player.release()
+                except Exception:
+                    pass
+            if android_player is player:
+                android_player = None
+                _mp_listeners = None
+                _mp_prepared = False
 
 
 @run_on_ui_thread
@@ -1135,17 +1199,23 @@ def _mp_seek_to(ms):
 
 @run_on_ui_thread
 def _mp_reset_release():
-    global android_player, is_playing, _mp_prepared
-    try:
-        if android_player:
-            android_player.reset()
-            android_player.release()
-            log("[media_android] MediaPlayer released")
-    except Exception as e:
-        log(f"[MP] release err: {e}")
-    android_player = None
-    is_playing = False
-    _mp_prepared = False
+    global android_player, is_playing, _mp_prepared, _mp_listeners, _mp_generation
+    with _mp_state_lock:
+        player, listeners = android_player, _mp_listeners
+        android_player = None
+        _mp_listeners = None
+        _mp_generation += 1
+        is_playing = False
+        _mp_prepared = False
+        if player is not None:
+            _mp_detach_listeners(player)
+            try:
+                player.release()
+                log("[media_android] MediaPlayer released")
+            except Exception as exc:
+                log(f"[MP] release err: {exc}")
+        # Keep listeners alive until native teardown completes.
+        listeners = None
 
 # ===================== Notifications / MediaStyle =====================
 
@@ -1988,7 +2058,7 @@ def video_overlay_show(media_url, headers=None):
     Показати SurfaceView і запустити ОКРЕМИЙ MediaPlayer для відео.
     Аудіо йде через android_player, тут звук глушимо (setVolume(0,0)).
     """
-    global _video_surface, _video_shown, video_player, _video_prepared_video
+    global _video_surface, _video_shown, video_player, _video_prepared_video, _video_listeners
     try:
         if _video_surface is None:
             video_overlay_create()
@@ -1996,15 +2066,19 @@ def video_overlay_show(media_url, headers=None):
             log("[VIDEO] no surface, cannot show")
             return
 
-        # якщо вже є відео-плеєр - скидаємо
+        # Detach Java callbacks before releasing the previous video player.
+        previous = video_player
+        previous_listeners = _video_listeners
+        video_player = None
+        _video_listeners = None
         try:
-            if video_player is not None:
-                video_player.reset()
-                video_player.release()
+            if previous is not None:
+                _mp_detach_listeners(previous)
+                previous.release()
                 log("[VIDEO] old video_player released")
         except Exception as e:
             log(f"[VIDEO] old video_player release err: {e}")
-
+        previous_listeners = None
         _video_prepared_video = False
 
         # готуємо новий MediaPlayer для відео
@@ -2049,6 +2123,8 @@ def video_overlay_show(media_url, headers=None):
 
         def _on_prepared(mp):
             global _video_prepared_video
+            if video_player is not vp:
+                return
             _video_prepared_video = True
             # якщо основний плеєр грає - стартуємо відео й приблизно синхронимось по позиції
             try:
@@ -2075,13 +2151,19 @@ def video_overlay_show(media_url, headers=None):
         def _on_info(what, extra):
             vlog(f"[VIDEO] info what={what} extra={extra}")
 
-        vp.setOnPreparedListener(OnPreparedListener(_on_prepared))
-        vp.setOnCompletionListener(OnCompletionListener(_on_completed))
-        vp.setOnErrorListener(OnErrorListener(_on_error))
-        vp.setOnInfoListener(OnInfoListener(_on_info))
+        _video_listeners = (
+            OnPreparedListener(_on_prepared, vp),
+            OnCompletionListener(_on_completed),
+            OnErrorListener(_on_error),
+            OnInfoListener(_on_info),
+        )
+        vp.setOnPreparedListener(_video_listeners[0])
+        vp.setOnCompletionListener(_video_listeners[1])
+        vp.setOnErrorListener(_video_listeners[2])
+        vp.setOnInfoListener(_video_listeners[3])
 
-        vp.prepareAsync()
         video_player = vp
+        vp.prepareAsync()
         log("[VIDEO] player prepareAsync started")
     except Exception as e:
         log(f"[VIDEO] overlay show err: {e}")
@@ -2090,7 +2172,7 @@ def video_overlay_show(media_url, headers=None):
 @run_on_ui_thread
 def video_overlay_hide():
     """Сховати overlay і звільнити відео-плеєр."""
-    global _video_surface, _video_shown, video_player, _video_prepared_video
+    global _video_surface, _video_shown, video_player, _video_prepared_video, _video_listeners
     try:
         if _video_surface is not None:
             _video_surface.setVisibility(View.GONE)
@@ -2098,14 +2180,18 @@ def video_overlay_hide():
     except Exception as e:
         log(f"[VIDEO] hide err: {e}")
 
+    previous = video_player
+    previous_listeners = _video_listeners
+    video_player = None
+    _video_listeners = None
     try:
-        if video_player is not None:
-            video_player.reset()
-            video_player.release()
+        if previous is not None:
+            _mp_detach_listeners(previous)
+            previous.release()
             log("[VIDEO] video_player released")
     except Exception as e:
         log(f"[VIDEO] video_player release err: {e}")
-    video_player = None
+    previous_listeners = None
     _video_prepared_video = False
 
 
