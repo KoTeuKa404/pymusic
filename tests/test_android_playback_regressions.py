@@ -517,6 +517,12 @@ class PlaybackRegressionTests(unittest.TestCase):
             create_surface=lambda: None,
             stop=lambda: calls.append("stopped"),
         )
+        def report_failure(gen, reason):
+            self.assertEqual(gen, 3)
+            self.assertEqual(reason, "native surface unavailable")
+            owner._prepared = False
+            owner.stop()
+        owner._fail_video_play = report_failure
         method(owner, 3)
         for _ in range(8):
             if not jobs:
@@ -554,6 +560,109 @@ class PlaybackRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Alternative audio-only"):
             extract("https://www.youtube.com/watch?v=LTsbyX-l06Y",
                     prefer_compat=True)
+
+
+    def test_android_video_sources_prefer_hls_before_broken_format18(self):
+        from typing import Any, Dict, List
+        from urllib import parse
+        hls_host = "https://manifest.googlevideo.com/api/manifest/hls_playlist"
+        mp4_host = "https://rr4---sn-abc.googlevideo.com/videoplayback"
+        hls = [
+            {"format_id": str(fid), "url": f"{hls_host}/{fid}",
+             "height": height, "protocol": "m3u8_native",
+             "vcodec": "avc1.4d401f", "acodec": "mp4a.40.2",
+             "ext": "mp4"}
+            for fid, height in ((93, 360), (94, 480), (95, 720))
+        ]
+        muxed = {"format_id": "18", "url": mp4_host + "?itag=18",
+                 "height": 360, "protocol": "https",
+                 "vcodec": "avc1.42001e", "acodec": "mp4a.40.2",
+                 "ext": "mp4"}
+        dash = {"format_id": "137", "url": mp4_host + "?itag=137",
+                "height": 1080, "protocol": "https",
+                "vcodec": "avc1.640028", "acodec": "none",
+                "ext": "mp4"}
+        malicious = {"format_id": "666",
+                     "url": "https://manifest.googlevideo.com.evil.example/watch",
+                     "protocol": "m3u8_native", "vcodec": "avc1",
+                     "acodec": "aac", "height": 720}
+        namespace = {
+            "Any": Any, "Dict": Dict, "List": List, "urlparse": parse,
+            "_best_effort_headers": lambda src, defaults: dict(src or defaults),
+        }
+        chooser = isolated_definition(
+            "ytdlp_helpers.py", "_video_stream_candidates", namespace
+        )
+        selected = chooser([muxed, dash, malicious, *hls], {}, limit=4)
+        self.assertEqual(
+            [item["format_id"] for item in selected],
+            ["95", "94", "93", "18"]
+        )
+        self.assertEqual(
+            [item["protocol"] for item in selected],
+            ["hls", "hls", "hls", "mp4"]
+        )
+
+    def test_video_extractor_uses_web_embedded_hls_not_android_only_mp4(self):
+        from typing import Any, Dict, List
+        requests = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+                requests.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, url, download=False):
+                self_url = "https://manifest.googlevideo.com/api/manifest/hls_playlist/95"
+                return {
+                    "thumbnail": "https://i.ytimg.com/vi/example/maxresdefault.jpg",
+                    "formats": [{
+                        "format_id": "95", "url": self_url,
+                        "protocol": "m3u8_native", "vcodec": "avc1",
+                        "acodec": "mp4a.40.2", "height": 720,
+                        "ext": "mp4",
+                    }]
+                }
+        namespace = {
+            "Any": Any, "Dict": Dict, "List": List,
+            "YoutubeDL": FakeYoutubeDL,
+            "YDLLogger": lambda: None,
+            "_ANDROID_WEB_UA": "android web",
+            "_video_stream_candidates": lambda formats, headers, limit=4: [{
+                "video_url": formats[0]["url"], "http_headers": headers,
+                "format_id": formats[0]["format_id"], "protocol": "hls",
+                "height": 720,
+            }],
+        }
+        extract = isolated_definition(
+            "ytdlp_helpers.py", "extract_video_info", namespace
+        )
+        info = extract("https://www.youtube.com/watch?v=LTsbyX-l06Y")
+        self.assertIn("/hls_playlist/", info["video_url"])
+        self.assertEqual(len(requests), 1)
+        self.assertIsNone(requests[0]["format"])
+        self.assertFalse(requests[0].get("nocheckcertificate", False))
+        self.assertEqual(
+            requests[0]["extractor_args"]["youtube"]["player_client"],
+            ["web_embedded"],
+        )
+
+    def test_video_controls_and_geometry_activated_while_preparing(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn("_pymusic_video_starting", source)
+        self.assertIn('self._video_player.play(', source)
+        self.assertIn('on_error=on_error', source)
+        self.assertIn('attempt_state["watchdog"]', source)
+        self.assertIn('start_candidate(index + 1)', source)
+        player = (ROOT / "video_player.py").read_text(encoding="utf-8")
+        self.assertIn("self._fail_video_play(gen,", player)
+        self.assertIn('self._on_error_cb = on_error', player)
 
 
 if __name__ == "__main__":

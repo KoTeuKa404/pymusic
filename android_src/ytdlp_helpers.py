@@ -493,38 +493,96 @@ def _pick_best_audio(
     return None
 
 
+def _video_stream_candidates(
+    formats: List[Dict[str, Any]],
+    default_headers: Dict[str, str] | None = None,
+    *,
+    limit: int = 4,
+) -> List[Dict[str, Any]]:
+    """Return playable, bounded Android video fallbacks from yt-dlp formats.
+
+    The Android YouTube client now often returns only format 18, which the
+    handset's MediaPlayer rejects. Web-embedded HLS has a separate, valid
+    manifest; try its 720/480/360p variants before the muxed MP4 fallback.
+    Never hand an untrusted scheme or unrelated host to native MediaPlayer.
+    """
+    hls, muxed, seen = [], [], set()
+    for fmt in formats or []:
+        if not isinstance(fmt, dict):
+            continue
+        source = str(fmt.get("url") or "")
+        try:
+            parsed = urlparse.urlparse(source)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (
+                host == "googlevideo.com" or host.endswith(".googlevideo.com")
+            ):
+                continue
+        except (ValueError, TypeError):
+            continue
+        if source in seen:
+            continue
+
+        video_codec = str(fmt.get("vcodec") or "none").lower()
+        audio_codec = str(fmt.get("acodec") or "none").lower()
+        if video_codec == "none" or audio_codec == "none":
+            # A video-only DASH format will not decode as standalone MediaPlayer
+            # content; prefer HLS or muxed audio+video instead.
+            continue
+
+        proto = str(fmt.get("protocol") or "").lower()
+        is_hls = proto in ("m3u8", "m3u8_native") or (
+            host == "manifest.googlevideo.com"
+            and "/hls_playlist/" in parsed.path
+        )
+        is_muxed_mp4 = str(fmt.get("ext") or "").lower() == "mp4"
+        if not (is_hls or is_muxed_mp4):
+            continue
+        try:
+            height = int(fmt.get("height") or 0)
+        except (ValueError, TypeError):
+            height = 0
+        # 1080p high-bitrate streams are poor fit for native Android streaming;
+        # 720p HLS gives a good balance of quality and startup latency.
+        if height > 720:
+            continue
+
+        seen.add(source)
+        entry = {
+            "video_url": source,
+            "http_headers": _best_effort_headers(
+                fmt.get("http_headers"), dict(default_headers or {})
+            ),
+            "format_id": str(fmt.get("format_id") or ""),
+            "height": height,
+            "protocol": "hls" if is_hls else "mp4",
+        }
+        if is_hls:
+            hls.append(entry)
+        else:
+            muxed.append(entry)
+
+    hls.sort(key=lambda x: (-x["height"], x["format_id"]))
+    muxed.sort(key=lambda x: (-x["height"], x["format_id"]))
+    # Only a few alternative attempts; no infinite retries and no expensive
+    # extractor loop after a failing format.
+    ordered = hls[:3] + muxed[:2]
+    return ordered[:max(1, min(int(limit), 6))]
+
+
 def _pick_best_video(formats: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Відео для Android MediaPlayer:
-      1) HLS (m3u8) з відео
-      2) muxed mp4 (vcodec!=none & acodec!=none, ext=mp4)
-      3) будь-який відеопотік (vcodec!=none)
-    """
-    if not formats:
+    """Legacy helper: use the same safe HLS-first selection as the player."""
+    streams = _video_stream_candidates(formats)
+    if not streams:
         return None
-
-    # 1) HLS (m3u8)
-    for f in formats:
-        u = f.get("url") or ""
-        if "m3u8" in u and f.get("vcodec") not in (None, "none"):
-            return f
-
-    # 2) muxed mp4
-    for f in formats:
-        if (
-            f.get("url")
-            and f.get("vcodec") not in (None, "none")
-            and f.get("acodec") not in (None, "none")
-            and f.get("ext") == "mp4"
-        ):
-            return f
-
-    # 3) будь-який відеопотік
-    for f in formats:
-        if f.get("url") and f.get("vcodec") not in (None, "none"):
-            return f
-
-    return None
+    top = streams[0]
+    return {
+        "url": top["video_url"],
+        "http_headers": top["http_headers"],
+        "format_id": top["format_id"],
+        "height": top["height"],
+        "protocol": top["protocol"],
+    }
 
 
 
@@ -797,77 +855,70 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
 
 # ============================ VIDEO API ================================
 def extract_video_info(video_url: str) -> Dict[str, Any]:
+    """Resolve HLS-first native video sources without blocking audio startup.
+
+    The normal Android client frequently returns only format 18 (muxed MP4).
+    That stream returns MediaPlayer what=1/extra=-2147483648 on Android 13
+    even though the corresponding Web Embedded HLS manifests are accessible.
+    Extract the complete format list, not the preselected info['url'].
     """
-    Повертає:
-      {
-        'video_url': Optional[str],       # відтворюваний відео-URL або None (якщо лише images)
-        'http_headers': Dict[str, str],   # заголовки для setDataSource
-        'thumb': str,                     # мініатюра
-      }
-    Пріоритет: muxed MP4 → HLS m3u8 → будь-який відеопотік.
-    """
-    BASE_OPTS = {
+    headers = {
+        "User-Agent": _ANDROID_WEB_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.youtube.com",
+    }
+    base_options = {
         "quiet": True,
         "skip_download": True,
         "noplaylist": True,
-        "nocheckcertificate": True,
         "logger": YDLLogger(),
-        # ВАЖЛИВО: тут формат тільки для внутрішньої логіки yt-dlp,
-        # але ми все одно будемо добирати формат самі через formats.
-        "format": (
-            "bestvideo[height<=720][vcodec!*='none'][protocol^=m3u8]+bestaudio/best[ext=mp4][height<=720]/"
-            "best[protocol^=m3u8][height<=720]"
-        ),
-        "http_headers": {
-            "User-Agent": _ANDROID_YT_UA,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.youtube.com",
-            "Connection": "keep-alive",
-        },
-        "extractor_retries": 2,
+        "format": None,  # NEVER filter HLS out before selecting native formats
+        "http_headers": headers,
+        "extractor_retries": 1,
+        "socket_timeout": 9,
         "ignoreerrors": "only_download",
+        # Keep certificate validation enabled for authenticated CDN streams.
     }
-
-    # Web-client на Android часто тягне EJS/PO-token шлях і може запускати
-    # зовнішні subprocess runtime. За замовчуванням тримаємось android client.
-    allow_web_client = _env_bool("YTDLP_ALLOW_WEB_CLIENT", False)
-    clients = ("android", "web") if allow_web_client else ("android",)
-    info, err = _extract_info_with_clients(video_url, BASE_OPTS, clients)
-    if not info:
-        print(f"[VIDEO] extract failed: {repr(err)}")
-        return {"video_url": None, "http_headers": {}, "thumb": ""}
-
-    url = info.get("url") or ""
-    fmts = info.get("formats") or []
-    headers = _best_effort_headers(info.get("http_headers"), BASE_OPTS["http_headers"])
-
-    def _looks_playable(u: str) -> bool:
-        return (
-            ("googlevideo.com" in u)
-            or ("m3u8" in u)
-            or u.endswith(".mp4")
-        )
-
-    # Якщо головний url пустий або дивний - шукаємо самі
-    if not url or not _looks_playable(url):
-        chosen = _pick_best_video(fmts)
-        if chosen and chosen.get("url"):
-            url = chosen["url"]
-            headers = _best_effort_headers(chosen.get("http_headers"), BASE_OPTS["http_headers"])
-
-    # Якщо навіть так немає відео - значить YouTube реально віддав тільки images
-    if not url or not _looks_playable(url):
-        print("[VIDEO] no playable video formats, only images or EJS breakage")
+    thumbnail = ""
+    all_streams: List[Dict[str, Any]] = []
+    last_error = None
+    for client in ("web_embedded", "android"):
+        opts = dict(base_options)
+        opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+            if not isinstance(info, dict):
+                continue
+            thumbnail = thumbnail or str(info.get("thumbnail") or "")
+            streams = _video_stream_candidates(
+                info.get("formats") or [], opts["http_headers"], limit=4
+            )
+            if streams:
+                all_streams = streams
+                print(
+                    f"[VIDEO] selected client={client} formats="
+                    f"{[(x['format_id'], x['protocol'], x['height']) for x in streams]}"
+                )
+                break
+        except Exception as exc:
+            last_error = exc
+            print(f"[VIDEO] video extraction client={client} failed: {type(exc).__name__}")
+    if not all_streams:
+        print(f"[VIDEO] no Android-compatible video streams ({type(last_error).__name__ if last_error else 'empty'})")
         return {
             "video_url": None,
             "http_headers": {},
-            "thumb": info.get("thumbnail", "") or "",
+            "thumb": thumbnail,
+            "streams": [],
         }
-
+    first = all_streams[0]
     return {
-        "video_url": url,
-        "http_headers": headers,
-        "thumb": info.get("thumbnail", "") or "",
+        "video_url": first["video_url"],
+        "http_headers": first["http_headers"],
+        "thumb": thumbnail,
+        "format_id": first["format_id"],
+        "streams": all_streams,
     }
 
 

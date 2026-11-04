@@ -4,6 +4,7 @@ from jnius import autoclass, cast, PythonJavaClass, java_method
 from android.runnable import run_on_ui_thread
 
 from kivy.clock import Clock
+from collections import deque
 
 import ytdlp_helpers as ydlh
 try:
@@ -80,6 +81,10 @@ class AndroidVideoPlayer:
         self._start_pos_provider = None
         self._start_paused = False
         self._on_prepared_cb = None
+        self._on_error_cb = None
+        # Retain Java callback proxies across a bounded number of retired
+        # MediaPlayers; their already-queued native callbacks may still fire.
+        self._retired_video_listeners = deque(maxlen=64)
         self._prepared_listener = None
         self._video_size_listener = None
         self._error_listener = None
@@ -743,6 +748,7 @@ class AndroidVideoPlayer:
         start_pos_provider=None,
         start_paused: bool = False,
         on_prepared=None,
+        on_error=None,
     ):
         if not video_url:
             print("[VIDEO] empty url")
@@ -764,6 +770,7 @@ class AndroidVideoPlayer:
         gen = self._play_gen
 
         if self.player is not None:
+            self._retain_video_listeners()
             try:
                 self.player.stop()
             except Exception:
@@ -782,6 +789,7 @@ class AndroidVideoPlayer:
         self._start_pos_provider = start_pos_provider
         self._start_paused = start_paused
         self._on_prepared_cb = on_prepared
+        self._on_error_cb = on_error
         self._video_size = None
 
         try:
@@ -841,11 +849,7 @@ class AndroidVideoPlayer:
             Clock.schedule_once(lambda dt: self._attach_and_prepare_when_surface_ready(gen), 0.05)
         except Exception as e:
             print("[VIDEO] play() error (setDataSource):", e)
-            try:
-                if self.surface_view is not None:
-                    self.surface_view.setVisibility(4)
-            except Exception:
-                pass
+            self._fail_video_play(gen, "setDataSource")
 
     def _on_prepared(self, mp, gen: int):
         if gen != self._play_gen:
@@ -896,13 +900,27 @@ class AndroidVideoPlayer:
         self._video_size = (int(width), int(height))
         self._apply_surface_bounds()
 
+    @run_on_ui_thread
+    def _fail_video_play(self, gen: int, reason: str):
+        """Release a failed native decoder before the next stream attempt."""
+        if gen != self._play_gen:
+            return
+        callback = getattr(self, "_on_error_cb", None)
+        _log(f"[VIDEO] native playback failed gen={gen} reason={reason}")
+        # stop() runs on the same Android UI thread. The generation changes
+        # before the recovery callback can start another MediaPlayer.
+        self.stop()
+        if callable(callback):
+            Clock.schedule_once(
+                lambda _dt: callback(reason), 0.05
+            )
+
     def _on_error(self, mp, what, extra, gen: int):
         if gen != self._play_gen:
             return True
 
-        # AudioPlayerScreen owns network reconnection. During an actual
-        # outage do not destroy the visible SurfaceView; a new MediaPlayer
-        # will replace the failed instance when the connection recovers.
+        # Preserve the current stream through an actual network outage. The
+        # owner will initiate a new extraction when connectivity returns.
         try:
             offline = ma is not None and not bool(ma.is_network_available())
         except Exception:
@@ -917,10 +935,7 @@ class AndroidVideoPlayer:
             return True
 
         _log(f"[VIDEO] MediaPlayer error what={what} extra={extra}")
-        try:
-            self.stop()
-        except Exception:
-            pass
+        self._fail_video_play(gen, f"MediaPlayer({what},{extra})")
         return True
 
     def _fit_rect_to_video(self, left, top, width, height):
@@ -1047,11 +1062,9 @@ class AndroidVideoPlayer:
                         )
                         return
                     print(f"[VIDEO] surface unavailable; cancelling video gen={gen}: {exc}")
-                    # Keep audio and thumbnail alive if native video cannot
-                    # attach after bounded attempts. A future play may retry.
-                    self._prepared = False
-                    self._surface_ready_to_show = False
-                    self.stop()
+                    # Keep audio and thumbnail alive, and offer a bounded
+                    # fallback to another stream if attachment never succeeds.
+                    self._fail_video_play(gen, "native surface unavailable")
 
             on_android_ui()
 
@@ -1072,6 +1085,17 @@ class AndroidVideoPlayer:
             pass
         self._controls_visible = False
 
+    def _retain_video_listeners(self):
+        callbacks = tuple(
+            value for value in (
+                self._prepared_listener,
+                self._video_size_listener,
+                self._error_listener,
+            ) if value is not None
+        )
+        if callbacks:
+            self._retired_video_listeners.append(callbacks)
+
     @staticmethod
     def _detach_player_listeners(player):
         """Detach Java callbacks before releasing a native MediaPlayer."""
@@ -1088,6 +1112,7 @@ class AndroidVideoPlayer:
         self._surface_ready_to_show = False
         try:
             if self.player is not None:
+                self._retain_video_listeners()
                 try:
                     self.player.stop()
                 except Exception:
@@ -1120,6 +1145,7 @@ class AndroidVideoPlayer:
         except Exception:
             pass
         self._controls_visible = False
+        self._on_error_cb = None
         self._prepared_listener = None
         self._video_size_listener = None
         self._error_listener = None
