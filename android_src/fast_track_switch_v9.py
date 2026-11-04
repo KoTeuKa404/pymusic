@@ -121,6 +121,12 @@ def _patch_media_release(media) -> None:
             media._mp_detach_listeners(player)
         except Exception:
             pass
+        # The native queue may still deliver this listener after release()
+        # returns, so keep the PythonJavaClass proxy alive for a bounded time.
+        try:
+            media._mp_retire_listeners(listeners)
+        except Exception:
+            pass
         # Silence first. release() can occasionally take noticeable time on a
         # remote MediaPlayer, but the old track must stop being audible at once.
         try:
@@ -270,6 +276,8 @@ def _install_now() -> bool:
                 self._pymusic_deferred_meta_v9 = set()
             if not hasattr(self, "_pymusic_switch_serial_v9"):
                 self._pymusic_switch_serial_v9 = 0
+            if not hasattr(self, "_pymusic_last_play_request_v9"):
+                self._pymusic_last_play_request_v9 = ("", 0.0)
 
         def metadata_after_audio(self, video_url: str):
             ensure_switch_state(self)
@@ -337,6 +345,20 @@ def _install_now() -> bool:
             ensure_switch_state(self)
             new_url = str(video_url or "")
             previous_url = str(getattr(self, "_last_video_url", "") or "")
+
+            # Safety net for WebView/notification bursts: one tap must not
+            # allocate dozens of MediaPlayers while the first is preparing.
+            # Ignore only the *same* video for a brief interval. A different
+            # video still switches immediately and a later manual retry works.
+            last_url, last_at = self._pymusic_last_play_request_v9
+            now = time.monotonic()
+            if (new_url and last_url and _same_video(new_url, last_url)
+                    and 0 <= now - last_at < 1.5):
+                print("[FAST-SWITCH-V9] duplicate play request ignored")
+                return None
+            if new_url:
+                self._pymusic_last_play_request_v9 = (new_url, now)
+
             switching = bool(
                 new_url
                 and previous_url
