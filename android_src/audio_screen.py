@@ -4108,8 +4108,9 @@ class AudioPlayerScreen(Screen):
                 return True
 
             now = time.time()
-            if (now - self._last_stream_error_ts) > 5.0:
-                self._stream_error_hits = 0
+            # Count consecutive errors for the current track, not only errors
+            # within five seconds: YouTube/CDN requests commonly take >5 s,
+            # otherwise we retry the same broken format forever.
             self._stream_error_hits += 1
             self._last_stream_error_ts = now
 
@@ -4121,15 +4122,15 @@ class AudioPlayerScreen(Screen):
                 pass
 
             # типові помилки нестабільного інтернету
-            NETWORK_ERRORS = (-1004, -110, 1)
+            NETWORK_ERRORS = (-1004, -110, -38, 1)
 
             if what in NETWORK_ERRORS or extra in NETWORK_ERRORS:
                 # Частий кейс проблемних треків: Unknown error(1,-2147483648).
                 # Після кількох помилок форсимо сумісний AAC/M4A профіль.
-                if self._stream_error_hits >= 3 and not self._prefer_compat_audio:
+                if self._stream_error_hits >= 2 and not self._prefer_compat_audio:
                     self._prefer_compat_audio = True
                     print("[AUDIO] switch to compat audio profile (m4a/aac)")
-                if self._stream_error_hits >= 8:
+                if self._stream_error_hits >= 6:
                     print("[AUDIO] too many stream errors, skip/stop track")
                     if self._auto_skip:
                         self._queue_auto_next()
@@ -4140,7 +4141,10 @@ class AudioPlayerScreen(Screen):
                     return True
                 print("[AUDIO] Network stream failed, re-extracting fresh URL...")
                 if self._last_video_url:
-                    force_fresh = what == -1004 or extra == -1004
+                    # Do not reuse cached 503/invalid-state CDN URLs. Refresh
+                    # stream extraction, which now tries audio-only AAC clients.
+                    force_fresh = (what in (1, -38, -1004)
+                                   or extra in (-1004, -2147483648))
                     self._recover_stream("media_error", self._resume_pos_ms, force_fresh=force_fresh)
                 return True
 
