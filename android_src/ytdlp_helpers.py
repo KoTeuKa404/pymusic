@@ -389,11 +389,11 @@ def _channel_name_from_oembed(video_url: str) -> str:
         req = urllib.request.Request(
             endpoint,
             headers={
-                "User-Agent": _ANDROID_WEB_UA,
+                "User-Agent": "Mozilla/5.0",
                 "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=6) as response:
+        with urllib.request.urlopen(req, timeout=12) as response:
             data = json.loads(response.read(8192).decode("utf-8"))
         name = str(data.get("author_name") or "").strip()
         return name[:200]
@@ -715,8 +715,8 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
             channel = page_channel
         if (not channel_thumb) and page_thumb:
             channel_thumb = _normalize_img_url(page_thumb)
-    if not channel:
-        channel = _channel_name_from_oembed(str(video_url or ""))
+    # Do not block the audio-critical extraction path on oEmbed. A separate
+    # metadata worker requests the channel name when yt-dlp omits it.
     if not channel_thumb:
         channel_thumb = _extract_channel_thumb_from_watch_page(
             str(video_url or ""),
