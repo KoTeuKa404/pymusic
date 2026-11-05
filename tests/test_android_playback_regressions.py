@@ -890,20 +890,17 @@ class PlaybackRegressionTests(unittest.TestCase):
     def test_channel_avatar_resolves_official_oembed_author_page(self):
         import re
         import ssl
-        import threading
+        import html
         import time
         from urllib import parse
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        from android_src import ytdlp_helpers as helpers
 
         video_url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
         avatar_url = "https://yt3.googleusercontent.com/ytc/grimwind-avatar=s900"
-        requests = []
+        calls = []
+
         class Response:
             def __init__(self, data):
                 self.data = data
-                self.headers = {"Content-Type": "text/html"}
             def __enter__(self):
                 return self
             def __exit__(self, *args):
@@ -911,9 +908,10 @@ class PlaybackRegressionTests(unittest.TestCase):
             def read(self, *_args):
                 return self.data
 
-        def get(req, timeout=7, context=None):
+        def fake_urlopen(req, timeout=7, context=None):
             url = req.full_url
-            requests.append(url)
+            calls.append(url)
+            self.assertIsNotNone(context, "TLS must use verified CA roots")
             if url.startswith("https://www.youtube.com/oembed?"):
                 return Response(
                     b'{"author_name":"Grimwind",'
@@ -925,36 +923,69 @@ class PlaybackRegressionTests(unittest.TestCase):
                     '<html><head><meta property="og:image" content="'
                     + avatar_url + '"></head></html>'
                 ).encode("utf-8"))
-            raise AssertionError(url)
-        for table in (
-            helpers._CHANNEL_NAME_CACHE,
-            helpers._CHANNEL_AUTHOR_URL_CACHE,
-            helpers._CHANNEL_AVATAR_URL_CACHE,
+            self.fail("Unexpected outbound request: " + url)
+
+        ns = {
+            "re": re,
+            "html": html,
+            "time": time,
+            "urlparse": parse,
+            "threading": threading,
+            "ssl": SimpleNamespace(
+                create_default_context=lambda cafile: object()
+            ),
+            "certifi": SimpleNamespace(where=lambda: "/trusted/ca-bundle.pem"),
+            "urllib": SimpleNamespace(
+                request=SimpleNamespace(
+                    Request=lambda url, headers: SimpleNamespace(full_url=url),
+                    urlopen=fake_urlopen,
+                )
+            ),
+            "_CHANNEL_NAME_CACHE": {},
+            "_CHANNEL_AUTHOR_URL_CACHE": {},
+            "_CHANNEL_AVATAR_URL_CACHE": {},
+            "_CHANNEL_NAME_CACHE_LOCK": threading.RLock(),
+            "_ANDROID_WEB_UA": "Mozilla/5.0",
+            "_extract_video_id_from_url": lambda url: (
+                "LTsbyX-l06Y" if url == video_url else ""
+            ),
+        }
+        for func in (
+            "_validated_youtube_channel_url",
+            "_validated_yt_avatar_url",
+            "_pick_yt3_avatar_from_text",
+            "_channel_name_from_oembed",
+            "_extract_channel_thumb_from_channel_page",
+            "_channel_avatar_from_oembed",
         ):
-            table.clear()
-        with patch.object(helpers.urllib.request, "urlopen", side_effect=get):
-            self.assertEqual(helpers._channel_name_from_oembed(video_url), "Grimwind")
-            self.assertEqual(helpers._channel_avatar_from_oembed(video_url), avatar_url)
-            self.assertEqual(helpers._channel_avatar_from_oembed(video_url), avatar_url)
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[1], "https://www.youtube.com/@Grimwind")
+            isolated_definition("ytdlp_helpers.py", func, ns)
+
+        self.assertEqual(ns["_channel_name_from_oembed"](video_url), "Grimwind")
+        self.assertEqual(ns["_channel_avatar_from_oembed"](video_url), avatar_url)
+        self.assertEqual(ns["_channel_avatar_from_oembed"](video_url), avatar_url)
+        self.assertEqual(calls, [
+            calls[0], "https://www.youtube.com/@Grimwind"
+        ])
+        self.assertTrue(calls[0].startswith("https://www.youtube.com/oembed?"))
+        self.assertEqual(len(calls), 2)
 
     def test_oembed_rejects_arbitrary_channel_author_url(self):
-        from android_src import ytdlp_helpers as helpers
-        self.assertEqual(
-            helpers._validated_youtube_channel_url(
-                "https://www.youtube.com.evil.test/@Grimwind"
-            ), "",
+        import re
+        from urllib import parse
+        validated = isolated_definition(
+            "ytdlp_helpers.py", "_validated_youtube_channel_url",
+            {"re": re, "urlparse": parse},
         )
         self.assertEqual(
-            helpers._validated_youtube_channel_url(
-                "https://www.youtube.com/redirect?url=http://127.0.0.1"
-            ), "",
+            validated("https://www.youtube.com.evil.test/@Grimwind"), ""
         )
         self.assertEqual(
-            helpers._validated_youtube_channel_url(
-                "https://www.youtube.com/@Grimwind"
-            ), "https://www.youtube.com/@Grimwind",
+            validated("https://www.youtube.com/redirect?url=http://127.0.0.1"),
+            "",
+        )
+        self.assertEqual(
+            validated("https://www.youtube.com/@Grimwind"),
+            "https://www.youtube.com/@Grimwind",
         )
 
     def test_author_worker_fetches_avatar_on_cached_author(self):
