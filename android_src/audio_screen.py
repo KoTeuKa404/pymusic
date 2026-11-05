@@ -4784,12 +4784,23 @@ class AudioPlayerScreen(Screen):
                     attempt_state["watchdog"] = Clock.schedule_once(
                         lambda _dt: failed("prepare timeout"), 13.0
                     )
-                    self._play_video_if_screen_active(
-                        video_stream,
-                        video_headers,
-                        on_ready=ready,
-                        on_error=failed,
-                    )
+                    # A broken/older runtime wrapper must never escape a
+                    # Kivy Clock event and terminate the whole Android app.
+                    # Treat startup exceptions as one failed video candidate;
+                    # audio playback remains independent.
+                    try:
+                        self._play_video_if_screen_active(
+                            video_stream,
+                            video_headers,
+                            on_ready=ready,
+                            on_error=failed,
+                        )
+                    except Exception as exc:
+                        print(
+                            "[VIDEO] candidate startup failed safely: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        failed(f"startup {type(exc).__name__}")
 
                 if not streams:
                     Clock.schedule_once(
