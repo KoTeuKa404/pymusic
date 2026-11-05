@@ -726,6 +726,9 @@ class PlaybackRegressionTests(unittest.TestCase):
                 stream = (
                     "https://manifest.googlevideo.com/api/manifest/hls_playlist/95"
                 )
+                # Even when an older muxed-prefetch worker has registered
+                # the URL, explicit HLS candidate callbacks must win.
+                runtime._MUXED_URLS.add(stream)
                 screen._play_video_if_screen_active(
                     stream, {"User-Agent": "TestUA"},
                     on_ready=lambda: events.append(("ready",)),
@@ -735,6 +738,7 @@ class PlaybackRegressionTests(unittest.TestCase):
                     ("play", stream, {"User-Agent": "TestUA"}),
                     ("ready",),
                 ])
+                runtime._MUXED_URLS.discard(stream)
                 # The pre-HLS call signature still works for legacy clients.
                 screen._play_video_if_screen_active(
                     stream, {}, on_ready=None, on_error=None
