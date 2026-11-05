@@ -906,8 +906,8 @@ class PlaybackRegressionTests(unittest.TestCase):
                 return self
             def __exit__(self, *args):
                 return False
-            def read(self, *_args):
-                return self.data
+            def read(self, n=-1):
+                return self.data if n < 0 else self.data[:n]
 
         def fake_urlopen(req, timeout=7, context=None):
             url = req.full_url
@@ -920,8 +920,11 @@ class PlaybackRegressionTests(unittest.TestCase):
                     b'"thumbnail_url":"https://i.ytimg.com/vi/LTsbyX-l06Y/hqdefault.jpg"}'
                 )
             if url == "https://www.youtube.com/@Grimwind":
+                # Real YouTube places og:image after >800 KB of scripts.
+                # A regression to the old 220 KB read limit must fail.
                 return Response((
-                    '<html><head><meta property="og:image" content="'
+                    "<html><head>" + ("x" * 850_000)
+                    + '<meta property="og:image" content="'
                     + avatar_url + '"></head></html>'
                 ).encode("utf-8"))
             self.fail("Unexpected outbound request: " + url)
