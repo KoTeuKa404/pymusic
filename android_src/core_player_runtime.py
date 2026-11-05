@@ -43,6 +43,7 @@ def install_core_player_fix() -> bool:
         Clock = audio_screen.Clock
         media = audio_screen.ma
         old_safe_video = ydlh.safe_extract_video_info
+        old_play_video = screen_cls._play_video_if_screen_active
         old_set_video_mode = screen_cls._set_video_mode_core
         old_prefetch_next = getattr(screen_cls, "_prefetch_next_track_audio", None)
 
@@ -170,7 +171,10 @@ def install_core_player_fix() -> bool:
                 print("[CORE-V4] muxed extraction fallback:", exc)
                 return old_safe_video(source_url)
 
-        ydlh.safe_extract_video_info = extract_muxed_video
+        # Do NOT monkey-patch safe_extract_video_info here. The core player
+        # now chooses validated HLS streams with bounded fallbacks. Replacing
+        # it with extract_muxed_video silently forced the failing format 18
+        # for LTsbyX-l06Y, bypassing all HLS candidates and recovery.
 
         def set_audio_volume(audio, value: float) -> None:
             try:
@@ -342,7 +346,24 @@ def install_core_player_fix() -> bool:
                 except Exception:
                     pass
 
-        def play_video_core(self, vurl: str, vheaders: dict):
+        def play_video_core(
+            self, vurl: str, vheaders: dict, *, on_ready=None, on_error=None
+        ):
+            # This method replaces AudioPlayerScreen's instance method.
+            # Forward its full callback contract to the current native
+            # playback implementation. The new HLS candidate handler
+            # requires both callbacks; ignoring them previously crashed
+            # Kivy with an uncaught TypeError during start_candidate().
+            # Only the legacy, explicitly registered muxed path below
+            # should perform an audio/video handoff.
+            if (
+                on_ready is not None
+                or on_error is not None
+                or str(vurl or "") not in _MUXED_URLS
+            ):
+                return old_play_video(
+                    self, vurl, vheaders, on_ready=on_ready, on_error=on_error
+                )
             if not self._is_screen_active() or self._app_in_background or not self._video_enabled:
                 self._set_video_mode(False)
                 return
@@ -473,5 +494,5 @@ def install_core_player_fix() -> bool:
         screen_cls._set_video_mode_core = set_video_mode_core
         screen_cls._pymusic_core_av_master_v4 = True
         _INSTALLED = True
-        print("[CORE-V4] fast muxed AV handoff installed")
+        print("[CORE-V4] legacy muxed AV handoff guarded; native HLS source and callbacks preserved")
         return True
