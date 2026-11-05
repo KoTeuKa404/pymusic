@@ -533,10 +533,12 @@ def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
             },
         )
         ctx = ssl.create_default_context(cafile=certifi.where())
-        # The channel's og:image is in <head>, so do not download the
-        # 1.4 MB full watch page just for an avatar.
+        # YouTube sometimes emits >800 KB of scripts BEFORE its <meta>
+        # channel OG image (confirmed ~828 KB for @Grimwind). A 220 KB
+        # response silently misses it. Read a bounded 1.2 MB instead.
+        # This runs in the separate avatar worker, never the audio path.
         with urllib.request.urlopen(req, timeout=7, context=ctx) as resp:
-            raw = resp.read(220_000)
+            raw = resp.read(1_200_000)
         page = raw.decode("utf-8", errors="replace")
         match = re.search(
             r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)',
