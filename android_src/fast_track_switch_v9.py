@@ -292,8 +292,11 @@ def _install_now() -> bool:
             key = (video_url, gen)
             if key in self._pymusic_early_author_inflight:
                 return
-            if audio_screen._verified_channel_name(
-                getattr(self, "_channel", ""), getattr(self, "_title", "")
+            if (
+                audio_screen._verified_channel_name(
+                    getattr(self, "_channel", ""), getattr(self, "_title", "")
+                )
+                and getattr(self, "_channel_thumb", "")
             ):
                 return
             self._pymusic_early_author_inflight.add(key)
@@ -334,21 +337,31 @@ def _install_now() -> bool:
                         audio_screen.Clock.schedule_once(
                             lambda _dt, n=name: apply(name=n), 0
                         )
-                    # Channel avatar and a fallback author remain optional,
-                    # and never delay text metadata or audible playback.
+                    # YouTube oEmbed returns a validated channel URL as
+                    # author_url. Fetch that page's og:image: it is the real
+                    # channel avatar, unlike oEmbed.thumbnail_url (video art).
+                    # Run after the name callback, off the playback/UI thread.
                     if not current():
                         return
-                    page_name, avatar = (
-                        audio_screen.ydlh._extract_channel_meta_from_watch_page(
-                            video_url, audio_screen.ydlh._ANDROID_WEB_UA
-                        )
+                    avatar = audio_screen.ydlh._channel_avatar_from_oembed(
+                        video_url
                     )
+                    page_name = ""
+                    if not avatar and current():
+                        # Fallback for videos with no author_url in oEmbed.
+                        page_name, avatar = (
+                            audio_screen.ydlh._extract_channel_meta_from_watch_page(
+                                video_url, audio_screen.ydlh._ANDROID_WEB_UA
+                            )
+                        )
                     if current() and (avatar or (not name and page_name)):
                         audio_screen.Clock.schedule_once(
                             lambda _dt, n=(name or page_name), a=avatar:
                                 apply(name=n, thumb=a),
                             0,
                         )
+                    if not avatar:
+                        print("[META] channel avatar not found via author/watch page")
                 except Exception as exc:
                     print(
                         f"[META] independent author worker failed: "
@@ -368,6 +381,11 @@ def _install_now() -> bool:
             url = str(video_url or "")
             if not url:
                 return
+            # A cached track may already know its author name while the
+            # avatar is still missing. Schedule that cheap independent lookup
+            # before deciding whether full metadata extraction is required.
+            gen = int(getattr(self, "_load_gen", 0) or 0)
+            start_author_lookup(self, url, gen)
             try:
                 if (url in getattr(self, "_metadata_loaded_urls", set())
                         and audio_screen._verified_channel_name(
@@ -377,8 +395,6 @@ def _install_now() -> bool:
             except Exception:
                 pass
 
-            gen = int(getattr(self, "_load_gen", 0) or 0)
-            start_author_lookup(self, url, gen)
             key = (url, gen)
             if key in self._pymusic_deferred_meta_v9:
                 return

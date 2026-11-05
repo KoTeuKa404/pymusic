@@ -31,6 +31,8 @@ _VIDEO_FORMAT_CACHE: dict[str, tuple[float, dict]] = {}
 _VIDEO_FORMAT_CACHE_LOCK = threading.RLock()
 _CHANNEL_NAME_CACHE: dict[str, tuple[float, str]] = {}
 _CHANNEL_NAME_CACHE_LOCK = threading.RLock()
+_CHANNEL_AUTHOR_URL_CACHE: dict[str, tuple[float, str]] = {}
+_CHANNEL_AVATAR_URL_CACHE: dict[str, tuple[float, str]] = {}
 
 
 def _cache_extracted_formats(video_url: str, info: dict) -> None:
@@ -325,16 +327,56 @@ def _extract_related_from_watch_page(video_url: str, ua: str, limit: int = 12) -
         return []
 
 
-def _pick_yt3_avatar_from_text(text: str) -> str:
-    # Дуже надійний fallback: беремо перший yt3.ggpht URL з watch/channel HTML.
-    matches = re.findall(r'(https?:)?//yt3\.ggpht\.com/[^"\\\s<]+', text or "")
-    if not matches:
+def _validated_youtube_channel_url(value: str) -> str:
+    """Accept only YouTube channel pages; never fetch arbitrary oEmbed URLs."""
+    try:
+        parsed = urlparse.urlsplit(str(value or "").strip())
+        host = str(parsed.hostname or "").lower()
+        if parsed.scheme != "https" or host not in (
+            "youtube.com", "www.youtube.com", "m.youtube.com"
+        ):
+            return ""
+        path = parsed.path or ""
+        if not (
+            re.fullmatch(r"/@[A-Za-z0-9_.-]{1,100}/?", path)
+            or re.fullmatch(r"/channel/UC[A-Za-z0-9_-]{20,32}/?", path)
+        ):
+            return ""
+        return "https://www.youtube.com" + path.rstrip("/")
+    except (ValueError, TypeError):
         return ""
-    raw = matches[0]
-    if raw.startswith("//"):
-        raw = "https:" + raw
-    return _normalize_img_url(raw)
 
+
+def _validated_yt_avatar_url(value: str) -> str:
+    """Only allow HTTPS images on YouTube's own avatar CDN hosts."""
+    try:
+        candidate = html.unescape(str(value or "").strip())
+        candidate = candidate.replace("\\u0026", "&").replace("\\/", "/")
+        if candidate.startswith("//"):
+            candidate = "https:" + candidate
+        parsed = urlparse.urlsplit(candidate)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in {
+            "yt3.googleusercontent.com", "yt3.ggpht.com",
+        }:
+            return ""
+        if not parsed.path or len(candidate) > 3072:
+            return ""
+        return candidate
+    except (ValueError, TypeError):
+        return ""
+
+
+def _pick_yt3_avatar_from_text(text: str) -> str:
+    """Get the actual URL, not the optional 'https:' regexp capture group."""
+    for match in re.finditer(
+        r'https?:?//(?:yt3\.ggpht\.com|yt3\.googleusercontent\.com)/'
+        r'[^"\\\s<>]+',
+        str(text or ""),
+    ):
+        value = _validated_yt_avatar_url(match.group(0))
+        if value:
+            return value
+    return ""
 
 def _extract_channel_thumb_from_watch_page(video_url: str, ua: str) -> str:
     try:
@@ -384,7 +426,7 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
         )
         ctx = ssl.create_default_context(cafile=certifi.where())
         with urllib.request.urlopen(req, timeout=7, context=ctx) as resp:
-            raw = resp.read(450_000)
+            raw = resp.read(1_500_000)
         text = raw.decode("utf-8", errors="ignore")
 
         channel_name = ""
@@ -456,10 +498,18 @@ def _channel_name_from_oembed(video_url: str) -> str:
             data = json.loads(response.read(8192).decode("utf-8"))
         name = str(data.get("author_name") or "").strip()[:200]
         if name:
+            author_url = _validated_youtube_channel_url(
+                str(data.get("author_url") or "")
+            )
             with _CHANNEL_NAME_CACHE_LOCK:
-                _CHANNEL_NAME_CACHE[video_id] = (time.monotonic() + 3600, name)
+                expires = time.monotonic() + 3600
+                _CHANNEL_NAME_CACHE[video_id] = (expires, name)
+                if author_url:
+                    _CHANNEL_AUTHOR_URL_CACHE[video_id] = (expires, author_url)
                 while len(_CHANNEL_NAME_CACHE) > 64:
-                    _CHANNEL_NAME_CACHE.pop(next(iter(_CHANNEL_NAME_CACHE)))
+                    oldest = next(iter(_CHANNEL_NAME_CACHE))
+                    _CHANNEL_NAME_CACHE.pop(oldest, None)
+                    _CHANNEL_AUTHOR_URL_CACHE.pop(oldest, None)
             print(f"[META] official YouTube author resolved id={video_id}")
         return name
     except (OSError, ValueError, TypeError) as exc:
@@ -469,6 +519,8 @@ def _channel_name_from_oembed(video_url: str) -> str:
 
 
 def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
+    """Read the canonical channel's og:image (real avatar, not video cover)."""
+    channel_url = _validated_youtube_channel_url(channel_url)
     if not channel_url:
         return ""
     try:
@@ -478,21 +530,63 @@ def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
                 "User-Agent": ua or _ANDROID_WEB_UA,
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.youtube.com",
-                "Connection": "keep-alive",
             },
         )
-        ctx = ssl._create_unverified_context()
-        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
-            raw = resp.read(350_000)
-        text = raw.decode("utf-8", errors="ignore")
-        m = re.search(r'<meta property="og:image" content="([^"]+)"', text)
-        if not m:
-            m = re.search(r'"avatar"\s*:\s*\{[^}]*"thumbnails"\s*:\s*\[\s*\{"url":"([^"]+)"', text)
-        if m:
-            return _normalize_img_url(m.group(1) or "")
-        return _pick_yt3_avatar_from_text(text)
-    except Exception:
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        # YouTube sometimes emits >800 KB of scripts BEFORE its <meta>
+        # channel OG image (confirmed ~828 KB for @Grimwind). A 220 KB
+        # response silently misses it. Read a bounded 1.2 MB instead.
+        # This runs in the separate avatar worker, never the audio path.
+        with urllib.request.urlopen(req, timeout=7, context=ctx) as resp:
+            raw = resp.read(1_200_000)
+        page = raw.decode("utf-8", errors="replace")
+        match = re.search(
+            r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)',
+            page, re.IGNORECASE,
+        )
+        if match:
+            image_url = _validated_yt_avatar_url(match.group(1))
+            if image_url:
+                return image_url
+        return _pick_yt3_avatar_from_text(page)
+    except Exception as exc:
+        print(f"[META] channel avatar HTML unavailable: {type(exc).__name__}")
         return ""
+
+
+def _channel_avatar_from_oembed(video_url: str) -> str:
+    """Resolve a real channel avatar using oEmbed author_url, with no JS API.
+
+    The oEmbed worker already obtained author_name; reuse its validated
+    author_url instead of scraping the video's huge watch page. Cache the
+    positive result for an hour and never confuse video thumbnails with the
+    actual channel avatar.
+    """
+    video_id = _extract_video_id_from_url(video_url)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return ""
+    with _CHANNEL_NAME_CACHE_LOCK:
+        cached = _CHANNEL_AVATAR_URL_CACHE.get(video_id)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        author = _CHANNEL_AUTHOR_URL_CACHE.get(video_id)
+        author_url = author[1] if author and author[0] > time.monotonic() else ""
+    if not author_url:
+        _channel_name_from_oembed(video_url)
+        with _CHANNEL_NAME_CACHE_LOCK:
+            author = _CHANNEL_AUTHOR_URL_CACHE.get(video_id)
+            author_url = author[1] if author and author[0] > time.monotonic() else ""
+    if not author_url:
+        return ""
+    avatar = _extract_channel_thumb_from_channel_page(author_url, _ANDROID_WEB_UA)
+    if avatar:
+        with _CHANNEL_NAME_CACHE_LOCK:
+            _CHANNEL_AVATAR_URL_CACHE[video_id] = (time.monotonic() + 3600, avatar)
+            while len(_CHANNEL_AVATAR_URL_CACHE) > 64:
+                _CHANNEL_AVATAR_URL_CACHE.pop(next(iter(_CHANNEL_AVATAR_URL_CACHE)))
+        print(f"[META] official YouTube channel avatar resolved id={video_id}")
+    return avatar
+
 
 def _parse_expire_ts(url: str) -> Optional[int]:
     try:

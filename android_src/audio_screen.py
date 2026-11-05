@@ -2837,44 +2837,83 @@ class AudioPlayerScreen(Screen):
         return os.path.join(self._art_cache_dir(), f"ch_{key}.jpg")
 
     def _download_channel_avatar_async(self, url: str):
-        if not url or not url.startswith(("http://", "https://")):
+        """Cache only verified YouTube channel images, never HTML/video art."""
+        avatar_url = ydlh._validated_yt_avatar_url(url)
+        if not avatar_url:
+            print("[META] rejected non-YouTube channel avatar URL")
             return
 
-        def _job():
+        def _apply_file(path: str) -> None:
+            # UI updates must happen on the Kivy thread and belong to the
+            # selected channel, even when the user switches tracks quickly.
+            if str(getattr(self, "_channel_thumb", "") or "") != avatar_url:
+                return
+            self._channel_thumb_local = path
             try:
-                path = self._channel_avatar_cache_path(url)
+                ma.log(f"[META] avatar saved: {path}")
+            except Exception:
+                pass
+            Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
+            Clock.schedule_once(lambda dt: self._publish_media_metadata_now(), 0)
+
+        def _job():
+            tmp = None
+            try:
+                path = self._channel_avatar_cache_path(avatar_url)
+                if os.path.isfile(path) and os.path.getsize(path) > 128:
+                    _apply_file(path)
+                    return
+
                 req = urllib.request.Request(
-                    url,
+                    avatar_url,
                     headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
+                        "User-Agent": (
+                            "Mozilla/5.0 (Linux; Android 12; Mobile) "
+                            "AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
+                        ),
                         "Referer": "https://www.youtube.com",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept": "image/jpeg,image/png,image/*;q=0.9,*/*;q=0.8",
-                        "Connection": "keep-alive",
+                        "Accept": "image/jpeg,image/png,image/webp,image/*;q=0.8",
                     },
                 )
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=10, context=ctx) as resp, open(path, "wb") as f:
-                    f.write(resp.read())
-                if os.path.exists(path) and os.path.getsize(path) > 0:
-                    # The user may switch tracks while the avatar is being
-                    # downloaded; never publish an older channel's avatar.
-                    if str(getattr(self, "_channel_thumb", "") or "") != url:
-                        return
-                    self._channel_thumb_local = path
-                    try:
-                        ma.log(f"[META] avatar saved: {path}")
-                    except Exception:
-                        pass
-                    Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
-                    Clock.schedule_once(lambda dt: self._publish_media_metadata_now(), 0)
-            except Exception as e:
-                try:
-                    ma.log(f"[META] avatar download fail: {e}")
-                except Exception:
-                    pass
+                # Never disable HTTPS certificate verification to fetch art.
+                context = ssl.create_default_context(cafile=certifi.where())
+                with urllib.request.urlopen(req, timeout=9, context=context) as resp:
+                    mime = str(resp.headers.get("Content-Type", "")).lower()
+                    if not mime.startswith("image/"):
+                        raise ValueError("avatar URL returned non-image content")
+                    data = resp.read(2_000_001)
+                if len(data) > 2_000_000 or len(data) < 128:
+                    raise ValueError("avatar image size outside allowed limits")
+                if not (
+                    data.startswith(b"\xff\xd8\xff")
+                    or data.startswith(b"\x89PNG\r\n\x1a\n")
+                    or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+                ):
+                    raise ValueError("avatar response has invalid image header")
 
-        threading.Thread(target=_job, daemon=True).start()
+                # Unique temporary file, atomic replacement, and no partial
+                # images visible to the Kivy image loader.
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=os.path.dirname(path),
+                    prefix="channel-avatar-", suffix=".tmp", delete=False
+                ) as out:
+                    tmp = out.name
+                    out.write(data)
+                os.replace(tmp, path)
+                tmp = None
+                _apply_file(path)
+            except Exception as exc:
+                ma.log(f"[META] avatar download failed: {type(exc).__name__}: {exc}")
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+
+        threading.Thread(
+            target=_job, daemon=True, name="pymusic-channel-avatar"
+        ).start()
 
     def _playlist_thumb_cache_path(self, thumb_url: str) -> str:
         key = self._cache_key(f"pl:{thumb_url}")
