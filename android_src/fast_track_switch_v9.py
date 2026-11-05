@@ -334,21 +334,31 @@ def _install_now() -> bool:
                         audio_screen.Clock.schedule_once(
                             lambda _dt, n=name: apply(name=n), 0
                         )
-                    # Channel avatar and a fallback author remain optional,
-                    # and never delay text metadata or audible playback.
+                    # YouTube oEmbed returns a validated channel URL as
+                    # author_url. Fetch that page's og:image: it is the real
+                    # channel avatar, unlike oEmbed.thumbnail_url (video art).
+                    # Run after the name callback, off the playback/UI thread.
                     if not current():
                         return
-                    page_name, avatar = (
-                        audio_screen.ydlh._extract_channel_meta_from_watch_page(
-                            video_url, audio_screen.ydlh._ANDROID_WEB_UA
-                        )
+                    avatar = audio_screen.ydlh._channel_avatar_from_oembed(
+                        video_url
                     )
+                    page_name = ""
+                    if not avatar and current():
+                        # Fallback for videos with no author_url in oEmbed.
+                        page_name, avatar = (
+                            audio_screen.ydlh._extract_channel_meta_from_watch_page(
+                                video_url, audio_screen.ydlh._ANDROID_WEB_UA
+                            )
+                        )
                     if current() and (avatar or (not name and page_name)):
                         audio_screen.Clock.schedule_once(
                             lambda _dt, n=(name or page_name), a=avatar:
                                 apply(name=n, thumb=a),
                             0,
                         )
+                    if not avatar:
+                        print("[META] channel avatar not found via author/watch page")
                 except Exception as exc:
                     print(
                         f"[META] independent author worker failed: "
