@@ -891,6 +891,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         import re
         import ssl
         import html
+        import json
         import time
         from urllib import parse
 
@@ -928,6 +929,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         ns = {
             "re": re,
             "html": html,
+            "json": json,
             "time": time,
             "urlparse": parse,
             "threading": threading,
