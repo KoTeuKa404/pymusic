@@ -7,6 +7,9 @@ import json
 import os
 import re
 import ssl
+import threading
+import time
+import certifi
 import urllib.request
 import urllib.parse as urlparse
 from typing import Any, Dict, Optional, Tuple, List
@@ -20,6 +23,50 @@ from yt_dlp import YoutubeDL
 yt_dlp.cache.store  = lambda *a, **k: None
 yt_dlp.cache.load   = lambda *a, **k: None
 yt_dlp.cache.remove = lambda *a, **k: None
+
+
+# Cache only a bounded number of freshly extracted YouTube manifests. Audio
+# and video workers often request exactly the same track within seconds.
+_VIDEO_FORMAT_CACHE: dict[str, tuple[float, dict]] = {}
+_VIDEO_FORMAT_CACHE_LOCK = threading.RLock()
+_CHANNEL_NAME_CACHE: dict[str, tuple[float, str]] = {}
+_CHANNEL_NAME_CACHE_LOCK = threading.RLock()
+
+
+def _cache_extracted_formats(video_url: str, info: dict) -> None:
+    video_id = _extract_video_id_from_url(video_url)
+    formats = (info or {}).get("formats") or []
+    if not video_id or not formats:
+        return
+    # Never hold CDN links beyond their expiration or more than 3 minutes.
+    ttl = 180.0
+    for fmt in formats:
+        url = str((fmt or {}).get("url") or "")
+        expire = _parse_expire_ts(url)
+        if expire:
+            ttl = min(ttl, max(0.0, float(expire - time.time() - 120)))
+    if ttl < 10:
+        return
+    entry = {
+        "formats": [dict(x) for x in formats if isinstance(x, dict)],
+        "thumbnail": str((info or {}).get("thumbnail") or ""),
+    }
+    with _VIDEO_FORMAT_CACHE_LOCK:
+        _VIDEO_FORMAT_CACHE[video_id] = (time.monotonic() + ttl, entry)
+        while len(_VIDEO_FORMAT_CACHE) > 16:
+            _VIDEO_FORMAT_CACHE.pop(next(iter(_VIDEO_FORMAT_CACHE)))
+
+
+def _get_cached_formats(video_url: str) -> dict | None:
+    video_id = _extract_video_id_from_url(video_url)
+    if not video_id:
+        return None
+    with _VIDEO_FORMAT_CACHE_LOCK:
+        record = _VIDEO_FORMAT_CACHE.get(video_id)
+        if record and record[0] > time.monotonic():
+            return record[1]
+        _VIDEO_FORMAT_CACHE.pop(video_id, None)
+    return None
 
 
 # ========================== LOGGER ============================
@@ -453,60 +500,67 @@ def _pick_best_audio(
     *,
     prefer_compat: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """Select audio-only streams: prefer standard LC-AAC format 140.
+
+    Format 139 (HE-AAC, mp4a.40.5) can take much longer to prepare on some
+    Android codecs. Never choose format 18 merely because it contains audio:
+    that muxed stream is known to fail for some YouTube videos.
     """
-    Пріоритезуємо аудіо потоки:
-      1) OPUS/webm
-      2) webm
-      3) m4a
-      4) будь-який audio-only
-    """
-    if not formats:
+    valid = [
+        fmt for fmt in formats or []
+        if fmt.get("url")
+        and fmt.get("vcodec") in (None, "none")
+        and fmt.get("acodec") not in (None, "none")
+    ]
+    if not valid:
         return None
 
-    def is_audio(f: Dict[str, Any]) -> bool:
-        return f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none") and f.get("url")
+    def bitrate(fmt):
+        try:
+            return float(fmt.get("abr") or fmt.get("tbr") or 0)
+        except (ValueError, TypeError):
+            return 0.0
 
-    if prefer_compat:
-        # Режим сумісності для Android MediaPlayer: AAC/M4A спочатку.
-        for f in formats:
-            ac = str(f.get("acodec", "")).lower()
-            if is_audio(f) and (f.get("ext") in ("m4a", "mp4") or "mp4a" in ac or ac == "aac"):
-                return f
-        for f in formats:
-            if is_audio(f) and f.get("ext") in ("mp3", "aac"):
-                return f
-    else:
-        # Android MediaPlayer plays AAC/M4A most consistently.
-        for f in formats:
-            ac = str(f.get("acodec") or "").lower()
-            if is_audio(f) and (f.get("ext") in ("m4a", "mp4", "aac") or "mp4a" in ac):
-                return f
-        for f in formats:
-            if is_audio(f) and (str(f.get("acodec", "")).lower().startswith("opus") or f.get("ext") == "webm"):
-                return f
-
-    # 4) інший audio-only
-    for f in formats:
-        if is_audio(f):
-            return f
-
-    return None
+    aac = [
+        fmt for fmt in valid
+        if fmt.get("ext") in ("m4a", "mp4", "aac")
+        or "mp4a" in str(fmt.get("acodec") or "").lower()
+    ]
+    if aac:
+        return max(
+            aac,
+            key=lambda fmt: (
+                str(fmt.get("acodec") or "").lower().startswith("mp4a.40.2"),
+                str(fmt.get("format_id") or "") == "140",
+                bitrate(fmt),
+            ),
+        )
+    if not prefer_compat:
+        opus = [
+            fmt for fmt in valid
+            if str(fmt.get("acodec") or "").lower().startswith("opus")
+            or fmt.get("ext") == "webm"
+        ]
+        if opus:
+            return max(opus, key=bitrate)
+    return max(valid, key=bitrate)
 
 
 def _video_stream_candidates(
     formats: List[Dict[str, Any]],
     default_headers: Dict[str, str] | None = None,
     *,
-    limit: int = 4,
+    limit: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Return playable, bounded Android video fallbacks from yt-dlp formats.
+    """Native decodable streams, including *video-only* AVC for separate audio.
 
-    The Android YouTube client now often returns only format 18, which the
-    handset's MediaPlayer rejects. Web-embedded HLS has a separate, valid
-    manifest; try its 720/480/360p variants before the muxed MP4 fallback.
-    Never hand an untrusted scheme or unrelated host to native MediaPlayer.
+    Android's yt-dlp client frequently exposes only unusable format 18.
+    tv_embedded exposes independent video-only HLS (230/231/232) and MP4
+    (134/135/136). They are valid sources for a muted video decoder while
+    audio continues on its own MediaPlayer. Restrict to AVC/H.264 to avoid
+    device-specific AV1/VP9 decoder failures. Use only HTTPS googlevideo hosts.
     """
-    hls, muxed, seen = [], [], set()
+    hls_muxed, hls_silent, direct_silent, muxed, seen = [], [], [], [], set()
     for fmt in formats or []:
         if not isinstance(fmt, dict):
             continue
@@ -522,31 +576,24 @@ def _video_stream_candidates(
             continue
         if source in seen:
             continue
-
         video_codec = str(fmt.get("vcodec") or "none").lower()
         audio_codec = str(fmt.get("acodec") or "none").lower()
-        if video_codec == "none" or audio_codec == "none":
-            # A video-only DASH format will not decode as standalone MediaPlayer
-            # content; prefer HLS or muxed audio+video instead.
+        if not video_codec.startswith("avc1"):
             continue
-
+        has_audio = audio_codec != "none"
         proto = str(fmt.get("protocol") or "").lower()
         is_hls = proto in ("m3u8", "m3u8_native") or (
             host == "manifest.googlevideo.com"
             and "/hls_playlist/" in parsed.path
         )
-        is_muxed_mp4 = str(fmt.get("ext") or "").lower() == "mp4"
-        if not (is_hls or is_muxed_mp4):
+        if not is_hls and str(fmt.get("ext") or "").lower() != "mp4":
             continue
         try:
             height = int(fmt.get("height") or 0)
         except (ValueError, TypeError):
             height = 0
-        # 1080p high-bitrate streams are poor fit for native Android streaming;
-        # 720p HLS gives a good balance of quality and startup latency.
-        if height > 720:
+        if height > 720 or height <= 0:
             continue
-
         seen.add(source)
         entry = {
             "video_url": source,
@@ -556,18 +603,27 @@ def _video_stream_candidates(
             "format_id": str(fmt.get("format_id") or ""),
             "height": height,
             "protocol": "hls" if is_hls else "mp4",
+            "video_only": not has_audio,
         }
-        if is_hls:
-            hls.append(entry)
-        else:
+        if is_hls and has_audio:
+            hls_muxed.append(entry)
+        elif is_hls:
+            hls_silent.append(entry)
+        elif has_audio:
             muxed.append(entry)
+        else:
+            direct_silent.append(entry)
 
-    hls.sort(key=lambda x: (-x["height"], x["format_id"]))
-    muxed.sort(key=lambda x: (-x["height"], x["format_id"]))
-    # Only a few alternative attempts; no infinite retries and no expensive
-    # extractor loop after a failing format.
-    ordered = hls[:3] + muxed[:2]
+    # 480p makes first-frame startup lighter; then 360p/720p fallbacks.
+    quality = lambda x: (abs(x["height"] - 480), -x["height"])
+    for group in (hls_muxed, hls_silent, direct_silent, muxed):
+        group.sort(key=quality)
+    ordered = (
+        hls_muxed[:2] + hls_silent[:2] +
+        direct_silent[:2] + muxed[:1]
+    )
     return ordered[:max(1, min(int(limit), 6))]
+
 
 
 def _pick_best_video(formats: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -648,7 +704,9 @@ def _extract_info_with_clients(
         )
         if rank > best_rank:
             best_info, best_rank = info, rank
-        if rank == 3:
+        if rank == 3 or (client == "android" and rank >= 2):
+            # Normal Android audio-only tracks stay on the fast path. Only
+            # muxed-only/SABR clients fall through to tv_embedded.
             break
 
     if best_info is not None:
@@ -689,7 +747,7 @@ def _audio_client_order(prefer_compat: bool = False) -> Tuple[str, ...]:
     # extractor settings cannot repair a failed/empty result.
     clients = (
         ("web_embedded", "tv_embedded", "android", "ios")
-        if prefer_compat else ("android",)
+        if prefer_compat else ("android", "tv_embedded")
     )
     if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
         clients += ("web",)
@@ -751,6 +809,7 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         print(f"[AUDIO] extract failed: {repr(err)}")
         raise RuntimeError("YouTube не повернув метадані (онови yt-dlp в APK).")
 
+    _cache_extracted_formats(video_url, info)
     fmts = info.get("formats") or []
     chosen: Optional[Dict[str, Any]] = _pick_best_audio(fmts, prefer_compat=prefer_compat)
     if chosen and chosen.get("url"):
@@ -797,35 +856,11 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
     channel_id = info.get("channel_id") or info.get("uploader_id") or ""
     if not channel_url and channel_id:
         channel_url = f"https://www.youtube.com/channel/{channel_id}"
-    if (not channel) or (not channel_thumb):
-        page_channel, page_thumb = _extract_channel_meta_from_watch_page(
-            str(video_url or ""),
-            _ANDROID_WEB_UA,
-        )
-        if (not channel) and page_channel:
-            channel = page_channel
-        if (not channel_thumb) and page_thumb:
-            channel_thumb = _normalize_img_url(page_thumb)
-    # Do not block the audio-critical extraction path on oEmbed. A separate
-    # metadata worker requests the channel name when yt-dlp omits it.
-    if not channel_thumb:
-        channel_thumb = _extract_channel_thumb_from_watch_page(
-            str(video_url or ""),
-            _ANDROID_WEB_UA,
-        )
-    if not channel_thumb:
-        channel_thumb = _extract_channel_thumb_from_channel_page(
-            str(channel_url or ""),
-            _ANDROID_WEB_UA,
-        )
-    channel_thumb = _normalize_img_url(channel_thumb or "")
+    # Never block stream startup on watch-page/avatar/recommendation
+    # requests. Dedicated metadata and related-video workers fetch those
+    # after playback starts; the audio URL can now be passed to MediaPlayer
+    # immediately after yt-dlp completes.
     related_videos = info.get("related_videos") or []
-    if not related_videos:
-        related_videos = _extract_related_from_watch_page(
-            str(video_url or ""),
-            _ANDROID_WEB_UA,
-            limit=12,
-        )
     expire_ts = _parse_expire_ts(url)
     try:
         print(
@@ -855,12 +890,12 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
 
 # ============================ VIDEO API ================================
 def extract_video_info(video_url: str) -> Dict[str, Any]:
-    """Resolve HLS-first native video sources without blocking audio startup.
+    """Fetch muted native video candidates, using the audio worker's URL cache.
 
-    The normal Android client frequently returns only format 18 (muxed MP4).
-    That stream returns MediaPlayer what=1/extra=-2147483648 on Android 13
-    even though the corresponding Web Embedded HLS manifests are accessible.
-    Extract the complete format list, not the preselected info['url'].
+    The audio worker often already queried tv_embedded to obtain AAC 140.
+    Reuse that same short-lived format list rather than re-requesting three
+    YouTube clients. If it is absent, try web HLS, TV video-only AVC, then
+    Android progressive MP4, in that order.
     """
     headers = {
         "User-Agent": _ANDROID_WEB_UA,
@@ -872,17 +907,37 @@ def extract_video_info(video_url: str) -> Dict[str, Any]:
         "skip_download": True,
         "noplaylist": True,
         "logger": YDLLogger(),
-        "format": None,  # NEVER filter HLS out before selecting native formats
+        "format": None,
         "http_headers": headers,
         "extractor_retries": 1,
-        "socket_timeout": 9,
+        "socket_timeout": 7,
         "ignoreerrors": "only_download",
-        # Keep certificate validation enabled for authenticated CDN streams.
     }
     thumbnail = ""
-    all_streams: List[Dict[str, Any]] = []
-    last_error = None
-    for client in ("web_embedded", "android"):
+    selected = []
+    cached = _get_cached_formats(video_url)
+    if cached:
+        selected = _video_stream_candidates(
+            cached.get("formats") or [], headers, limit=5
+        )
+        thumbnail = str(cached.get("thumbnail") or "")
+        # An Android-only cache may contain just broken format 18. Let the
+        # web/TV clients provide better candidates before using that stream.
+        if selected and any(
+            x["protocol"] == "hls" or x["video_only"] for x in selected
+        ):
+            print(f"[VIDEO] reused {len(selected)} cached video candidates")
+            first = selected[0]
+            return {
+                "video_url": first["video_url"],
+                "http_headers": first["http_headers"],
+                "thumb": thumbnail,
+                "format_id": first["format_id"],
+                "streams": selected,
+            }
+
+    fallback = selected
+    for client in ("web_embedded", "tv_embedded", "android"):
         opts = dict(base_options)
         opts["extractor_args"] = {"youtube": {"player_client": [client]}}
         try:
@@ -892,33 +947,40 @@ def extract_video_info(video_url: str) -> Dict[str, Any]:
                 continue
             thumbnail = thumbnail or str(info.get("thumbnail") or "")
             streams = _video_stream_candidates(
-                info.get("formats") or [], opts["http_headers"], limit=4
+                info.get("formats") or [], headers, limit=5
             )
             if streams:
-                all_streams = streams
-                print(
-                    f"[VIDEO] selected client={client} formats="
-                    f"{[(x['format_id'], x['protocol'], x['height']) for x in streams]}"
-                )
-                break
+                _cache_extracted_formats(video_url, info)
+                if any(
+                    x["protocol"] == "hls" or x["video_only"] for x in streams
+                ):
+                    selected = streams
+                    print(
+                        f"[VIDEO] selected client={client} formats="
+                        f"{[(x['format_id'], x['protocol'], x['height']) for x in selected]}"
+                    )
+                    break
+                if not fallback:
+                    fallback = streams
         except Exception as exc:
-            last_error = exc
-            print(f"[VIDEO] video extraction client={client} failed: {type(exc).__name__}")
-    if not all_streams:
-        print(f"[VIDEO] no Android-compatible video streams ({type(last_error).__name__ if last_error else 'empty'})")
+            print(f"[VIDEO] {client} extraction unavailable: {type(exc).__name__}")
+    if not selected:
+        selected = fallback
+    if not selected:
+        print("[VIDEO] no compatible HLS or AVC video streams")
         return {
             "video_url": None,
             "http_headers": {},
             "thumb": thumbnail,
             "streams": [],
         }
-    first = all_streams[0]
+    first = selected[0]
     return {
         "video_url": first["video_url"],
         "http_headers": first["http_headers"],
         "thumb": thumbnail,
         "format_id": first["format_id"],
-        "streams": all_streams,
+        "streams": selected,
     }
 
 
