@@ -417,14 +417,20 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
 
 
 def _channel_name_from_oembed(video_url: str) -> str:
-    """Fallback for YouTube A/B responses that omit author/channel metadata.
+    """Resolve the real author from official YouTube oEmbed, never the title.
 
-    Request only the official YouTube oEmbed API with a validated video ID.
-    The endpoint returns author_name without JavaScript or a PO token.
+    Android yt-dlp responses for SABR-only videos often lack channel.
+    Keep a small positive-result cache, require a real YouTube video ID and
+    verify TLS against certifi's CA bundle (works in python-for-android too).
     """
     video_id = _extract_video_id_from_url(video_url)
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
         return ""
+    with _CHANNEL_NAME_CACHE_LOCK:
+        cached = _CHANNEL_NAME_CACHE.get(video_id)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
     endpoint = (
         "https://www.youtube.com/oembed?"
         + urlparse.urlencode({
@@ -436,16 +442,25 @@ def _channel_name_from_oembed(video_url: str) -> str:
         req = urllib.request.Request(
             endpoint,
             headers={
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": _ANDROID_WEB_UA,
                 "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=12) as response:
+        tls = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(req, timeout=7, context=tls) as response:
             data = json.loads(response.read(8192).decode("utf-8"))
-        name = str(data.get("author_name") or "").strip()
-        return name[:200]
-    except (OSError, ValueError, TypeError):
+        name = str(data.get("author_name") or "").strip()[:200]
+        if name:
+            with _CHANNEL_NAME_CACHE_LOCK:
+                _CHANNEL_NAME_CACHE[video_id] = (time.monotonic() + 3600, name)
+                while len(_CHANNEL_NAME_CACHE) > 64:
+                    _CHANNEL_NAME_CACHE.pop(next(iter(_CHANNEL_NAME_CACHE)))
+            print(f"[META] official YouTube author resolved id={video_id}")
+        return name
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"[META] official YouTube author lookup failed: {type(exc).__name__}")
         return ""
+
 
 
 def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
