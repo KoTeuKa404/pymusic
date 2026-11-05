@@ -274,10 +274,94 @@ def _install_now() -> bool:
         def ensure_switch_state(self):
             if not hasattr(self, "_pymusic_deferred_meta_v9"):
                 self._pymusic_deferred_meta_v9 = set()
+            if not hasattr(self, "_pymusic_early_author_inflight"):
+                self._pymusic_early_author_inflight = set()
             if not hasattr(self, "_pymusic_switch_serial_v9"):
                 self._pymusic_switch_serial_v9 = 0
             if not hasattr(self, "_pymusic_last_play_request_v9"):
                 self._pymusic_last_play_request_v9 = ("", 0.0)
+
+        def start_author_lookup(self, video_url: str, gen: int) -> None:
+            """Fill the real YouTube channel without waiting for AAC prepare.
+
+            yt-dlp Android/TV SABR often provides a title but an empty channel.
+            The old deferred worker only ran AFTER MediaPlayer started (~40 s),
+            and sometimes never populated the label. Official oEmbed is small;
+            keep it separate from the audio and full metadata extractors.
+            """
+            key = (video_url, gen)
+            if key in self._pymusic_early_author_inflight:
+                return
+            if audio_screen._verified_channel_name(
+                getattr(self, "_channel", ""), getattr(self, "_title", "")
+            ):
+                return
+            self._pymusic_early_author_inflight.add(key)
+
+            def current():
+                return (
+                    int(getattr(self, "_load_gen", -1)) == gen
+                    and _same_video(
+                        str(getattr(self, "_last_video_url", "") or ""),
+                        video_url,
+                    )
+                )
+
+            def apply(name="", thumb=""):
+                if not current():
+                    return
+                real_name = audio_screen._verified_channel_name(
+                    name, getattr(self, "_title", "")
+                )
+                details = {}
+                if real_name and not audio_screen._verified_channel_name(
+                    getattr(self, "_channel", ""), getattr(self, "_title", "")
+                ):
+                    details["channel"] = real_name
+                if thumb and not getattr(self, "_channel_thumb", ""):
+                    details["channel_thumb"] = thumb
+                if details:
+                    self._apply_info_metadata(details)
+                    print(
+                        f"[META] independent author applied "
+                        f"channel={details.get('channel', '')!r}"
+                    )
+
+            def lookup():
+                try:
+                    name = audio_screen.ydlh._channel_name_from_oembed(video_url)
+                    if name and current():
+                        audio_screen.Clock.schedule_once(
+                            lambda _dt, n=name: apply(name=n), 0
+                        )
+                    # Channel avatar and a fallback author remain optional,
+                    # and never delay text metadata or audible playback.
+                    if not current():
+                        return
+                    page_name, avatar = (
+                        audio_screen.ydlh._extract_channel_meta_from_watch_page(
+                            video_url, audio_screen.ydlh._ANDROID_WEB_UA
+                        )
+                    )
+                    if current() and (avatar or (not name and page_name)):
+                        audio_screen.Clock.schedule_once(
+                            lambda _dt, n=(name or page_name), a=avatar:
+                                apply(name=n, thumb=a),
+                            0,
+                        )
+                except Exception as exc:
+                    print(
+                        f"[META] independent author worker failed: "
+                        f"{type(exc).__name__}"
+                    )
+                finally:
+                    self._pymusic_early_author_inflight.discard(key)
+
+            threading.Thread(
+                target=lookup,
+                name="pymusic-early-author",
+                daemon=True,
+            ).start()
 
         def metadata_after_audio(self, video_url: str):
             ensure_switch_state(self)
@@ -294,6 +378,7 @@ def _install_now() -> bool:
                 pass
 
             gen = int(getattr(self, "_load_gen", 0) or 0)
+            start_author_lookup(self, url, gen)
             key = (url, gen)
             if key in self._pymusic_deferred_meta_v9:
                 return
