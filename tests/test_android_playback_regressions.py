@@ -665,5 +665,96 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn('self._on_error_cb = on_error', player)
 
 
+    def test_runtime_video_wrapper_keeps_hls_extractor_and_callback_contract(self):
+        """End-to-end bootstrap regression for the Redmi on_ready crash.
+
+        Runtime patch installation must not silently revert the HLS extractor
+        to muxed format 18, nor replace the current callback-aware native
+        video method with an incompatible two-argument method.
+        """
+        import sys
+        from unittest.mock import patch
+        from android_src import core_player_runtime as runtime
+
+        events = []
+        original_video_extractor = object()
+
+        class FakeScreen:
+            def _set_video_mode_core(self, video_on):
+                events.append(("video_mode", video_on))
+
+            def _play_video_if_screen_active(
+                self, url, headers, *, on_ready=None, on_error=None
+            ):
+                events.append(("play", url, dict(headers)))
+                if on_ready is not None:
+                    on_ready()
+
+        class FakeVideo:
+            pass
+
+        fake_audio = SimpleNamespace(
+            AudioPlayerScreen=FakeScreen,
+            Clock=SimpleNamespace(
+                schedule_once=lambda cb, delay=0: cb(0)
+            ),
+            ma=SimpleNamespace(),
+        )
+        fake_video = SimpleNamespace(
+            AndroidVideoPlayer=FakeVideo,
+            run_on_ui_thread=lambda f: f,
+        )
+        fake_ydl = SimpleNamespace(
+            safe_extract_video_info=original_video_extractor
+        )
+        original_installed = runtime._INSTALLED
+        original_muxed_urls = set(runtime._MUXED_URLS)
+        try:
+            runtime._INSTALLED = False
+            runtime._MUXED_URLS.clear()
+            with patch.dict(sys.modules, {
+                "audio_screen": fake_audio,
+                "video_player": fake_video,
+                "ytdlp_helpers": fake_ydl,
+            }):
+                self.assertTrue(runtime.install_core_player_fix())
+                self.assertIs(
+                    fake_ydl.safe_extract_video_info, original_video_extractor,
+                    "HLS extractor must not be replaced by format-18-only muxed picker",
+                )
+                screen = FakeScreen()
+                stream = (
+                    "https://manifest.googlevideo.com/api/manifest/hls_playlist/95"
+                )
+                screen._play_video_if_screen_active(
+                    stream, {"User-Agent": "TestUA"},
+                    on_ready=lambda: events.append(("ready",)),
+                    on_error=lambda reason: events.append(("error", reason)),
+                )
+                self.assertEqual(events, [
+                    ("play", stream, {"User-Agent": "TestUA"}),
+                    ("ready",),
+                ])
+                # The pre-HLS call signature still works for legacy clients.
+                screen._play_video_if_screen_active(
+                    stream, {}, on_ready=None, on_error=None
+                )
+                self.assertEqual(events[-1], ("play", stream, {}))
+        finally:
+            runtime._INSTALLED = original_installed
+            runtime._MUXED_URLS.clear()
+            runtime._MUXED_URLS.update(original_muxed_urls)
+
+    def test_video_candidate_startup_exceptions_are_caught(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        target = source.index('def start_candidate(index: int):')
+        handler = source.index('except Exception as exc:', target)
+        self.assertLess(target, handler)
+        self.assertIn(
+            'failed(f"startup {type(exc).__name__}")',
+            source[handler:handler + 350],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
