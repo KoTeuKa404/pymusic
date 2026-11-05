@@ -367,9 +367,14 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
     """
     Повертає (channel_name, channel_thumb) з watch-page.
     """
+    # Never request arbitrary URLs for metadata; only a verified YouTube ID.
+    vid = _extract_video_id_from_url(video_url)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or ""):
+        return "", ""
+    canonical_url = "https://www.youtube.com/watch?v=" + vid
     try:
         req = urllib.request.Request(
-            video_url,
+            canonical_url,
             headers={
                 "User-Agent": ua or _ANDROID_WEB_UA,
                 "Accept-Language": "en-US,en;q=0.9",
@@ -377,8 +382,8 @@ def _extract_channel_meta_from_watch_page(video_url: str, ua: str) -> Tuple[str,
                 "Connection": "keep-alive",
             },
         )
-        ctx = ssl._create_unverified_context()
-        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(req, timeout=7, context=ctx) as resp:
             raw = resp.read(450_000)
         text = raw.decode("utf-8", errors="ignore")
 
