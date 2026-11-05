@@ -223,7 +223,7 @@ class PlaybackRegressionTests(unittest.TestCase):
             "ytdlp_helpers.py", "_audio_client_order",
             {"Tuple": Tuple, "_env_bool": lambda *_args: False},
         )
-        self.assertEqual(chooser(False), ("android",))
+        self.assertEqual(chooser(False), ("android", "tv_embedded"))
         self.assertEqual(
             chooser(True), ("web_embedded", "tv_embedded", "android", "ios")
         )
@@ -251,11 +251,15 @@ class PlaybackRegressionTests(unittest.TestCase):
 
         network = SimpleNamespace(request=SimpleNamespace(
             Request=fake_request,
-            urlopen=lambda _request, timeout=12: FakeResponse(),
+            urlopen=lambda _request, timeout=7, context=None: FakeResponse(),
         ))
         namespace = {
             "re": re, "json": json, "urllib": network,
-            "urlparse": urllib.parse,
+            "urlparse": urllib.parse, "time": __import__("time"),
+            "_CHANNEL_NAME_CACHE": {},
+            "_CHANNEL_NAME_CACHE_LOCK": threading.RLock(),
+            "ssl": SimpleNamespace(create_default_context=lambda cafile: object()),
+            "certifi": SimpleNamespace(where=lambda: "/trusted/cert.pem"),
             "_ANDROID_WEB_UA": "Mozilla/5.0",
             "_extract_video_id_from_url": lambda url: (
                 "LTsbyX-l06Y" if url.endswith("watch?v=LTsbyX-l06Y") else ""
@@ -554,6 +558,7 @@ class PlaybackRegressionTests(unittest.TestCase):
             "_extract_info_with_clients": lambda *_a: (
                 {"formats": [muxed], "format_id": "18"}, None),
             "_pick_best_audio": lambda *_a, **_k: None,
+            "_cache_extracted_formats": lambda *_args: None,
             "_best_effort_headers": lambda src, defaults: defaults,
         }
         extract = isolated_definition("ytdlp_helpers.py", "extract_audio_info", ns)
@@ -596,11 +601,11 @@ class PlaybackRegressionTests(unittest.TestCase):
         selected = chooser([muxed, dash, malicious, *hls], {}, limit=4)
         self.assertEqual(
             [item["format_id"] for item in selected],
-            ["95", "94", "93", "18"]
+            ["94", "93", "18"]
         )
         self.assertEqual(
             [item["protocol"] for item in selected],
-            ["hls", "hls", "hls", "mp4"]
+            ["hls", "hls", "mp4"]
         )
 
     def test_video_extractor_uses_web_embedded_hls_not_android_only_mp4(self):
@@ -634,11 +639,13 @@ class PlaybackRegressionTests(unittest.TestCase):
             "YoutubeDL": FakeYoutubeDL,
             "YDLLogger": lambda: None,
             "_ANDROID_WEB_UA": "android web",
-            "_video_stream_candidates": lambda formats, headers, limit=4: [{
+            "_video_stream_candidates": lambda formats, headers, limit=5: [{
                 "video_url": formats[0]["url"], "http_headers": headers,
                 "format_id": formats[0]["format_id"], "protocol": "hls",
-                "height": 720,
+                "height": 720, "video_only": False,
             }],
+            "_get_cached_formats": lambda video_url: None,
+            "_cache_extracted_formats": lambda *args: None,
         }
         extract = isolated_definition(
             "ytdlp_helpers.py", "extract_video_info", namespace
@@ -758,6 +765,100 @@ class PlaybackRegressionTests(unittest.TestCase):
             'failed(f"startup {type(exc).__name__}")',
             source[handler:handler + 350],
         )
+
+
+    def test_tv_client_video_only_avc_can_drive_muted_android_video(self):
+        from typing import Any, Dict, List
+        from urllib import parse
+        base = "https://rr3---sn-abc.googlevideo.com/videoplayback"
+        hls = "https://manifest.googlevideo.com/api/manifest/hls_playlist/"
+        ns = {
+            "Any": Any, "Dict": Dict, "List": List, "urlparse": parse,
+            "_best_effort_headers": lambda src, default: dict(src or default),
+        }
+        chooser = isolated_definition(
+            "ytdlp_helpers.py", "_video_stream_candidates", ns
+        )
+        fmts = [
+            {"format_id": "18", "url": base + "?itag=18",
+             "height": 360, "vcodec": "avc1.42001e", "acodec": "mp4a.40.2",
+             "protocol": "https", "ext": "mp4"},
+            {"format_id": "231", "url": hls + "231",
+             "height": 480, "vcodec": "avc1.4d401f", "acodec": "none",
+             "protocol": "m3u8_native", "ext": "mp4"},
+            {"format_id": "230", "url": hls + "230",
+             "height": 360, "vcodec": "avc1.4d401e", "acodec": "none",
+             "protocol": "m3u8_native", "ext": "mp4"},
+            {"format_id": "135", "url": base + "?itag=135",
+             "height": 480, "vcodec": "avc1.4d401f", "acodec": "none",
+             "protocol": "https", "ext": "mp4"},
+            {"format_id": "247", "url": base + "?itag=247",
+             "height": 720, "vcodec": "vp9", "acodec": "none",
+             "protocol": "https", "ext": "webm"},
+        ]
+        result = chooser(fmts, {"User-Agent": "TestUA"})
+        self.assertEqual(
+            [item["format_id"] for item in result],
+            ["231", "230", "135", "18"],
+        )
+        self.assertTrue(result[0]["video_only"])
+        self.assertFalse(result[-1]["video_only"])
+        self.assertNotIn("247", [x["format_id"] for x in result])
+
+    def test_audio_picker_chooses_standard_aac_140_not_he_aac_139(self):
+        from typing import Any, Dict, List, Optional
+        chooser = isolated_definition(
+            "ytdlp_helpers.py", "_pick_best_audio",
+            {"Any": Any, "Dict": Dict, "List": List, "Optional": Optional},
+        )
+        candidates = [
+            {"format_id": "139", "url": "https://cdn.example/139",
+             "height": 0, "ext": "m4a", "vcodec": "none",
+             "acodec": "mp4a.40.5", "abr": 48},
+            {"format_id": "140", "url": "https://cdn.example/140",
+             "height": 0, "ext": "m4a", "vcodec": "none",
+             "acodec": "mp4a.40.2", "abr": 129},
+        ]
+        self.assertEqual(chooser(candidates)["format_id"], "140")
+        self.assertEqual(
+            chooser(candidates, prefer_compat=True)["format_id"], "140"
+        )
+
+    def test_video_uses_cached_tv_embedded_formats_with_no_network_wait(self):
+        from typing import Any, Dict, List
+        requests = []
+        selected = [{
+            "video_url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/231",
+            "http_headers": {},
+            "format_id": "231", "protocol": "hls",
+            "height": 480, "video_only": True,
+        }]
+        ns = {
+            "Any": Any, "Dict": Dict, "List": List,
+            "_ANDROID_WEB_UA": "Mozilla/5.0",
+            "_get_cached_formats": lambda _url: {"formats": [{"format_id":"231"}]},
+            "_video_stream_candidates": lambda *_a, **_k: selected,
+            "YDLLogger": lambda: None,
+        }
+        extract = isolated_definition("ytdlp_helpers.py", "extract_video_info", ns)
+        info = extract("https://www.youtube.com/watch?v=LTsbyX-l06Y")
+        self.assertEqual(info["format_id"], "231")
+        self.assertEqual(info["streams"], selected)
+
+    def test_channel_author_lookups_started_before_audio_is_prepared(self):
+        source = (ROOT / "fast_track_switch_v9.py").read_text(encoding="utf-8")
+        self.assertIn("start_author_lookup(self, url, gen)", source)
+        self.assertIn("_channel_name_from_oembed(video_url)", source)
+        self.assertIn("self._apply_info_metadata(details)", source)
+        self.assertIn("pymusic-early-author", source)
+
+    def test_audio_critical_path_skips_blocking_watch_page_requests(self):
+        source = (ROOT / "ytdlp_helpers.py").read_text(encoding="utf-8")
+        body = source.split("def extract_audio_info(", 1)[1].split(
+            "# ============================ VIDEO API", 1
+        )[0]
+        self.assertNotIn("_extract_channel_meta_from_watch_page(", body)
+        self.assertNotIn("_extract_related_from_watch_page(", body)
 
 
 if __name__ == "__main__":
