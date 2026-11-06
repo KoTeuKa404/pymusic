@@ -1042,7 +1042,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         # after each 0-height child previously created a ~50dp blank band.
         self.assertIn("spacing: 0\n                padding: 0, 0, 0, dp(6)", content)
         self.assertIn("spacing: 0\n                    padding: 0, 0, 0, dp(2)", content)
-        self.assertIn("id: now_playing_status", content)
+        self.assertNotIn("id: now_playing_status", content)
         self.assertIn("id: channel_actions_row", content)
         self.assertIn("padding: dp(2), dp(8), dp(2), dp(4)", content)
         self.assertNotIn(
@@ -1059,7 +1059,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         )
         self.assertIn("details.padding = (dp(16), dp(8), dp(16), dp(1))", screen)
         self.assertIn("visible_title_h = min(title_h, dp(58))", screen)
-        self.assertIn("self._update_now_playing_badge(playing=playing)", screen)
+        self.assertNotIn("_update_now_playing_badge", screen)
 
     def test_youtube_upload_date_propagates_to_header_without_guesswork(self):
         source = (ROOT / "ytdlp_helpers.py").read_text(encoding="utf-8")
@@ -1070,32 +1070,145 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn('_format_published_age(self._published_date)', screen)
         self.assertIn('" • ".join(', screen)
 
-    def test_now_playing_badge_tracks_current_url_and_pause(self):
-        class Widget:
-            height = 0
-            opacity = 0
-            text = ""
-        from types import SimpleNamespace
-        badge = Widget()
-        show = isolated_definition(
-            "audio_screen.py", "_update_now_playing_badge",
-            {"dp": float},
+    def test_channel_avatar_and_name_have_real_click_handlers(self):
+        kv = (ROOT / "youtube_gui.kv").read_text(encoding="utf-8")
+        self.assertIn("<CircularAvatar@ButtonBehavior+AsyncImage>:", kv)
+        self.assertIn("<ChannelNameButton@ButtonBehavior+Label>:", kv)
+        self.assertIn("CircularAvatar:\n                                id: channel_avatar", kv)
+        self.assertIn("ChannelNameButton:\n                                id: audio_channel", kv)
+        self.assertEqual(kv.count("on_release: root.open_current_channel()"), 2)
+        self.assertNotIn("id: now_playing_status", kv)
+
+    def test_channel_link_resolves_verified_author_not_guessed_search(self):
+        import re
+        import time
+
+        video = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        expected = "https://www.youtube.com/@Grimwind"
+        requests = []
+        ns = {
+            "re": re,
+            "time": time,
+            "_extract_video_id_from_url": lambda url: (
+                "LTsbyX-l06Y" if url == video else ""
+            ),
+            "_CHANNEL_NAME_CACHE_LOCK": threading.RLock(),
+            "_CHANNEL_AUTHOR_URL_CACHE": {
+                "LTsbyX-l06Y": (time.monotonic() + 300, expected)
+            },
+            "_validated_youtube_channel_url": lambda raw: (
+                expected if raw == expected else ""
+            ),
+            "_channel_name_from_oembed": lambda url: requests.append(url),
+        }
+        resolve = isolated_definition(
+            "ytdlp_helpers.py", "_channel_url_from_oembed", ns
+        )
+        self.assertEqual(resolve(video), expected)
+        self.assertEqual(requests, [])
+        ns["_CHANNEL_AUTHOR_URL_CACHE"].clear()
+        self.assertEqual(resolve(video), "")
+        self.assertEqual(requests, [video])
+        self.assertEqual(resolve("http://malicious.invalid/v"), "")
+
+    def test_channel_link_opens_existing_youtube_web_tab_safely(self):
+        calls = []
+        jobs = []
+        channel_url = "https://www.youtube.com/@Grimwind"
+
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+            def start(self):
+                jobs.append(self.target)
+
+        root = SimpleNamespace(
+            set_screen=lambda tab: calls.append(("tab", tab))
+        )
+        ns = {
+            "threading": SimpleNamespace(Thread=FakeThread),
+            "Clock": SimpleNamespace(
+                schedule_once=lambda callback, delay: callback(0)
+            ),
+            "ydlh": SimpleNamespace(
+                _channel_url_from_oembed=lambda video: channel_url,
+                _validated_youtube_channel_url=lambda value: (
+                    value if value == channel_url else ""
+                ),
+            ),
+            "App": SimpleNamespace(
+                get_running_app=lambda: SimpleNamespace(root=root)
+            ),
+            "ma": SimpleNamespace(
+                webview_show=lambda url: calls.append(("web", url)),
+                log=lambda msg: calls.append(("log", msg)),
+            ),
+        }
+        handler = isolated_definition(
+            "audio_screen.py", "open_current_channel", ns
         )
         player = SimpleNamespace(
-            ids={"now_playing_status": badge},
             _last_video_url="https://www.youtube.com/watch?v=LTsbyX-l06Y",
-            _user_paused=False,
+            _load_gen=7,
+            _is_screen_active=lambda: True,
         )
-        show(player, playing=True)
-        self.assertEqual(badge.height, 18)
-        self.assertEqual(badge.opacity, 1)
-        self.assertIn("ВІДТВОРЮЄТЬСЯ", badge.text)
-        show(player, playing=False)
-        self.assertIn("НА ПАУЗІ", badge.text)
-        player._last_video_url = ""
-        show(player, playing=False)
-        self.assertEqual(badge.height, 0)
-        self.assertEqual(badge.text, "")
+        handler(player)
+        handler(player)   # double tapping shouldn't spawn duplicate navigation
+        self.assertEqual(len(jobs), 1)
+        jobs.pop()()
+        self.assertEqual(calls[:2], [
+            ("tab", "web"), ("web", channel_url)
+        ])
+
+        calls.clear()
+        handler(player)
+        self.assertEqual(len(jobs), 1)
+        player._load_gen += 1  # switched tracks before DNS/oEmbed completed
+        jobs.pop()()
+        self.assertEqual(calls, [])
+
+    def test_channel_link_rejects_non_youtube_destination(self):
+        calls = []
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+            def start(self):
+                self.target()
+        handler = isolated_definition(
+            "audio_screen.py", "open_current_channel",
+            {
+                "threading": SimpleNamespace(Thread=FakeThread),
+                "Clock": SimpleNamespace(schedule_once=lambda fn, dt: fn(0)),
+                "ydlh": SimpleNamespace(
+                    _channel_url_from_oembed=lambda url:
+                        "https://www.youtube.com.evil.example/@Grimwind",
+                    _validated_youtube_channel_url=lambda url: "",
+                ),
+                "App": SimpleNamespace(get_running_app=lambda: None),
+                "ma": SimpleNamespace(log=lambda msg: calls.append(msg)),
+            },
+        )
+        player = SimpleNamespace(
+            _last_video_url="https://www.youtube.com/watch?v=LTsbyX-l06Y",
+            _load_gen=1,
+            _is_screen_active=lambda: True,
+        )
+        handler(player)
+        self.assertTrue(any("unavailable" in msg for msg in calls))
+
+    def test_custom_autoplay_png_reflects_on_off_and_no_missing_icons(self):
+        kv = (ROOT / "youtube_gui.kv").read_text(encoding="utf-8")
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "PNGIconButton:\n                            id: autoplay_btn", kv
+        )
+        self.assertIn("source: 'ico/icoauto_on.png'", kv)
+        self.assertNotIn("icon: 'autorenew'", kv)
+        self.assertIn('autoplay_button.source = (', source)
+        self.assertIn('"ico/icoauto_on.png" if enabled else "ico/icoauto_off.png"', source)
+        self.assertIn('for button_id in ("autoskip_btn", "autoplay_btn"):', source)
+        for icon in ("icoauto_on.png", "icoauto_off.png"):
+            self.assertTrue((ROOT / "ico" / icon).is_file(), icon)
 
 
 if __name__ == "__main__":

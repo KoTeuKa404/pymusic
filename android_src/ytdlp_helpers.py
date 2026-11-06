@@ -53,6 +53,21 @@ def _cache_extracted_formats(video_url: str, info: dict) -> None:
         "formats": [dict(x) for x in formats if isinstance(x, dict)],
         "thumbnail": str((info or {}).get("thumbnail") or ""),
     }
+    # Capture the canonical channel link if yt-dlp already knows it, so a
+    # tap on the current creator never needs an extra network request.
+    author_url = _validated_youtube_channel_url(
+        str((info or {}).get("channel_url")
+            or (info or {}).get("uploader_url") or "")
+    )
+    if author_url:
+        with _CHANNEL_NAME_CACHE_LOCK:
+            _CHANNEL_AUTHOR_URL_CACHE[video_id] = (
+                time.monotonic() + 3600, author_url
+            )
+            while len(_CHANNEL_AUTHOR_URL_CACHE) > 64:
+                _CHANNEL_AUTHOR_URL_CACHE.pop(
+                    next(iter(_CHANNEL_AUTHOR_URL_CACHE))
+                )
     with _VIDEO_FORMAT_CACHE_LOCK:
         _VIDEO_FORMAT_CACHE[video_id] = (time.monotonic() + ttl, entry)
         while len(_VIDEO_FORMAT_CACHE) > 16:
@@ -516,6 +531,30 @@ def _channel_name_from_oembed(video_url: str) -> str:
         print(f"[META] official YouTube author lookup failed: {type(exc).__name__}")
         return ""
 
+
+
+def _channel_url_from_oembed(video_url: str) -> str:
+    """Return the verified owner link for this exact YouTube video.
+
+    yt-dlp and the early author worker populate the URL cache. If neither
+    supplied a link, make one bounded oEmbed lookup. Never build a channel
+    address from a display name (different creators can share that name).
+    Call from a worker thread, not the Kivy UI thread.
+    """
+    video_id = _extract_video_id_from_url(video_url)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id or ""):
+        return ""
+    with _CHANNEL_NAME_CACHE_LOCK:
+        cached = _CHANNEL_AUTHOR_URL_CACHE.get(video_id)
+        if cached and cached[0] > time.monotonic():
+            return _validated_youtube_channel_url(cached[1])
+
+    _channel_name_from_oembed(video_url)
+    with _CHANNEL_NAME_CACHE_LOCK:
+        cached = _CHANNEL_AUTHOR_URL_CACHE.get(video_id)
+        if cached and cached[0] > time.monotonic():
+            return _validated_youtube_channel_url(cached[1])
+    return ""
 
 
 def _extract_channel_thumb_from_channel_page(channel_url: str, ua: str) -> str:
