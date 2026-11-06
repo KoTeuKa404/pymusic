@@ -1141,6 +1141,7 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
         old_listeners = None
 
         player = None
+        native_started = time.monotonic()
         try:
             player = MediaPlayer()
             android_player = player
@@ -1161,6 +1162,10 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
                 if not is_current():
                     return
                 _mp_prepared = True
+                log(
+                    f"[LATENCY] native MediaPlayer prepared in "
+                    f"{time.monotonic() - native_started:.2f}s"
+                )
                 if on_prepared:
                     on_prepared(player)
 
@@ -1169,8 +1174,14 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
                     on_completed()
 
             def error_callback(what, extra):
-                if is_current() and on_error:
-                    on_error(what, extra)
+                if is_current():
+                    log(
+                        f"[LATENCY] native error after "
+                        f"{time.monotonic() - native_started:.2f}s "
+                        f"what={what} extra={extra}"
+                    )
+                    if on_error:
+                        on_error(what, extra)
 
             def info_callback(what, extra):
                 if is_current() and on_info:
@@ -1194,7 +1205,10 @@ def _mp_create_set_source_and_prepare_async(audio_url, headers, on_prepared, on_
             else:
                 player.setDataSource(ctx, Uri.parse(audio_url))
             player.prepareAsync()
-            log("[media_android] MediaPlayer preparing async")
+            log(
+                f"[media_android] MediaPlayer preparing async "
+                f"source_setup={time.monotonic() - native_started:.2f}s"
+            )
         except Exception as exc:
             log(f"[MP] prepareAsync error: {exc}")
             if player is not None:
