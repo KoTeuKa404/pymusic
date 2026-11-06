@@ -5243,6 +5243,16 @@ class AudioPlayerScreen(Screen):
                 pass
 
             ma._mp_start()
+            pending_art = getattr(self, "_pending_audio_art", None)
+            if (
+                isinstance(pending_art, tuple)
+                and len(pending_art) == 2 and pending_art[0] == gen
+            ):
+                def fetch_art(_dt, expect=gen, url=pending_art[1]):
+                    if self._is_current_gen(expect) and self._playback_desired:
+                        self._download_art_async(url)
+                Clock.schedule_once(fetch_art, 2.0)
+                self._pending_audio_art = None
             t0 = float(getattr(self, "_audio_play_request_t0", 0) or 0)
             if t0:
                 print(f"[LATENCY] audio start queued after {time.monotonic() - t0:.2f}s")
@@ -5517,7 +5527,9 @@ class AudioPlayerScreen(Screen):
                 self._thumb = info.get("thumb") or ""
                 Clock.schedule_once(lambda dt: self._sync_thumb_now(), 0)
                 if self._thumb:
-                    self._download_art_async(self._thumb)
+                    # Defer the cover HTTP request until audio can play.
+                    # This keeps thumbnail transfer off the critical path.
+                    self._pending_audio_art = (gen, self._thumb)
                 elif self._last_video_url:
                     cached_art = self._find_cached_art(self._last_video_url)
                     if cached_art:
