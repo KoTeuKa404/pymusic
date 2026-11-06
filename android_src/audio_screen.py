@@ -2503,6 +2503,7 @@ class AudioPlayerScreen(Screen):
             self._playlist_url = None
         self._last_video_url = video_url
         self._audio_play_request_t0 = time.monotonic()
+        self._audio_first_progress_gen = -1
         self._audio_source_attempts = set()
         self._remember_recent(video_url, title, channel, str(thumb or ""))
         self._favorite = bool(is_favorite(video_url))
@@ -4562,6 +4563,13 @@ class AudioPlayerScreen(Screen):
                 pass
 
             current_source = str(getattr(self, "_stream_url", "") or "")
+            if what == -38 or extra == -38:
+                # Learn a device-specific native codec failure. This turns
+                # off future Opus-first attempts if the handset rejects
+                # WebM and keeps AAC as a safe fallback.
+                ydlh.note_native_audio_format_failure(
+                    str(getattr(self, "_stream_format_id", "") or "")
+                )
             used = getattr(self, "_audio_source_attempts", None)
             if not isinstance(used, set):
                 used = set()
@@ -6220,6 +6228,27 @@ class AudioPlayerScreen(Screen):
                 dur = ma.android_player.getDuration() or 0
             except Exception:
                 return
+
+        # Start-to-first-real-progress is the metric users perceive.
+        # MediaPlayer.start() can return before a single frame is audible.
+        try:
+            gen = int(self._load_gen)
+            if (
+                int(pos or 0) > 0
+                and self._playback_desired
+                and not self._user_paused
+                and getattr(self, "_audio_first_progress_gen", -1) != gen
+            ):
+                self._audio_first_progress_gen = gen
+                started = float(getattr(self, "_audio_play_request_t0", 0) or 0)
+                if started:
+                    print(
+                        f"[LATENCY] first real audio progress after "
+                        f"{time.monotonic() - started:.2f}s "
+                        f"format={self._stream_format_id!r}"
+                    )
+        except Exception:
+            pass
 
         if (
             self._bad_dur_hits >= 4
