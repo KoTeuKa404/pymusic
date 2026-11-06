@@ -1614,5 +1614,94 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertNotIn("_create_unverified_context", cache)
 
 
+    def test_cached_audio_alternate_skips_reextract_and_bad_urls(self):
+        from urllib import parse
+        import time
+
+        host = "https://rr1---sn-abc.googlevideo.com/videoplayback"
+        aac140 = host + "?itag=140"
+        aac139 = host + "?itag=139"
+        opus251 = host + "?itag=251"
+        formats = [
+            {"format_id": "140", "url": aac140, "vcodec": "none",
+             "acodec": "mp4a.40.2", "ext": "m4a", "abr": 128},
+            {"format_id": "139", "url": aac139, "vcodec": "none",
+             "acodec": "mp4a.40.5", "ext": "m4a", "abr": 48},
+            {"format_id": "251", "url": opus251, "vcodec": "none",
+             "acodec": "opus", "ext": "webm", "abr": 120},
+            {"format_id": "18", "url": host + "?itag=18", "vcodec": "avc1",
+             "acodec": "mp4a.40.2", "ext": "mp4"},
+            {"format_id": "spoof", "url": "https://googlevideo.com.evil.test/v",
+             "vcodec": "none", "acodec": "mp4a.40.2", "ext": "m4a"},
+            {"format_id": "local", "url": "http://127.0.0.1:9000/secret",
+             "vcodec": "none", "acodec": "mp4a.40.2", "ext": "m4a"},
+        ]
+        ns = {
+            "urlparse": parse,
+            "time": time,
+            "_get_cached_formats": lambda _video: {"formats": formats},
+            "_parse_expire_ts": lambda _url: None,
+            "_best_effort_headers": lambda source, fallback: (
+                dict(source or fallback)
+            ),
+            "_ANDROID_YT_UA": "AndroidTest",
+        }
+        fallback = isolated_definition(
+            "ytdlp_helpers.py", "get_cached_alternate_audio_source", ns
+        )
+        v = "https://www.youtube.com/watch?v=eUgRBJ2akVw"
+        first = fallback(v, aac140, {aac140})
+        self.assertEqual(first["format_id"], "139")
+        self.assertEqual(first["audio_url"], aac139)
+        self.assertEqual(
+            fallback(v, aac140, {aac140, aac139})["format_id"], "251"
+        )
+        self.assertIsNone(
+            fallback(v, aac140, {aac140, aac139, opus251})
+        )
+        ns["_get_cached_formats"] = lambda _video: None
+        self.assertIsNone(fallback(v, aac140, {aac140}))
+
+    def test_native_minus_38_uses_cached_alternate_before_network_retry(self):
+        screen = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        start = screen.index("def _start_from_known_stream(")
+        end = screen.index("def _audio_cache_dir(", start)
+        part = screen[start:end]
+        choice = part.index("ydlh.get_cached_alternate_audio_source(")
+        retry = part.index('self._recover_stream("media_error"')
+        self.assertLess(choice, retry)
+        self.assertIn('name="pymusic-audio-alternate-native"', part)
+        self.assertIn("getattr(self, \"_audio_source_attempts\"", part)
+        self.assertIn("self._stream_error_hits <= 2", part)
+
+    def test_slow_audio_start_does_not_trigger_second_ytdlp_metadata_extract(self):
+        runtime = (ROOT / "fast_track_switch_v9.py").read_text(encoding="utf-8")
+        section = runtime.split("def metadata_after_audio(", 1)[1].split(
+            "def play_audio_fast_switch(", 1
+        )[0]
+        self.assertIn("deadline = time.monotonic() + 30.0", section)
+        self.assertIn('if not _audio_ready(media):', section)
+        self.assertLess(
+            section.index('if not _audio_ready(media):'),
+            section.index("old_metadata(self, expected_url)"),
+        )
+        self.assertIn("self._metadata_loaded_urls.add(video_url)",
+                      (ROOT / "audio_screen.py").read_text(encoding="utf-8"))
+
+    def test_related_images_are_deferred_until_after_native_audio_start(self):
+        src = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        extractor = src.split("def _extract_and_start(self,", 1)[1].split(
+            "def _put_cache(", 1
+        )[0]
+        self.assertIn(
+            'if getattr(self, "_audio_ready_for_extras_gen", -1) == gen:',
+            extractor,
+        )
+        self.assertIn("self._render_similar_ui(force=True)", src)
+        self.assertIn("[LATENCY] audio URL ready after", src)
+        self.assertIn("[LATENCY] native prepared after", src)
+        self.assertIn("[LATENCY] audio start queued after", src)
+
+
 if __name__ == "__main__":
     unittest.main()
