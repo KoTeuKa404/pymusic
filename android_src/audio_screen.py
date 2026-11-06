@@ -4701,6 +4701,23 @@ class AudioPlayerScreen(Screen):
         if existing:
             return existing
 
+        # Keep user-requested offline favorites bounded without evicting
+        # any existing favorites behind the user's back. When the allowance
+        # is full, streaming still works; only the optional save is skipped.
+        try:
+            cache_root = self._audio_cache_dir()
+            total = sum(
+                entry.stat(follow_symlinks=False).st_size
+                for entry in os.scandir(cache_root)
+                if entry.is_file(follow_symlinks=False)
+                and not entry.name.endswith(".part")
+            )
+            if total >= 128 * 1024 * 1024:
+                print("[AUDIO] optional favorite cache is at 128 MiB limit")
+                return None
+        except (OSError, ValueError):
+            return None
+
         headers = headers or {}
         req_headers = {
             "User-Agent": headers.get("User-Agent") or (
@@ -4717,7 +4734,26 @@ class AudioPlayerScreen(Screen):
         try:
             context = ssl.create_default_context(cafile=certifi.where())
             request = urllib.request.Request(audio_url, headers=req_headers)
-            with urllib.request.urlopen(request, timeout=20, context=context) as resp:
+
+            class RejectRedirect(urllib.request.HTTPRedirectHandler):
+                # Do not connect to an untrusted redirect destination at all.
+                def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                    parsed = urllib.parse.urlsplit(newurl)
+                    host = (parsed.hostname or "").lower()
+                    if parsed.scheme != "https" or not (
+                        host == "googlevideo.com"
+                        or host.endswith(".googlevideo.com")
+                    ):
+                        raise ValueError("untrusted audio redirect destination")
+                    return super().redirect_request(
+                        req, fp, code, msg, hdrs, newurl
+                    )
+
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=context),
+                RejectRedirect(),
+            )
+            with opener.open(request, timeout=20) as resp:
                 final_url = urllib.parse.urlsplit(resp.geturl())
                 final_host = (final_url.hostname or "").lower()
                 if final_url.scheme != "https" or not (
