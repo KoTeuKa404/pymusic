@@ -25,6 +25,68 @@ yt_dlp.cache.load   = lambda *a, **k: None
 yt_dlp.cache.remove = lambda *a, **k: None
 
 
+# A small, *in-memory* TTL cache of signed audio stream URLs/metadata.
+# This avoids repeated yt-dlp client requests for replay/track switches,
+# but does not store copyrighted media bytes or pretend URLs work offline.
+_AUDIO_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_AUDIO_INFO_CACHE_LOCK = threading.RLock()
+_AUDIO_INFO_CACHE_MAX = 24
+_AUDIO_INFO_CACHE_TTL = 120.0
+
+# Learn when the Android yt-dlp player client only offers a muxed format 18.
+# Once observed, try TV's audio-only AAC first on subsequent tracks, falling
+# back to Android if TV becomes unavailable. This avoids a redundant failed
+# extractor request without slowing down healthy Android audio clients.
+_AUDIO_CLIENT_HINT_LOCK = threading.RLock()
+_ANDROID_CLIENT_MUXED_ONLY = False
+
+
+def _get_cached_audio_info(video_url: str) -> dict | None:
+    video_id = _extract_video_id_from_url(video_url)
+    if not video_id:
+        return None
+    with _AUDIO_INFO_CACHE_LOCK:
+        entry = _AUDIO_INFO_CACHE.get(video_id)
+        if not entry:
+            return None
+        expiry, info = entry
+        if expiry <= time.monotonic():
+            _AUDIO_INFO_CACHE.pop(video_id, None)
+            return None
+        # A fresh dict avoids cross-thread mutation of metadata fields.
+        return dict(info)
+
+
+def _cache_audio_info(video_url: str, result: dict) -> None:
+    video_id = _extract_video_id_from_url(video_url)
+    source = str((result or {}).get("audio_url") or "")
+    if not video_id or not source.startswith("https://"):
+        return
+    ttl = _AUDIO_INFO_CACHE_TTL
+    expiry = (result or {}).get("expire_ts")
+    try:
+        if expiry is not None:
+            ttl = min(ttl, max(0.0, float(expiry) - time.time() - 120))
+    except (TypeError, ValueError, OverflowError):
+        ttl = 0
+    if ttl <= 10:
+        return
+    with _AUDIO_INFO_CACHE_LOCK:
+        _AUDIO_INFO_CACHE[video_id] = (
+            time.monotonic() + ttl, dict(result)
+        )
+        while len(_AUDIO_INFO_CACHE) > _AUDIO_INFO_CACHE_MAX:
+            _AUDIO_INFO_CACHE.pop(next(iter(_AUDIO_INFO_CACHE)))
+
+
+def invalidate_audio_info_cache(video_url: str) -> None:
+    """Forget a failed/expired CDN URL before recovery re-extracts it."""
+    video_id = _extract_video_id_from_url(video_url)
+    if video_id:
+        with _AUDIO_INFO_CACHE_LOCK:
+            _AUDIO_INFO_CACHE.pop(video_id, None)
+
+
 # Cache only a bounded number of freshly extracted YouTube manifests. Audio
 # and video workers often request exactly the same track within seconds.
 _VIDEO_FORMAT_CACHE: dict[str, tuple[float, dict]] = {}
@@ -858,6 +920,10 @@ def _extract_info_with_clients(
         )
         if rank > best_rank:
             best_info, best_rank = info, rank
+        if client == "android":
+            global _ANDROID_CLIENT_MUXED_ONLY
+            with _AUDIO_CLIENT_HINT_LOCK:
+                _ANDROID_CLIENT_MUXED_ONLY = (rank < 2)
         if rank == 3 or (client == "android" and rank >= 2):
             # Normal Android audio-only tracks stay on the fast path. Only
             # muxed-only/SABR clients fall through to tv_embedded.
@@ -896,13 +962,20 @@ def py_headers_to_javamap(headers: Dict[str, str], HashMapClass) -> Any:
 
 # ============================ AUDIO API ================================
 def _audio_client_order(prefer_compat: bool = False) -> Tuple[str, ...]:
-    """Leave healthy Android streams alone; fallback only after a failure."""
-    # Each client is attempted once; repeating web_embedded with identical
-    # extractor settings cannot repair a failed/empty result.
-    clients = (
-        ("web_embedded", "tv_embedded", "android", "ios")
-        if prefer_compat else ("android", "tv_embedded")
-    )
+    """Avoid repeating the Android muxed-only client on every track.
+
+    Learn from successful extraction data in the current process, retaining
+    fallback to the previous client if the preferred one fails.
+    """
+    with _AUDIO_CLIENT_HINT_LOCK:
+        prefer_tv = _ANDROID_CLIENT_MUXED_ONLY
+
+    if prefer_compat:
+        clients = ("web_embedded", "tv_embedded", "android", "ios")
+    elif prefer_tv:
+        clients = ("tv_embedded", "android")
+    else:
+        clients = ("android", "tv_embedded")
     if _env_bool("YTDLP_ALLOW_WEB_CLIENT", False):
         clients += ("web",)
     return clients
@@ -925,11 +998,17 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
       }
     Стійко працює при збоях nsig, пріоритет Android-клієнт.
     """
+    if not prefer_compat:
+        cached = _get_cached_audio_info(video_url)
+        if cached is not None:
+            print("[AUDIO] signed stream metadata cache hit")
+            return cached
+
     BASE_OPTS = {
         "quiet": True,
         "skip_download": True,
         "noplaylist": True,
-        "nocheckcertificate": True,
+        "nocheckcertificate": False,
         "logger": YDLLogger(),
         "format": (
             "bestaudio[ext=m4a]/"
@@ -950,7 +1029,8 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
             "Referer": "https://www.youtube.com",
             "Connection": "keep-alive",
         },
-        "extractor_retries": 2,
+        "extractor_retries": 1,
+        "socket_timeout": 8,
         "ignoreerrors": "only_download",
     }
 
@@ -1027,7 +1107,7 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
     except Exception:
         pass
 
-    return {
+    result = {
         "audio_url": url,
         "thumb": thumb,
         "title": title,
@@ -1044,6 +1124,9 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "ext": selected_ext,
         "acodec": selected_acodec,
     }
+    if not prefer_compat:
+        _cache_audio_info(video_url, result)
+    return result
 
 
 # ============================ VIDEO API ================================

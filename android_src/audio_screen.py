@@ -1187,9 +1187,15 @@ class AudioPlayerScreen(Screen):
         self._buffer_watchdog_ev = None
         self._buffer_watchdog_ts = 0.0
         self._last_watch_pos = None
+        self._buffering_started_at = 0.0
+        self._next_prefetch_requested_gen = -1
+        self._video_launch_requested_gen = -1
+        self._audio_ready_for_extras_gen = -1
 
         self._resume_pos_ms = 0      # позиція для резюму після падіння/паузи
-        self._video_enabled = True   # відео вмикається автоматично
+        # Android mobile/capped data: start in audio-only mode by default.
+        # The video toggle still enables it explicitly on demand.
+        self._video_enabled = not bool(ma.is_metered_connection())
         self._bg_tick_ev = Clock.schedule_interval(self._background_tick, 1.0)
         self._audio_cache_inflight = set()
         self._last_good_dur_ms = 0
@@ -1240,7 +1246,9 @@ class AudioPlayerScreen(Screen):
         self._playlist_render_gen = 0
         self._similar_render_gen = 0
         self._playlist_collapsed = False
-        self._similar_collapsed = False
+        # Avoid 1+ MB related/watch-page requests on capped data until the
+        # user expands the related section. Audio stays the priority.
+        self._similar_collapsed = bool(ma.is_metered_connection())
         self._initialize_java_transport()
         for delay in (0, 0.08, 0.25):
             Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
@@ -2504,6 +2512,10 @@ class AudioPlayerScreen(Screen):
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
         self._stream_format_id = ""
+        self._next_prefetch_requested_gen = -1
+        self._video_launch_requested_gen = -1
+        self._audio_ready_for_extras_gen = -1
+        self._buffering_started_at = 0.0
         self._views_text = ""
         self._published_date = ""
         self._related_items = []
@@ -3286,6 +3298,8 @@ class AudioPlayerScreen(Screen):
 
     def toggle_similar_collapsed(self):
         self._similar_collapsed = not bool(getattr(self, "_similar_collapsed", False))
+        if not self._similar_collapsed and not self._related_items:
+            self._ensure_related_current_v4(force=False, user_requested=True)
         self._render_similar_ui(force=True)
 
     def _set_collapsible_header(self, row, label, button, visible: bool, title: str, collapsed: bool):
@@ -3736,8 +3750,16 @@ class AudioPlayerScreen(Screen):
             print("[CURRENT-V4] search fallback failed:", exc)
         return output
 
-    def _ensure_related_current_v4(self, force=False, auto_advance=False):
+    def _ensure_related_current_v4(self, force=False, auto_advance=False, user_requested=False):
         self._current_ensure_state()
+        # Skip nonessential related extraction until audio has *actually*
+        # started. On metered links, only auto-next or an explicit expansion
+        # of the section may fetch these bandwidth-heavy watch-next pages.
+        if not auto_advance and not user_requested:
+            if ma.is_metered_connection() or getattr(
+                self, "_audio_ready_for_extras_gen", -1
+            ) != int(getattr(self, "_load_gen", -1)):
+                return False
         url = _current_video_url_of(self)
         if not url:
             print("[CURRENT-V4] related skipped: no current video URL")
@@ -4347,44 +4369,45 @@ class AudioPlayerScreen(Screen):
             pass
 # TODO буфер ламає відтворення відео(через repeat) і ламає роботу з плейлистами
     def _buffer_watchdog(self, dt):
-        """
-        Якщо позиція програвання не змінюється деякий час при активному відтворенні -
-        швидше за все потік завис через проблеми з інтернетом, тоді запускаємо
-        мʼякий рестарт із повторним витягуванням URL.
+        """Wait for a slow network's buffer before re-creating MediaPlayer.
+
+        An 8-second timeout triggered repeat downloads and infinite restarts
+        on mobile links. Recovery now uses the existing bounded error-loop
+        handler and retains playback position.
         """
         if self._app_in_background or (time.time() - float(self._last_bg_resume_ts or 0.0)) < 6.0:
             return
         if not self._playback_desired or self._user_paused:
             return
-        if not ma.android_player:
+        if not ma.android_player or not ma._is_prepared():
             return
         try:
-            pos = ma.android_player.getCurrentPosition() or 0
+            pos = int(ma.android_player.getCurrentPosition() or 0)
         except Exception:
             return
 
         now = time.time()
-        last_pos = self._last_watch_pos if self._last_watch_pos is not None else -1
-
-        if pos == last_pos:
-            # якщо більше 8 секунд стоїмо на одному місці - робимо restart
-            if now - self._buffer_watchdog_ts > 8.0:
-                print("[AUDIO] Watchdog: stream stuck, restarting...")
-                self._buffer_watchdog_ts = now
-                # збережемо позицію для відновлення
-                try:
-                    self._resume_pos_ms = pos
-                except Exception:
-                    self._resume_pos_ms = 0
-                if self._last_video_url:
-                    threading.Thread(
-                        target=lambda: self._extract_and_start_gen(self._last_video_url, self._load_gen),
-                        daemon=True,
-                    ).start()
-        else:
-            self._buffer_watchdog_ts = now
-
+        last_pos = self._last_watch_pos
         self._last_watch_pos = pos
+        if last_pos is None or pos != last_pos:
+            self._buffer_watchdog_ts = now
+            return
+
+        # Mobile/explicitly metered Wi-Fi may require a much longer stall
+        # window. A buffering event is normal on a slow CDN, not a crash.
+        timeout = 45.0 if ma.is_metered_connection() else 28.0
+        if getattr(self, "_buffering_started_at", 0.0):
+            timeout += 15.0
+        if now - float(self._buffer_watchdog_ts or now) < timeout:
+            return
+        if not ma.is_network_available():
+            # Preserve native player/last-known buffer while disconnected.
+            return
+
+        self._buffer_watchdog_ts = now
+        self._resume_pos_ms = pos
+        print(f"[AUDIO] stalled {timeout:.0f}s; recover at {pos} ms")
+        self._recover_stream("buffer_watchdog", pos, force_fresh=True)
 
     def _pre_start_cleanup(self):
         try:
@@ -4422,6 +4445,19 @@ class AudioPlayerScreen(Screen):
         self._pre_start_cleanup()
 
     # ==================== fast path start ====================
+
+    def _on_native_audio_info(self, what: int, extra: int, gen: int) -> None:
+        # Android MEDIA_INFO_BUFFERING_START/END. Watchdog uses the event
+        # to avoid destroying a player that is correctly waiting for bytes.
+        if not self._is_current_gen(gen):
+            return
+        if int(what) == 701:
+            self._buffering_started_at = time.monotonic()
+            print("[AUDIO] native buffering started")
+        elif int(what) == 702:
+            self._buffering_started_at = 0.0
+            self._buffer_watchdog_ts = time.time()
+            print("[AUDIO] native buffering completed")
 
     def _start_from_known_stream(self, gen: int | None = None):
         gen = self._load_gen if gen is None else gen
@@ -4462,22 +4498,13 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
-            # або стартуємо з відео, або тільки аудіо, залежно від кнопки vid
-            if self._video_enabled and not self._app_in_background:
-                # швидкий старт аудіо, відео підвантажуємо паралельно
-                threading.Thread(
-                    target=lambda: self._start_audio_only_after_prepared(gen),
-                    daemon=True,
-                ).start()
-                threading.Thread(
-                    target=lambda: self._auto_video_for_current(gen, sync_start=False),
-                    daemon=True,
-                ).start()
-            else:
-                threading.Thread(
-                    target=lambda: self._start_audio_only_after_prepared(gen),
-                    daemon=True,
-                ).start()
+            # Start audio first. Video extraction/CDN negotiation must not
+            # compete with MediaPlayer's first audible bytes on weak Wi-Fi.
+            # A bounded optional video launch happens *after* audio starts.
+            threading.Thread(
+                target=lambda: self._start_audio_only_after_prepared(gen),
+                daemon=True, name="pymusic-audio-start",
+            ).start()
 
         def _on_complete():
             if not self._is_current_gen(gen):
@@ -4524,6 +4551,11 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
+            # A failing URL must not be served from the short in-memory
+            # stream cache on the next recovery attempt.
+            ydlh.invalidate_audio_info_cache(
+                str(getattr(self, "_last_video_url", "") or "")
+            )
             # типові помилки нестабільного інтернету
             NETWORK_ERRORS = (-1004, -110, -38, 1)
 
@@ -4566,7 +4598,7 @@ class AudioPlayerScreen(Screen):
                 self._stream_url, jheaders,
                 _on_prepared, _on_complete,
                 lambda w, e: _on_error(w, e),
-                lambda w, e: None
+                lambda w, e: self._on_native_audio_info(w, e, gen)
             )
         else:
             ma._mp_create(self._stream_url, _on_prepared, _on_complete, lambda w, e: _on_error(w, e))
@@ -4606,81 +4638,156 @@ class AudioPlayerScreen(Screen):
         return os.path.join(self._audio_cache_dir(), f"{key}.{ext}")
 
     def _find_cached_audio(self, video_url: str) -> str | None:
+        """Only use finalized files within this app's audio cache directory."""
         if not video_url:
             return None
+        cache_root = os.path.realpath(self._audio_cache_dir())
+        key = self._cache_key(video_url)
+
+        def valid(candidate: str) -> bool:
+            try:
+                path = os.path.realpath(str(candidate or ""))
+                if os.path.commonpath([path, cache_root]) != cache_root:
+                    return False
+                name = os.path.basename(path)
+                if not name.startswith(key + ".") or name.endswith(".part"):
+                    return False
+                return os.path.isfile(path) and os.path.getsize(path) > 128
+            except (OSError, ValueError, TypeError):
+                return False
+
         try:
-            recent = load_recent()
-            for r in recent:
-                if r.get("url") == video_url:
-                    p = str(r.get("cache_path") or "")
-                    if p and os.path.exists(p) and os.path.getsize(p) > 0:
-                        return p
+            for entry in load_recent():
+                if entry.get("url") == video_url:
+                    candidate = str(entry.get("cache_path") or "")
+                    if valid(candidate):
+                        return os.path.realpath(candidate)
         except Exception:
             pass
         try:
-            cache_dir = self._audio_cache_dir()
-            key = self._cache_key(video_url)
-            for name in os.listdir(cache_dir):
-                if name == key or name.startswith(f"{key}."):
-                    path = os.path.join(cache_dir, name)
-                    if os.path.isfile(path) and os.path.getsize(path) > 0:
-                        return path
+            for name in os.listdir(cache_root):
+                path = os.path.join(cache_root, name)
+                if valid(path):
+                    return os.path.realpath(path)
         except Exception:
             pass
         return None
 
     def _download_audio_locally(self, video_url: str, audio_url: str, headers: dict | None = None) -> str | None:
-        if not audio_url or audio_url.startswith("file://") or "m3u8" in audio_url:
+        """Explicit favorite audio cache, with verified HTTPS and size limit.
+
+        Automatic caching during *streaming* is disabled: fetching the same
+        track twice was expensive, especially over weak/mobile networks.
+        Only an explicit favorite action can call this full-file download.
+        """
+        if not video_url or not audio_url or audio_url.startswith("file://") or "m3u8" in audio_url:
+            return None
+
+        # A compromised extractor/cache entry must never fetch loopback,
+        # file:// or another service, or redirect to an untrusted host.
+        try:
+            parsed = urllib.parse.urlsplit(str(audio_url))
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (
+                host == "googlevideo.com" or host.endswith(".googlevideo.com")
+            ):
+                return None
+        except (TypeError, ValueError):
             return None
 
         ext = self._guess_audio_ext(audio_url)
         path = self._audio_cache_path(video_url, ext)
+        existing = self._find_cached_audio(video_url)
+        if existing:
+            return existing
 
+        # Keep user-requested offline favorites bounded without evicting
+        # any existing favorites behind the user's back. When the allowance
+        # is full, streaming still works; only the optional save is skipped.
         try:
-            if os.path.exists(path) and os.path.getsize(path) > 0:
-                return path
-        except Exception:
-            pass
+            cache_root = self._audio_cache_dir()
+            total = sum(
+                entry.stat(follow_symlinks=False).st_size
+                for entry in os.scandir(cache_root)
+                if entry.is_file(follow_symlinks=False)
+                and not entry.name.endswith(".part")
+            )
+            # Reserve capacity for the entire maximum single-file download,
+            # so the final total can never exceed the advertised 128 MiB.
+            if total + 24 * 1024 * 1024 > 128 * 1024 * 1024:
+                print("[AUDIO] optional favorite cache is at 128 MiB limit")
+                return None
+        except (OSError, ValueError):
+            return None
 
         headers = headers or {}
         req_headers = {
-            "User-Agent": headers.get("User-Agent") or "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
+            "User-Agent": headers.get("User-Agent") or (
+                "Mozilla/5.0 (Linux; Android 12; Mobile) "
+                "AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
+            ),
             "Referer": headers.get("Referer") or "https://www.youtube.com",
             "Accept-Language": headers.get("Accept-Language") or "en-US,en;q=0.9",
-            "Connection": headers.get("Connection") or "keep-alive",
         }
-
+        # Cap a user-requested favorite cache entry. Very long recordings
+        # remain streamable but never fill the device's storage unexpectedly.
+        max_bytes = 24 * 1024 * 1024
         tmp_path = f"{path}.part"
         try:
-            ctx = ssl._create_unverified_context()
-            req = urllib.request.Request(audio_url, headers=req_headers)
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp, open(tmp_path, "wb") as f:
-                expected_size = 0
-                try:
-                    expected_size = int(resp.headers.get("Content-Length") or 0)
-                except Exception:
-                    expected_size = 0
-                while True:
-                    chunk = resp.read(512 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            actual_size = os.path.getsize(tmp_path)
-            if expected_size > 0 and actual_size < expected_size:
-                raise IOError(f"incomplete audio cache: {actual_size}/{expected_size} bytes")
+            context = ssl.create_default_context(cafile=certifi.where())
+            request = urllib.request.Request(audio_url, headers=req_headers)
+
+            class RejectRedirect(urllib.request.HTTPRedirectHandler):
+                # Do not connect to an untrusted redirect destination at all.
+                def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                    parsed = urllib.parse.urlsplit(newurl)
+                    host = (parsed.hostname or "").lower()
+                    if parsed.scheme != "https" or not (
+                        host == "googlevideo.com"
+                        or host.endswith(".googlevideo.com")
+                    ):
+                        raise ValueError("untrusted audio redirect destination")
+                    return super().redirect_request(
+                        req, fp, code, msg, hdrs, newurl
+                    )
+
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=context),
+                RejectRedirect(),
+            )
+            with opener.open(request, timeout=20) as resp:
+                final_url = urllib.parse.urlsplit(resp.geturl())
+                final_host = (final_url.hostname or "").lower()
+                if final_url.scheme != "https" or not (
+                    final_host == "googlevideo.com"
+                    or final_host.endswith(".googlevideo.com")
+                ):
+                    raise ValueError("untrusted audio redirect")
+                expected = int(resp.headers.get("Content-Length") or 0)
+                if expected > max_bytes:
+                    raise ValueError("favorite audio exceeds 24 MiB cache limit")
+                received = 0
+                with open(tmp_path, "wb") as output:
+                    while True:
+                        chunk = resp.read(128 * 1024)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > max_bytes:
+                            raise ValueError("favorite audio exceeded cache limit")
+                        output.write(chunk)
+            if received < 128 or (expected and received != expected):
+                raise IOError("favorite audio download was incomplete")
             os.replace(tmp_path, path)
             update_recent_cache(video_url, path)
             update_favorite_cache(video_url, path)
             return path
-        except Exception as e:
+        except Exception as exc:
+            print("[AUDIO] optional favorite cache download failed:", type(exc).__name__)
             try:
-                print("[AUDIO] cache download fail:", e)
-            except Exception:
-                pass
-            try:
-                if os.path.exists(tmp_path):
+                if os.path.isfile(tmp_path):
                     os.remove(tmp_path)
-            except Exception:
+            except OSError:
                 pass
             return None
 
@@ -5075,6 +5182,15 @@ class AudioPlayerScreen(Screen):
                 pass
 
             ma._mp_start()
+            self._audio_ready_for_extras_gen = gen
+            if not ma.is_metered_connection():
+                Clock.schedule_once(
+                    lambda _dt, expected=gen: (
+                        self._ensure_related_current_v4(force=False)
+                        if self._is_current_gen(expected) else None
+                    ),
+                    2.5,
+                )
             try:
                 # Native video starts independently after audio. Do not
                 # stop a video that is already preparing merely because the
@@ -5118,11 +5234,50 @@ class AudioPlayerScreen(Screen):
             Clock.schedule_once(lambda dt: self._ui_set_playing(True), 0)
             self._schedule_progress()
             self._schedule_expiry()
-            self._prefetch_next_track_audio()
+            self._launch_video_after_audio_start(gen)
         except Exception as e:
             ma.log(f"audio-only start err: {e}")
 
+    def _launch_video_after_audio_start(self, gen: int) -> None:
+        """Prioritize starting the audio stream before video network work.
+
+        On metered networks the default is audio-only; if the user manually
+        enables video, load it after a larger audio head start. Every delayed
+        operation is generation-checked so switching tracks cannot resurrect
+        stale video or old CDN requests.
+        """
+        if (
+            not self._video_enabled or self._app_in_background
+            or not self._is_screen_active()
+            or getattr(self, "_video_launch_requested_gen", -1) == gen
+        ):
+            return
+        self._video_launch_requested_gen = gen
+
+        def worker():
+            delay = 4.0 if ma.is_metered_connection() else 1.5
+            time.sleep(delay)
+            if (
+                not self._is_current_gen(gen)
+                or not self._video_enabled
+                or self._app_in_background
+                or not self._is_screen_active()
+                or not self._playback_desired
+                or self._user_paused
+                or not ma._is_prepared()
+            ):
+                return
+            self._auto_video_for_current(gen, sync_start=False)
+
+        threading.Thread(
+            target=worker, daemon=True, name="pymusic-video-after-audio"
+        ).start()
+
     def _prefetch_next_track_audio(self):
+        # Prefetch only shortly before a real track transition, on Wi-Fi.
+        # Metered connections must never use data for a track not requested.
+        if ma.is_metered_connection() or not self._auto_skip:
+            return None
         try:
             playlist = getattr(self, "playlist", None)
             tracks = getattr(playlist, "tracks", None) if playlist else None
@@ -5309,7 +5464,10 @@ class AudioPlayerScreen(Screen):
                 Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
 
             self._put_cache(video_url, self._stream_url, self._headers, self._expire_ts)
-            self._cache_audio_async(video_url, self._stream_url, self._headers)
+            # Do NOT auto-download the same song a second time while the
+            # native player is streaming it. That doubled mobile bandwidth
+            # and competed with the audio startup buffer. Explicitly saved
+            # favorite tracks retain their existing cache workflow.
             self._metadata_loaded_urls.add(video_url)
             self._extract_fail_skip_hits = 0
 
@@ -6014,6 +6172,23 @@ class AudioPlayerScreen(Screen):
             pass
 
         try:
+            gen = int(self._load_gen)
+            remaining = int(dur or 0) - int(pos or 0)
+            if (
+                self._auto_skip
+                and not ma.is_metered_connection()
+                and self._playback_desired
+                and not self._user_paused
+                and int(pos or 0) > 1000
+                and 5000 < remaining <= 25000
+                and self._next_prefetch_requested_gen != gen
+            ):
+                self._next_prefetch_requested_gen = gen
+                self._prefetch_next_track_audio()
+        except Exception:
+            pass
+
+        try:
             ma.update_media_session_state(
                 bool(ma.android_player and ma.android_player.isPlaying()),
                 position_ms=int(pos or 0),
@@ -6053,15 +6228,12 @@ class AudioPlayerScreen(Screen):
             pass
 
     def _schedule_expiry(self):
-        if not self._expire_ts:
-            return
-        now = int(time.time())
-        # Не перезапускати надто часто, інакше при короткому TTL отримуємо цикли ресетів.
-        dt = max(30, self._expire_ts - now - 60)
-        self._refresh_ev = Clock.schedule_once(
-            lambda _: self._extract_and_start_gen(self._last_video_url, self._load_gen),
-            dt
-        )
+        # The current MediaPlayer already owns an open stream. Recreating
+        # it proactively at CDN URL expiration interrupts playback, downloads
+        # the same bytes again and may thrash when the network is weak.
+        # Signed URL caches are checked on *reuse*. Native playback errors
+        # trigger a fresh extraction when actually needed.
+        return None
 
     # ==================== buttons ====================
 

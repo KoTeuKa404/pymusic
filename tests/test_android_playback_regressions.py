@@ -199,6 +199,8 @@ class PlaybackRegressionTests(unittest.TestCase):
         namespace = {
             "Any": Any, "Dict": Dict, "Optional": Optional,
             "Tuple": Tuple, "YoutubeDL": FakeYoutubeDL,
+            "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+            "_ANDROID_CLIENT_MUXED_ONLY": False,
         }
         choose = isolated_definition(
             "ytdlp_helpers.py", "_extract_info_with_clients", namespace
@@ -215,18 +217,39 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(info["channel"], "Grimwind")
         self.assertEqual(info["thumbnail"], "https://images.example/cover")
         self.assertEqual(len(info["formats"]), 2)
+        self.assertTrue(namespace["_ANDROID_CLIENT_MUXED_ONLY"])
 
 
     def test_healthy_tracks_keep_android_client_and_only_recover_on_failure(self):
         from typing import Tuple
         chooser = isolated_definition(
             "ytdlp_helpers.py", "_audio_client_order",
-            {"Tuple": Tuple, "_env_bool": lambda *_args: False},
+            {"Tuple": Tuple, "_env_bool": lambda *_args: False,
+             "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+             "_ANDROID_CLIENT_MUXED_ONLY": False},
         )
         self.assertEqual(chooser(False), ("android", "tv_embedded"))
         self.assertEqual(
             chooser(True), ("web_embedded", "tv_embedded", "android", "ios")
         )
+
+    def test_muxed_only_client_learning_skips_redundant_android_probe(self):
+        from typing import Tuple
+        ns = {
+            "Tuple": Tuple,
+            "_env_bool": lambda *_args: False,
+            "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+            "_ANDROID_CLIENT_MUXED_ONLY": True,
+        }
+        choose = isolated_definition(
+            "ytdlp_helpers.py", "_audio_client_order", ns
+        )
+        self.assertEqual(choose(False), ("tv_embedded", "android"))
+        self.assertEqual(
+            choose(True), ("web_embedded", "tv_embedded", "android", "ios")
+        )
+        ns["_ANDROID_CLIENT_MUXED_ONLY"] = False
+        self.assertEqual(choose(False), ("android", "tv_embedded"))
 
     def test_channel_name_fallback_uses_official_oembed_and_validated_id(self):
         import json
@@ -1413,6 +1436,182 @@ class PlaybackRegressionTests(unittest.TestCase):
         source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
         self.assertIn("str(item.get(\"duration\") or \"\")", source)
         self.assertIn('str(item.get("published_text") or "")', source)
+
+
+    def test_audio_url_cache_is_bounded_expires_and_invalidates(self):
+        import re
+        import threading
+        import time
+
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        source = "https://r1---sn-test.googlevideo.com/videoplayback"
+        state = {
+            "_extract_video_id_from_url": lambda value: (
+                "LTsbyX-l06Y" if value == url else ""
+            ),
+            "_AUDIO_INFO_CACHE": {},
+            "_AUDIO_INFO_CACHE_LOCK": threading.RLock(),
+            "_AUDIO_INFO_CACHE_MAX": 2,
+            "_AUDIO_INFO_CACHE_TTL": 120.0,
+            "time": time,
+        }
+        save = isolated_definition("ytdlp_helpers.py", "_cache_audio_info", state)
+        get = isolated_definition("ytdlp_helpers.py", "_get_cached_audio_info", state)
+        invalidate = isolated_definition(
+            "ytdlp_helpers.py", "invalidate_audio_info_cache", state
+        )
+        save(url, {"audio_url": source, "title": "Grimwind"})
+        first = get(url)
+        self.assertIsNotNone(first)
+        self.assertEqual(first["audio_url"], source)
+        first["title"] = "mutation"
+        self.assertEqual(get(url)["title"], "Grimwind")
+        invalidate(url)
+        self.assertIsNone(get(url))
+        save(url, {"audio_url": source, "expire_ts": time.time() + 5})
+        self.assertIsNone(get(url))
+        save(url, {"audio_url": "http://untrusted.invalid/song"})
+        self.assertIsNone(get(url))
+
+    def test_no_duplicate_full_song_download_during_native_streaming(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        flow = source.split("def _extract_and_start(self", 1)[1].split(
+            "def _put_cache(self", 1
+        )[0]
+        self.assertNotIn("self._cache_audio_async(", flow)
+        self.assertIn("self._put_cache(video_url,", flow)
+        # Explicit favorite caching remains separate and opt-in.
+        self.assertIn("self._cache_current_favorite_async(url)", source)
+
+    def test_slow_network_watchdog_keeps_existing_buffer_and_position(self):
+        import time
+        state = SimpleNamespace(
+            _app_in_background=False, _last_bg_resume_ts=0,
+            _playback_desired=True, _user_paused=False,
+            _last_watch_pos=1000,
+            _buffer_watchdog_ts=time.time() - 12,
+            _buffering_started_at=0.0,
+            _resume_pos_ms=0,
+        )
+        calls = []
+        player = SimpleNamespace(getCurrentPosition=lambda: 1000)
+        media = SimpleNamespace(
+            android_player=player,
+            _is_prepared=lambda: True,
+            is_metered_connection=lambda: False,
+            is_network_available=lambda: True,
+        )
+        state._recover_stream = lambda *a, **kw: calls.append((a, kw))
+        func = isolated_definition(
+            "audio_screen.py", "_buffer_watchdog",
+            {"time": time, "ma": media},
+        )
+        func(state, 0)
+        self.assertEqual(calls, [])  # old 8-second watchdog restarted here
+        state._buffer_watchdog_ts = time.time() - 46
+        func(state, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "buffer_watchdog")
+        self.assertEqual(calls[0][1]["force_fresh"], True)
+        calls.clear()
+        state._buffer_watchdog_ts = time.time() - 90
+        media.is_network_available = lambda: False
+        func(state, 0)
+        self.assertEqual(calls, [])  # do not waste traffic while offline
+
+    def test_audio_first_video_start_and_metered_data_saver(self):
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        media = (ROOT / "media_android.py").read_text(encoding="utf-8")
+        self.assertIn("def is_metered_connection()", media)
+        self.assertIn("_video_enabled = not bool(ma.is_metered_connection())", code)
+        self.assertIn("self._launch_video_after_audio_start(gen)", code)
+        prepared = code.split("def _start_from_known_stream(", 1)[1].split(
+            "def _audio_cache_dir(", 1
+        )[0]
+        self.assertNotIn(
+            "target=lambda: self._auto_video_for_current(gen", prepared
+        )
+        self.assertIn("time.sleep(delay)", code)
+        self.assertIn("4.0 if ma.is_metered_connection() else 1.5", code)
+
+    def test_nonessential_related_fetch_waits_for_audio_and_metered_tap(self):
+        media = SimpleNamespace(is_metered_connection=lambda: True)
+        func = isolated_definition(
+            "audio_screen.py", "_ensure_related_current_v4",
+            {"ma": media},
+        )
+        player = SimpleNamespace(
+            _current_ensure_state=lambda: None,
+            _load_gen=3,
+            _audio_ready_for_extras_gen=3,
+        )
+        self.assertFalse(func(player))
+        media.is_metered_connection = lambda: False
+        player._audio_ready_for_extras_gen = -1
+        self.assertFalse(func(player))
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn('user_requested=True)', code)
+        self.assertIn('self._similar_collapsed = bool(ma.is_metered_connection())', code)
+        self.assertIn('5000 < remaining <= 25000', code)
+
+    def test_expiring_cdn_url_does_not_restart_audible_track(self):
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        expiry = code.split("def _schedule_expiry(self):", 1)[1].split(
+            "def toggle_play_pause", 1
+        )[0]
+        self.assertNotIn("_extract_and_start_gen", expiry)
+        self.assertIn("return None", expiry)
+        extractor = (ROOT / "ytdlp_helpers.py").read_text(encoding="utf-8")
+        self.assertIn("_get_cached_audio_info(video_url)", extractor)
+        self.assertIn("invalidate_audio_info_cache(", extractor)
+
+
+    def test_local_audio_cache_rejects_partial_and_external_files(self):
+        import hashlib
+        import os
+        import tempfile
+
+        fn = isolated_definition(
+            "audio_screen.py", "_find_cached_audio", {
+                "os": os,
+                "load_recent": lambda: [],
+            }
+        )
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        key = hashlib.md5(url.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            cache_dir = os.path.join(root, "audio")
+            os.mkdir(cache_dir)
+            partial = os.path.join(cache_dir, key + ".m4a.part")
+            complete = os.path.join(cache_dir, key + ".m4a")
+            with open(partial, "wb") as fp:
+                fp.write(b"x" * 1024)
+            owner = SimpleNamespace(
+                _audio_cache_dir=lambda: cache_dir,
+                _cache_key=lambda _url: key,
+            )
+            self.assertIsNone(fn(owner, url))
+            with open(complete, "wb") as fp:
+                fp.write(b"x" * 1024)
+            self.assertEqual(fn(owner, url), complete)
+            os.remove(complete)
+            foreign = os.path.join(root, key + ".m4a")
+            with open(foreign, "wb") as fp:
+                fp.write(b"x" * 1024)
+            self.assertIsNone(fn(owner, url))
+
+    def test_explicit_favorite_cache_has_tls_size_redirect_and_disk_guards(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        start = source.index("def _download_audio_locally(")
+        end = source.index("def _cache_audio_async(", start)
+        cache = source[start:end]
+        self.assertIn("max_bytes = 24 * 1024 * 1024", cache)
+        self.assertIn("total + 24 * 1024 * 1024 > 128 * 1024 * 1024", cache)
+        self.assertIn("ssl.create_default_context(cafile=certifi.where())", cache)
+        self.assertIn("class RejectRedirect(", cache)
+        self.assertIn('"untrusted audio redirect destination"', cache)
+        self.assertIn("os.replace(tmp_path, path)", cache)
+        self.assertNotIn("_create_unverified_context", cache)
 
 
 if __name__ == "__main__":
