@@ -1415,5 +1415,133 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn('str(item.get("published_text") or "")', source)
 
 
+    def test_audio_url_cache_is_bounded_expires_and_invalidates(self):
+        import re
+        import threading
+        import time
+
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        source = "https://r1---sn-test.googlevideo.com/videoplayback"
+        state = {
+            "_extract_video_id_from_url": lambda value: (
+                "LTsbyX-l06Y" if value == url else ""
+            ),
+            "_AUDIO_INFO_CACHE": {},
+            "_AUDIO_INFO_CACHE_LOCK": threading.RLock(),
+            "_AUDIO_INFO_CACHE_MAX": 2,
+            "_AUDIO_INFO_CACHE_TTL": 120.0,
+            "time": time,
+        }
+        save = isolated_definition("ytdlp_helpers.py", "_cache_audio_info", state)
+        get = isolated_definition("ytdlp_helpers.py", "_get_cached_audio_info", state)
+        invalidate = isolated_definition(
+            "ytdlp_helpers.py", "invalidate_audio_info_cache", state
+        )
+        save(url, {"audio_url": source, "title": "Grimwind"})
+        first = get(url)
+        self.assertIsNotNone(first)
+        self.assertEqual(first["audio_url"], source)
+        first["title"] = "mutation"
+        self.assertEqual(get(url)["title"], "Grimwind")
+        invalidate(url)
+        self.assertIsNone(get(url))
+        save(url, {"audio_url": source, "expire_ts": time.time() + 5})
+        self.assertIsNone(get(url))
+        save(url, {"audio_url": "http://untrusted.invalid/song"})
+        self.assertIsNone(get(url))
+
+    def test_no_duplicate_full_song_download_during_native_streaming(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        flow = source.split("def _extract_and_start(self", 1)[1].split(
+            "def _put_cache(self", 1
+        )[0]
+        self.assertNotIn("self._cache_audio_async(", flow)
+        self.assertIn("self._put_cache(video_url,", flow)
+        # Explicit favorite caching remains separate and opt-in.
+        self.assertIn("self._cache_current_favorite_async(url)", source)
+
+    def test_slow_network_watchdog_keeps_existing_buffer_and_position(self):
+        import time
+        state = SimpleNamespace(
+            _app_in_background=False, _last_bg_resume_ts=0,
+            _playback_desired=True, _user_paused=False,
+            _last_watch_pos=1000,
+            _buffer_watchdog_ts=time.time() - 12,
+            _buffering_started_at=0.0,
+            _resume_pos_ms=0,
+        )
+        calls = []
+        player = SimpleNamespace(getCurrentPosition=lambda: 1000)
+        media = SimpleNamespace(
+            android_player=player,
+            _is_prepared=lambda: True,
+            is_metered_connection=lambda: False,
+            is_network_available=lambda: True,
+        )
+        state._recover_stream = lambda *a, **kw: calls.append((a, kw))
+        func = isolated_definition(
+            "audio_screen.py", "_buffer_watchdog",
+            {"time": time, "ma": media},
+        )
+        func(state, 0)
+        self.assertEqual(calls, [])  # old 8-second watchdog restarted here
+        state._buffer_watchdog_ts = time.time() - 46
+        func(state, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "buffer_watchdog")
+        self.assertEqual(calls[0][1]["force_fresh"], True)
+        calls.clear()
+        state._buffer_watchdog_ts = time.time() - 90
+        media.is_network_available = lambda: False
+        func(state, 0)
+        self.assertEqual(calls, [])  # do not waste traffic while offline
+
+    def test_audio_first_video_start_and_metered_data_saver(self):
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        media = (ROOT / "media_android.py").read_text(encoding="utf-8")
+        self.assertIn("def is_metered_connection()", media)
+        self.assertIn("_video_enabled = not bool(ma.is_metered_connection())", code)
+        self.assertIn("self._launch_video_after_audio_start(gen)", code)
+        prepared = code.split("def _start_from_known_stream(", 1)[1].split(
+            "def _audio_cache_dir(", 1
+        )[0]
+        self.assertNotIn(
+            "target=lambda: self._auto_video_for_current(gen", prepared
+        )
+        self.assertIn("time.sleep(delay)", code)
+        self.assertIn("4.0 if ma.is_metered_connection() else 1.5", code)
+
+    def test_nonessential_related_fetch_waits_for_audio_and_metered_tap(self):
+        media = SimpleNamespace(is_metered_connection=lambda: True)
+        func = isolated_definition(
+            "audio_screen.py", "_ensure_related_current_v4",
+            {"ma": media},
+        )
+        player = SimpleNamespace(
+            _current_ensure_state=lambda: None,
+            _load_gen=3,
+            _audio_ready_for_extras_gen=3,
+        )
+        self.assertFalse(func(player))
+        media.is_metered_connection = lambda: False
+        player._audio_ready_for_extras_gen = -1
+        self.assertFalse(func(player))
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn('user_requested=True)', code)
+        self.assertIn('self._similar_collapsed = bool(ma.is_metered_connection())', code)
+        self.assertIn('5000 < remaining <= 25000', code)
+
+    def test_expiring_cdn_url_does_not_restart_audible_track(self):
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        expiry = code.split("def _schedule_expiry(self):", 1)[1].split(
+            "def toggle_play_pause", 1
+        )[0]
+        self.assertNotIn("_extract_and_start_gen", expiry)
+        self.assertIn("return None", expiry)
+        extractor = (ROOT / "ytdlp_helpers.py").read_text(encoding="utf-8")
+        self.assertIn("_get_cached_audio_info(video_url)", extractor)
+        self.assertIn("invalidate_audio_info_cache(", extractor)
+
+
 if __name__ == "__main__":
     unittest.main()
