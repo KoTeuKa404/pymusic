@@ -1651,10 +1651,15 @@ class PlaybackRegressionTests(unittest.TestCase):
         )
         v = "https://www.youtube.com/watch?v=eUgRBJ2akVw"
         first = fallback(v, aac140, {aac140})
-        self.assertEqual(first["format_id"], "139")
-        self.assertEqual(first["audio_url"], aac139)
+        # The old fallback selected slow-to-prepare HE-AAC 139; prefer an
+        # actual alternate container before retrying another MP4.
+        self.assertEqual(first["format_id"], "251")
+        self.assertEqual(first["audio_url"], opus251)
         self.assertEqual(
-            fallback(v, aac140, {aac140, aac139})["format_id"], "251"
+            fallback(v, aac140, {aac140, opus251})["format_id"], "139"
+        )
+        self.assertEqual(
+            fallback(v, opus251, {opus251})["format_id"], "140"
         )
         self.assertIsNone(
             fallback(v, aac140, {aac140, aac139, opus251})
@@ -1701,6 +1706,79 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn("[LATENCY] audio URL ready after", src)
         self.assertIn("[LATENCY] native prepared after", src)
         self.assertIn("[LATENCY] audio start queued after", src)
+
+
+    def test_android_audio_prefers_opus_only_while_device_supports_it(self):
+        from typing import Any, Dict, List, Optional
+        namespace = {
+            "Any": Any, "Dict": Dict, "List": List, "Optional": Optional,
+            "_ANDROID_OPUS_PRIMARY": True,
+            "_NATIVE_OPUS_REJECTED": False,
+        }
+        pick = isolated_definition(
+            "ytdlp_helpers.py", "_pick_best_audio", namespace
+        )
+        tracks = [
+            {"format_id": "140", "url": "https://cdn.example/140",
+             "ext": "m4a", "acodec": "mp4a.40.2",
+             "vcodec": "none", "abr": 129},
+            {"format_id": "139", "url": "https://cdn.example/139",
+             "ext": "m4a", "acodec": "mp4a.40.5",
+             "vcodec": "none", "abr": 48},
+            {"format_id": "249", "url": "https://cdn.example/249",
+             "ext": "webm", "acodec": "opus",
+             "vcodec": "none", "abr": 47},
+            {"format_id": "250", "url": "https://cdn.example/250",
+             "ext": "webm", "acodec": "opus",
+             "vcodec": "none", "abr": 70},
+            {"format_id": "251", "url": "https://cdn.example/251",
+             "ext": "webm", "acodec": "opus",
+             "vcodec": "none", "abr": 161},
+        ]
+        self.assertEqual(pick(tracks)["format_id"], "250")
+        self.assertEqual(
+            pick(tracks, prefer_compat=True)["format_id"], "140"
+        )
+        mark_failed = isolated_definition(
+            "ytdlp_helpers.py", "note_native_audio_format_failure",
+            namespace
+        )
+        mark_failed("250")
+        self.assertTrue(namespace["_NATIVE_OPUS_REJECTED"])
+        self.assertEqual(pick(tracks)["format_id"], "140")
+
+    def test_audio_source_client_starts_with_tv_before_broken_android_probe(self):
+        from typing import Tuple
+        namespace = {
+            "Tuple": Tuple,
+            "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+            "_ANDROID_CLIENT_MUXED_ONLY": True,
+            "_env_bool": lambda *_args: False,
+        }
+        order = isolated_definition(
+            "ytdlp_helpers.py", "_audio_client_order", namespace
+        )
+        self.assertEqual(order(), ("tv_embedded", "android"))
+
+    def test_startup_delays_channel_art_and_logs_first_real_progress(self):
+        author = (ROOT / "fast_track_switch_v9.py").read_text(
+            encoding="utf-8"
+        )
+        target = author.split("def start_author_lookup(", 1)[1].split(
+            "def metadata_after_audio(", 1
+        )[0]
+        self.assertLess(
+            target.index("while current() and not _audio_ready(audio_screen.ma):"),
+            target.index("avatar = audio_screen.ydlh._channel_avatar_from_oembed(")
+        )
+        native = (ROOT / "media_android.py").read_text(encoding="utf-8")
+        self.assertIn("[LATENCY] native MediaPlayer prepared in", native)
+        self.assertIn("[LATENCY] native error after", native)
+        self.assertIn("source_setup=", native)
+        ui = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn("[LATENCY] first real audio progress after", ui)
+        self.assertIn("ydlh.note_native_audio_format_failure(", ui)
+        self.assertIn("ydlh.invalidate_audio_info_cache(", ui)
 
 
 if __name__ == "__main__":

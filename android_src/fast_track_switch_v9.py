@@ -337,10 +337,16 @@ def _install_now() -> bool:
                         audio_screen.Clock.schedule_once(
                             lambda _dt, n=name: apply(name=n), 0
                         )
-                    # YouTube oEmbed returns a validated channel URL as
-                    # author_url. Fetch that page's og:image: it is the real
-                    # channel avatar, unlike oEmbed.thumbnail_url (video art).
-                    # Run after the name callback, off the playback/UI thread.
+                    # Preserve early channel *text*, but loading its large
+                    # HTML page and JPEG before audio starts competed with
+                    # yt-dlp/CDN preparation on the Redmi. Resolve avatar
+                    # only when native audio is actually playing.
+                    deadline = time.monotonic() + 40.0
+                    while current() and not _audio_ready(audio_screen.ma):
+                        if time.monotonic() >= deadline:
+                            print("[META] skipped channel art before audio startup")
+                            return
+                        time.sleep(0.25)
                     if not current():
                         return
                     avatar = audio_screen.ydlh._channel_avatar_from_oembed(

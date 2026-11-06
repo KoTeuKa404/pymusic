@@ -38,7 +38,23 @@ _AUDIO_INFO_CACHE_TTL = 120.0
 # back to Android if TV becomes unavailable. This avoids a redundant failed
 # extractor request without slowing down healthy Android audio clients.
 _AUDIO_CLIENT_HINT_LOCK = threading.RLock()
-_ANDROID_CLIENT_MUXED_ONLY = False
+# On Android 13 the "android" client consistently returned only muxed format
+# 18 (no audio-only sources), wasting ~6 seconds before TV's AAC URL.
+# Start with TV's proven audio-only source; fall back to android when needed.
+_ANDROID_CLIENT_MUXED_ONLY = True
+# Opus/WebM is a supported Android 13 decoder path and can avoid slow MP4
+# container probing. If the device rejects it, fall back to AAC for the
+# current and subsequent tracks without infinite retries.
+_ANDROID_OPUS_PRIMARY = bool(os.environ.get("ANDROID_ARGUMENT"))
+_NATIVE_OPUS_REJECTED = False
+
+
+def note_native_audio_format_failure(format_id: str) -> None:
+    global _NATIVE_OPUS_REJECTED
+    if str(format_id or "") in {"249", "250", "251"}:
+        _NATIVE_OPUS_REJECTED = True
+        print("[AUDIO] native Opus rejected; future tracks prefer AAC")
+
 
 
 def _get_cached_audio_info(video_url: str) -> dict | None:
@@ -124,19 +140,35 @@ def get_cached_alternate_audio_source(
             continue
         format_id = str(fmt.get("format_id") or "")
         ext = str(fmt.get("ext") or "").lower()
-        # Prefer another AAC source (format 139 is smaller, HE-AAC); use
-        # Opus only as a last resort because device support can vary.
-        if codec.startswith("mp4a") and ext in ("m4a", "mp4", "aac"):
-            rank = 0 if format_id == "139" else 1
-        elif codec.startswith("opus") and ext in ("webm", "opus"):
-            rank = 2
+        # Prefer a *different container* after a native -38. On this
+        # Android 13 device the HE-AAC 139 retry cost 18+ seconds, whereas
+        # WebM/Opus allows a smaller initial network footprint. If the
+        # failing source is Opus, use standard LC-AAC 140 as the fallback.
+        failed_opus = any(
+            str(item.get("url") or "") == str(failed_url or "")
+            and str(item.get("acodec") or "").lower().startswith("opus")
+            for item in cached.get("formats") or ()
+            if isinstance(item, dict)
+        )
+        if codec.startswith("opus") and ext in ("webm", "opus"):
+            rank = 3 if failed_opus or globals().get("_NATIVE_OPUS_REJECTED", False) else 0
+        elif codec.startswith("mp4a") and ext in ("m4a", "mp4", "aac"):
+            if format_id == "140":
+                rank = 0 if failed_opus else 1
+            elif format_id == "139":
+                rank = 2
+            else:
+                rank = 1
         else:
             continue
         try:
             bitrate = float(fmt.get("abr") or fmt.get("tbr") or 0)
         except (ValueError, TypeError):
             bitrate = 0
-        options.append((rank, bitrate, source, fmt))
+        # For Opus choose a moderate ~80 kbps stream instead of blindly
+        # choosing the lowest (often harsh 48 kbps) profile.
+        cost = abs(bitrate - 80.0) if codec.startswith("opus") else -bitrate
+        options.append((rank, cost, source, fmt))
     if not options:
         return None
     options.sort(key=lambda entry: (entry[0], entry[1]))
@@ -810,11 +842,36 @@ def _pick_best_audio(
         except (ValueError, TypeError):
             return 0.0
 
+    opus = [
+        fmt for fmt in valid
+        if str(fmt.get("acodec") or "").lower().startswith("opus")
+        and str(fmt.get("ext") or "").lower() in ("webm", "opus")
+    ]
     aac = [
         fmt for fmt in valid
-        if fmt.get("ext") in ("m4a", "mp4", "aac")
+        if str(fmt.get("ext") or "").lower() in ("m4a", "mp4", "aac")
         or "mp4a" in str(fmt.get("acodec") or "").lower()
     ]
+
+    # Kivy Android players currently select AAC even though yt-dlp supplies
+    # Opus in their bestaudio preference. On the connected Android 13
+    # handset, AAC 140 failed (-38) and AAC 139 took ~18 seconds to prepare.
+    # Start with a moderate-bitrate Opus/WebM stream when supported, while
+    # keeping an automatic AAC fallback. Desktop/non-Android stays on AAC.
+    opus_ok = (
+        not prefer_compat
+        and globals().get("_ANDROID_OPUS_PRIMARY", False)
+        and not globals().get("_NATIVE_OPUS_REJECTED", False)
+    )
+    if opus_ok and opus:
+        return min(
+            opus,
+            key=lambda fmt: (
+                abs(bitrate(fmt) - 80.0),
+                str(fmt.get("format_id") or "") != "250",
+            ),
+        )
+
     if aac:
         return max(
             aac,
@@ -824,14 +881,8 @@ def _pick_best_audio(
                 bitrate(fmt),
             ),
         )
-    if not prefer_compat:
-        opus = [
-            fmt for fmt in valid
-            if str(fmt.get("acodec") or "").lower().startswith("opus")
-            or fmt.get("ext") == "webm"
-        ]
-        if opus:
-            return max(opus, key=bitrate)
+    if not prefer_compat and opus:
+        return max(opus, key=bitrate)
     return max(valid, key=bitrate)
 
 

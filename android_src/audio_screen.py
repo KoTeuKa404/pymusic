@@ -2503,6 +2503,7 @@ class AudioPlayerScreen(Screen):
             self._playlist_url = None
         self._last_video_url = video_url
         self._audio_play_request_t0 = time.monotonic()
+        self._audio_first_progress_gen = -1
         self._audio_source_attempts = set()
         self._remember_recent(video_url, title, channel, str(thumb or ""))
         self._favorite = bool(is_favorite(video_url))
@@ -4562,6 +4563,16 @@ class AudioPlayerScreen(Screen):
                 pass
 
             current_source = str(getattr(self, "_stream_url", "") or "")
+            if what == -38 or extra == -38:
+                # Learn a device-specific native codec failure. This turns
+                # off future Opus-first attempts if the handset rejects
+                # WebM and keeps AAC as a safe fallback.
+                failed_format = str(getattr(self, "_stream_format_id", "") or "")
+                ydlh.note_native_audio_format_failure(failed_format)
+                if failed_format in ("249", "250", "251"):
+                    ydlh.invalidate_audio_info_cache(
+                        str(getattr(self, "_last_video_url", "") or "")
+                    )
             used = getattr(self, "_audio_source_attempts", None)
             if not isinstance(used, set):
                 used = set()
@@ -5232,6 +5243,16 @@ class AudioPlayerScreen(Screen):
                 pass
 
             ma._mp_start()
+            pending_art = getattr(self, "_pending_audio_art", None)
+            if (
+                isinstance(pending_art, tuple)
+                and len(pending_art) == 2 and pending_art[0] == gen
+            ):
+                def fetch_art(_dt, expect=gen, url=pending_art[1]):
+                    if self._is_current_gen(expect) and self._playback_desired:
+                        self._download_art_async(url)
+                Clock.schedule_once(fetch_art, 2.0)
+                self._pending_audio_art = None
             t0 = float(getattr(self, "_audio_play_request_t0", 0) or 0)
             if t0:
                 print(f"[LATENCY] audio start queued after {time.monotonic() - t0:.2f}s")
@@ -5506,7 +5527,9 @@ class AudioPlayerScreen(Screen):
                 self._thumb = info.get("thumb") or ""
                 Clock.schedule_once(lambda dt: self._sync_thumb_now(), 0)
                 if self._thumb:
-                    self._download_art_async(self._thumb)
+                    # Defer the cover HTTP request until audio can play.
+                    # This keeps thumbnail transfer off the critical path.
+                    self._pending_audio_art = (gen, self._thumb)
                 elif self._last_video_url:
                     cached_art = self._find_cached_art(self._last_video_url)
                     if cached_art:
@@ -6220,6 +6243,27 @@ class AudioPlayerScreen(Screen):
                 dur = ma.android_player.getDuration() or 0
             except Exception:
                 return
+
+        # Start-to-first-real-progress is the metric users perceive.
+        # MediaPlayer.start() can return before a single frame is audible.
+        try:
+            gen = int(self._load_gen)
+            if (
+                int(pos or 0) > 0
+                and self._playback_desired
+                and not self._user_paused
+                and getattr(self, "_audio_first_progress_gen", -1) != gen
+            ):
+                self._audio_first_progress_gen = gen
+                started = float(getattr(self, "_audio_play_request_t0", 0) or 0)
+                if started:
+                    print(
+                        f"[LATENCY] first real audio progress after "
+                        f"{time.monotonic() - started:.2f}s "
+                        f"format={self._stream_format_id!r}"
+                    )
+        except Exception:
+            pass
 
         if (
             self._bad_dur_hits >= 4
