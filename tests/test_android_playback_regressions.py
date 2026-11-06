@@ -1543,5 +1543,53 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn("invalidate_audio_info_cache(", extractor)
 
 
+    def test_local_audio_cache_rejects_partial_and_external_files(self):
+        import hashlib
+        import os
+        import tempfile
+
+        fn = isolated_definition(
+            "audio_screen.py", "_find_cached_audio", {
+                "os": os,
+                "load_recent": lambda: [],
+            }
+        )
+        url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
+        key = hashlib.md5(url.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            cache_dir = os.path.join(root, "audio")
+            os.mkdir(cache_dir)
+            partial = os.path.join(cache_dir, key + ".m4a.part")
+            complete = os.path.join(cache_dir, key + ".m4a")
+            with open(partial, "wb") as fp:
+                fp.write(b"x" * 1024)
+            owner = SimpleNamespace(
+                _audio_cache_dir=lambda: cache_dir,
+                _cache_key=lambda _url: key,
+            )
+            self.assertIsNone(fn(owner, url))
+            with open(complete, "wb") as fp:
+                fp.write(b"x" * 1024)
+            self.assertEqual(fn(owner, url), complete)
+            os.remove(complete)
+            foreign = os.path.join(root, key + ".m4a")
+            with open(foreign, "wb") as fp:
+                fp.write(b"x" * 1024)
+            self.assertIsNone(fn(owner, url))
+
+    def test_explicit_favorite_cache_has_tls_size_redirect_and_disk_guards(self):
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        start = source.index("def _download_audio_locally(")
+        end = source.index("def _cache_audio_async(", start)
+        cache = source[start:end]
+        self.assertIn("max_bytes = 24 * 1024 * 1024", cache)
+        self.assertIn("total >= 128 * 1024 * 1024", cache)
+        self.assertIn("ssl.create_default_context(cafile=certifi.where())", cache)
+        self.assertIn("class RejectRedirect(", cache)
+        self.assertIn('"untrusted audio redirect destination"', cache)
+        self.assertIn("os.replace(tmp_path, path)", cache)
+        self.assertNotIn("_create_unverified_context", cache)
+
+
 if __name__ == "__main__":
     unittest.main()
