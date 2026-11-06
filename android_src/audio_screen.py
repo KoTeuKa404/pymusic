@@ -1190,6 +1190,7 @@ class AudioPlayerScreen(Screen):
         self._buffering_started_at = 0.0
         self._next_prefetch_requested_gen = -1
         self._video_launch_requested_gen = -1
+        self._audio_ready_for_extras_gen = -1
 
         self._resume_pos_ms = 0      # позиція для резюму після падіння/паузи
         # Android mobile/capped data: start in audio-only mode by default.
@@ -1245,7 +1246,9 @@ class AudioPlayerScreen(Screen):
         self._playlist_render_gen = 0
         self._similar_render_gen = 0
         self._playlist_collapsed = False
-        self._similar_collapsed = False
+        # Avoid 1+ MB related/watch-page requests on capped data until the
+        # user expands the related section. Audio stays the priority.
+        self._similar_collapsed = bool(ma.is_metered_connection())
         self._initialize_java_transport()
         for delay in (0, 0.08, 0.25):
             Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
@@ -2511,6 +2514,7 @@ class AudioPlayerScreen(Screen):
         self._stream_format_id = ""
         self._next_prefetch_requested_gen = -1
         self._video_launch_requested_gen = -1
+        self._audio_ready_for_extras_gen = -1
         self._buffering_started_at = 0.0
         self._views_text = ""
         self._published_date = ""
@@ -3294,6 +3298,8 @@ class AudioPlayerScreen(Screen):
 
     def toggle_similar_collapsed(self):
         self._similar_collapsed = not bool(getattr(self, "_similar_collapsed", False))
+        if not self._similar_collapsed and not self._related_items:
+            self._ensure_related_current_v4(force=False, user_requested=True)
         self._render_similar_ui(force=True)
 
     def _set_collapsible_header(self, row, label, button, visible: bool, title: str, collapsed: bool):
@@ -3744,8 +3750,16 @@ class AudioPlayerScreen(Screen):
             print("[CURRENT-V4] search fallback failed:", exc)
         return output
 
-    def _ensure_related_current_v4(self, force=False, auto_advance=False):
+    def _ensure_related_current_v4(self, force=False, auto_advance=False, user_requested=False):
         self._current_ensure_state()
+        # Skip nonessential related extraction until audio has *actually*
+        # started. On metered links, only auto-next or an explicit expansion
+        # of the section may fetch these bandwidth-heavy watch-next pages.
+        if not auto_advance and not user_requested:
+            if ma.is_metered_connection() or getattr(
+                self, "_audio_ready_for_extras_gen", -1
+            ) != int(getattr(self, "_load_gen", -1)):
+                return False
         url = _current_video_url_of(self)
         if not url:
             print("[CURRENT-V4] related skipped: no current video URL")
@@ -5093,6 +5107,15 @@ class AudioPlayerScreen(Screen):
                 pass
 
             ma._mp_start()
+            self._audio_ready_for_extras_gen = gen
+            if not ma.is_metered_connection():
+                Clock.schedule_once(
+                    lambda _dt, expected=gen: (
+                        self._ensure_related_current_v4(force=False)
+                        if self._is_current_gen(expected) else None
+                    ),
+                    2.5,
+                )
             try:
                 # Native video starts independently after audio. Do not
                 # stop a video that is already preparing merely because the
