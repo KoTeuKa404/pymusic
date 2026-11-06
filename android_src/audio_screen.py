@@ -630,6 +630,33 @@ class _CurrentTapLabel(ButtonBehavior, Label):
     pass
 
 
+def _related_duration_label(value: object) -> str:
+    """Turn actual YouTube duration metadata into a compact badge.
+
+    Seconds are valid when provided as a number. A missing/unknown duration
+    is left blank, never estimated from the thumbnail or upload time.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    raw = str(value).strip()
+    if re.fullmatch(r"(?:\d{1,3}:)?\d{1,2}:\d{2}", raw):
+        return raw
+    if isinstance(value, (int, float)) or re.fullmatch(r"\d{1,7}", raw):
+        try:
+            seconds = int(float(value))
+            if not 0 < seconds < 100 * 3600:
+                return ""
+            hours, remaining = divmod(seconds, 3600)
+            minutes, seconds = divmod(remaining, 60)
+            return (
+                f"{hours}:{minutes:02d}:{seconds:02d}"
+                if hours else f"{minutes}:{seconds:02d}"
+            )
+        except (ValueError, TypeError, OverflowError):
+            return ""
+    return ""
+
+
 def _format_published_age(raw_date: object, *, today: date | None = None) -> str:
     """Format an actual yt-dlp upload/release date, never estimate missing data.
 
@@ -3317,6 +3344,19 @@ class AudioPlayerScreen(Screen):
         row = Factory.SimilarItem()
         row.ids.similar_title.text = title
         row.ids.similar_channel.text = channel
+
+        # YouTube watch-next sends native badge text (14:36), a channel
+        # field and the optional views/release-age metadata. Preserve those
+        # through normalization; do not guess missing values.
+        row.ids.similar_duration.text = _related_duration_label(
+            item.get("duration") or item.get("duration_string")
+        )
+        views = str(item.get("views_text") or "").strip()
+        published = str(item.get("published_text") or "").strip()
+        row.ids.similar_meta.text = " • ".join(
+            part for part in (views, published) if part
+        )
+
         thumb = item.get("thumb") or ""
         vid = Playlist._normalize_video_id(str(item.get("url") or ""))
         if not vid:
@@ -3601,7 +3641,10 @@ class AudioPlayerScreen(Screen):
             url,
             tuple(
                 (str(item.get("url") or ""), str(item.get("video_id") or ""),
-                 str(item.get("title") or ""), str(item.get("thumb") or ""))
+                 str(item.get("title") or ""), str(item.get("thumb") or ""),
+                 str(item.get("channel") or ""), str(item.get("duration") or ""),
+                 str(item.get("views_text") or ""),
+                 str(item.get("published_text") or ""))
                 for item in related
             ),
         )
@@ -5713,6 +5756,12 @@ class AudioPlayerScreen(Screen):
         self._set_video_mode(False)
 
     def _normalize_related(self, items):
+        """Keep YouTube's real card metadata, while normalizing video IDs.
+
+        Previous implementation dropped duration, view count and upload age.
+        That caused thumbnails with no time badge and metadata-free rows
+        even though the watch-next API had supplied the relevant fields.
+        """
         out = []
         seen = set()
         current_vid = ""
@@ -5753,6 +5802,28 @@ class AudioPlayerScreen(Screen):
             if vid:
                 thumb = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
 
+            # Use official watch-next text when present; numeric yt-dlp
+            # counts are a supported fallback. Do not synthesize unknown
+            # metrics or scrape eight extra pages in the UI worker.
+            views_text = e.get("views_text") or e.get("view_count_text") or ""
+            views_text = str(views_text).strip() if isinstance(views_text, str) else ""
+            if not views_text and e.get("view_count") is not None:
+                views_text = self._fmt_views(e["view_count"])
+
+            published_text = (
+                e.get("published_text")
+                or e.get("published_time_text")
+                or ""
+            )
+            published_text = (
+                str(published_text).strip()
+                if isinstance(published_text, str) else ""
+            )
+            if not published_text:
+                published_text = _format_published_age(
+                    e.get("upload_date") or e.get("release_date")
+                )
+
             out.append(
                 {
                     "url": url,
@@ -5760,6 +5831,13 @@ class AudioPlayerScreen(Screen):
                     "channel": channel,
                     "thumb": thumb,
                     "video_id": vid,
+                    "duration": _related_duration_label(
+                        e.get("duration")
+                        or e.get("duration_string")
+                        or e.get("length_seconds")
+                    ),
+                    "views_text": views_text,
+                    "published_text": published_text,
                 }
             )
             if len(out) >= 12:
