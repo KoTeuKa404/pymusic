@@ -3531,10 +3531,8 @@ class AudioPlayerScreen(Screen):
             autoplay_button = self.ids.get("autoplay_btn")
             if autoplay_button is not None:
                 enabled = bool(getattr(self, "_auto_skip", True))
-                autoplay_button.icon = "autorenew" if enabled else "play-circle-outline"
-                autoplay_button.text_color = (
-                    (0.12, 0.48, 0.86, 1) if enabled
-                    else (0.56, 0.56, 0.56, 1)
+                autoplay_button.source = (
+                    "ico/icoauto_on.png" if enabled else "ico/icoauto_off.png"
                 )
                 autoplay_button.disabled = not has_video
             collapsed = bool(getattr(self, "_similar_collapsed", False))
@@ -5426,25 +5424,66 @@ class AudioPlayerScreen(Screen):
 
     # ==================== UI wiring ====================
 
-    def _update_now_playing_badge(self, playing: bool | None = None):
-        # A real status indicator for the selected video; never show it when
-        # there is no current track. It also responds to play/pause callbacks.
-        badge = self.ids.get("now_playing_status")
-        if badge is None:
+    def open_current_channel(self):
+        """Open the selected video's verified YouTube author in the Web tab.
+
+        Both the avatar and name call this function. Network resolution runs
+        off the Kivy thread; a generation check prevents a delayed lookup
+        from opening an earlier track's channel after a fast switch.
+        """
+        video_url = str(getattr(self, "_last_video_url", "") or "")
+        if not video_url:
             return
-        has_video = bool(str(getattr(self, "_last_video_url", "") or ""))
-        badge.height = dp(18) if has_video else 0
-        badge.opacity = 1 if has_video else 0
-        if not has_video:
-            badge.text = ""
-        elif playing is False or (playing is None and self._user_paused):
-            badge.text = "●  НА ПАУЗІ"
-        else:
-            badge.text = "●  ЗАРАЗ ВІДТВОРЮЄТЬСЯ"
+        gen = int(getattr(self, "_load_gen", 0) or 0)
+        key = (video_url, gen)
+        if getattr(self, "_opening_channel_for", None) == key:
+            return
+        self._opening_channel_for = key
+
+        def navigate(channel_url: str):
+            if getattr(self, "_opening_channel_for", None) != key:
+                return
+            self._opening_channel_for = None
+            if (
+                str(getattr(self, "_last_video_url", "") or "") != video_url
+                or int(getattr(self, "_load_gen", 0) or 0) != gen
+                or not self._is_screen_active()
+            ):
+                return
+            safe_url = ydlh._validated_youtube_channel_url(channel_url)
+            if not safe_url:
+                ma.log("[CHANNEL] verified channel URL unavailable")
+                return
+            try:
+                app = App.get_running_app()
+                root = getattr(app, "root", None)
+                if root is None or not hasattr(root, "set_screen"):
+                    ma.log("[CHANNEL] Web tab unavailable")
+                    return
+                # Navigate using the existing WebView rather than creating
+                # an external browser or handling Android intents.
+                root.set_screen("web")
+                ma.webview_show(safe_url)
+                ma.log("[CHANNEL] opened verified YouTube author")
+            except Exception as exc:
+                ma.log(f"[CHANNEL] navigation failed: {type(exc).__name__}")
+
+        def lookup():
+            try:
+                channel_url = ydlh._channel_url_from_oembed(video_url)
+            except Exception as exc:
+                ma.log(f"[CHANNEL] author URL lookup failed: {type(exc).__name__}")
+                channel_url = ""
+            Clock.schedule_once(
+                lambda _dt, url=channel_url: navigate(url), 0
+            )
+
+        threading.Thread(
+            target=lookup, name="pymusic-channel-navigation", daemon=True
+        ).start()
 
     def _sync_ui_loaded(self):
         self._queue_metadata_layout(0.025)
-        self._update_now_playing_badge()
         _player_likes_ensure_and_tune(self)
         current = str(getattr(self, "_last_video_url", "") or "")
         if current:
@@ -5753,10 +5792,6 @@ class AudioPlayerScreen(Screen):
 
     def _ui_set_playing(self, playing: bool):
         try:
-            self._update_now_playing_badge(playing=playing)
-        except Exception:
-            pass
-        try:
             btn = self.ids.play_pause_btn
             if hasattr(btn, "icon") and btn.icon:
                 btn.icon = "ico/icopausebutton.png" if playing else "ico/icoplaybutton.png"
@@ -5973,9 +6008,11 @@ class AudioPlayerScreen(Screen):
     def toggle_autoskip(self, *a):
         self._auto_skip = not self._auto_skip
         try:
-            btn = self.ids.get("autoskip_btn")
-            if btn:
-                btn.source = "ico/icoauto_on.png" if self._auto_skip else "ico/icoauto_off.png"
+            src = "ico/icoauto_on.png" if self._auto_skip else "ico/icoauto_off.png"
+            for button_id in ("autoskip_btn", "autoplay_btn"):
+                btn = self.ids.get(button_id)
+                if btn:
+                    btn.source = src
         except Exception:
             pass
         Clock.schedule_once(lambda _dt: self._render_current_lower_v4(), 0)
