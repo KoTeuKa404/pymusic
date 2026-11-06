@@ -204,44 +204,118 @@ def _thumb_from_node(node: Any) -> str:
     return ""
 
 
+def _lockup_metadata_rows(renderer: dict[str, Any]) -> list[dict[str, Any]]:
+    """Current YouTube lockup: channel in row 0, views/date in row 1.
+
+    Do not flatten the entire lockup metadata: the menu and navigation tree
+    contain unrelated labels that can be mistaken for the channel name.
+    """
+    metadata = renderer.get("metadata") or {}
+    lockup = (metadata.get("lockupMetadataViewModel") or {}) if isinstance(metadata, dict) else {}
+    body = (lockup.get("metadata") or {}) if isinstance(lockup, dict) else {}
+    content = (body.get("contentMetadataViewModel") or {}) if isinstance(body, dict) else {}
+    rows = content.get("metadataRows") or []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
 def _channel(renderer: dict[str, Any]) -> str:
     for key in (
-        "shortBylineText",
-        "longBylineText",
-        "ownerText",
-        "byline",
-        "subtitle",
+        "shortBylineText", "longBylineText", "ownerText", "byline", "subtitle",
     ):
         value = _text(renderer.get(key))
         if value:
             return value
 
-    metadata = renderer.get("metadata")
-    if isinstance(metadata, dict):
-        # Modern lockupViewModel keeps author/metadata deeper in this subtree.
-        rows = metadata.get("lockupMetadataViewModel") or metadata
-        value = _first_text(rows)
-        if value:
-            return value
+    rows = _lockup_metadata_rows(renderer)
+    if rows:
+        parts = rows[0].get("metadataParts") or []
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict):
+                    value = _text(part.get("text")).strip()
+                    if value:
+                        return value
     return ""
 
 
+def _views_and_published(renderer: dict[str, Any]) -> tuple[str, str]:
+    """Use YouTube's actual displayed stats, not estimated view counts."""
+    views = (
+        _text(renderer.get("shortViewCountText"))
+        or _text(renderer.get("viewCountText"))
+    )
+    published = _text(renderer.get("publishedTimeText"))
+    rows = _lockup_metadata_rows(renderer)
+    if len(rows) > 1:
+        parts = rows[1].get("metadataParts") or []
+        if isinstance(parts, list):
+            fields = [
+                _text(part.get("text")).strip()
+                for part in parts if isinstance(part, dict)
+            ]
+            fields = [value for value in fields if value]
+            if not views and fields:
+                views = fields[0]
+            if not published and len(fields) > 1:
+                published = fields[1]
+    return views.strip(), published.strip()
+
+
 def _duration(renderer: dict[str, Any]) -> str:
-    value = _text(renderer.get("lengthText"))
+    """Extract thumbnail length for legacy and current lockup renderers."""
+    def valid(value: Any) -> str:
+        value = _text(value).strip() if isinstance(value, dict) else str(value or "").strip()
+        return value if re.fullmatch(r"(?:\d{1,3}:)?\d{1,2}:\d{2}", value) else ""
+
+    value = valid(renderer.get("lengthText"))
     if value:
         return value
+    seconds = renderer.get("lengthSeconds")
     try:
-        overlays = renderer.get("thumbnailOverlays") or []
-        for overlay in overlays:
-            if not isinstance(overlay, dict):
-                continue
-            value = _text(
-                (overlay.get("thumbnailOverlayTimeStatusRenderer") or {}).get("text")
-            )
-            if value:
-                return value
-    except Exception:
+        if seconds is not None and 0 < int(seconds) < 100 * 3600:
+            n = int(seconds)
+            h, rem = divmod(n, 3600)
+            m, sec = divmod(rem, 60)
+            return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+    except (ValueError, TypeError, OverflowError):
         pass
+
+    for overlay in renderer.get("thumbnailOverlays") or []:
+        if not isinstance(overlay, dict):
+            continue
+        value = valid(
+            (overlay.get("thumbnailOverlayTimeStatusRenderer") or {}).get("text")
+        )
+        if value:
+            return value
+
+    # New lockupViewModel has thumbnailOverlayBadgeViewModel under contentImage,
+    # rather than the legacy thumbnailOverlays/lengthText fields. Search only
+    # the bounded thumbnail tree (never the giant menu command subtree).
+    stack = [renderer.get("contentImage") or {}]
+    seen = 0
+    while stack and seen < 200:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, list):
+            stack.extend(node[:30])
+            continue
+        if not isinstance(node, dict):
+            continue
+        if "thumbnailBadgeViewModel" in node:
+            badge = node.get("thumbnailBadgeViewModel") or {}
+            if isinstance(badge, dict):
+                value = valid(badge.get("text") or badge.get("badgeText"))
+                if value:
+                    return value
+        for key, child in node.items():
+            if key in (
+                "contentImage", "thumbnailViewModel", "thumbnailOverlayBadgeViewModel",
+                "thumbnailBadgeViewModel", "thumbnailBottomOverlayViewModel",
+                "thumbnail", "overlays", "badges",
+                "badge", "image", "sources",
+            ) and isinstance(child, (dict, list)):
+                stack.append(child)
     return ""
 
 
@@ -273,6 +347,7 @@ def _collect_renderers(
             return
 
         seen.add(video_id)
+        views_text, published_text = _views_and_published(renderer)
         output.append(
             {
                 "id": video_id,
@@ -285,6 +360,8 @@ def _collect_renderers(
                     or f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
                 ),
                 "duration": _duration(renderer),
+                "views_text": views_text,
+                "published_text": published_text,
             }
         )
 

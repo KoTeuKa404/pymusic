@@ -1211,5 +1211,209 @@ class PlaybackRegressionTests(unittest.TestCase):
             self.assertTrue((ROOT / "ico" / icon).is_file(), icon)
 
 
+    def test_related_legacy_and_modern_youtube_cards_have_real_metadata(self):
+        """Exercise YouTube 2026 lockup and older compact video models."""
+        import html
+        import re
+        from typing import Any
+
+        scope = {"html": html, "re": re, "Any": Any}
+        for name in (
+            "_text", "_first_text", "_thumb_from_node",
+            "_lockup_metadata_rows", "_channel", "_views_and_published",
+            "_duration", "_collect_renderers",
+        ):
+            isolated_definition("related_videos.py", name, scope)
+        modern = {
+            "contentId": "eUgRBJ2akVw",
+            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+            "metadata": {
+                "lockupMetadataViewModel": {
+                    "title": {"content": "Grimwind - Хаос Неделимый"},
+                    "metadata": {
+                        "contentMetadataViewModel": {
+                            "metadataRows": [
+                                {"metadataParts": [
+                                    {"text": {"content": "Grimwind"}}
+                                ]},
+                                {"metadataParts": [
+                                    {"text": {"content": "251 тис."}},
+                                    {"text": {"content": "5 р. тому"}},
+                                ]},
+                            ]
+                        }
+                    },
+                }
+            },
+            "contentImage": {
+                "thumbnailViewModel": {
+                    "image": {"sources": [
+                        {"url": "https://i.ytimg.com/vi/eUgRBJ2akVw/mqdefault.jpg"}
+                    ]},
+                    "overlays": [
+                        {"thumbnailBottomOverlayViewModel": {
+                            "badges": [
+                                {"thumbnailBadgeViewModel": {
+                                    "text": "29:27", "animatedText": "Зараз відтворюється"
+                                }}
+                            ]
+                        }}
+                    ],
+                }
+            },
+        }
+        legacy = {
+            "videoId": "TBDXLfm-eNE",
+            "title": {"simpleText": "Keepers of Death"},
+            "shortBylineText": {"runs": [{"text": "Champlloo"}]},
+            "shortViewCountText": {"simpleText": "90 тис. переглядів"},
+            "publishedTimeText": {"simpleText": "4 роки тому"},
+            "lengthText": {"simpleText": "14:36"},
+            "thumbnail": {"thumbnails": [
+                {"url": "https://i.ytimg.com/vi/TBDXLfm-eNE/mqdefault.jpg"}
+            ]},
+        }
+        result = scope["_collect_renderers"](
+            {"items": [
+                {"lockupViewModel": modern},
+                {"compactVideoRenderer": legacy},
+            ]},
+            "LTsbyX-l06Y", 8,
+        )
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["channel"], "Grimwind")
+        self.assertEqual(result[0]["duration"], "29:27")
+        self.assertEqual(result[0]["views_text"], "251 тис.")
+        self.assertEqual(result[0]["published_text"], "5 р. тому")
+        self.assertEqual(result[1]["channel"], "Champlloo")
+        self.assertEqual(result[1]["duration"], "14:36")
+        self.assertEqual(result[1]["views_text"], "90 тис. переглядів")
+        self.assertEqual(result[1]["published_text"], "4 роки тому")
+
+    def test_related_normalization_keeps_duration_and_stats(self):
+        import re
+        from datetime import date, datetime
+
+        video_id = re.compile(r"([A-Za-z0-9_-]{11})")
+        duration = isolated_definition(
+            "audio_screen.py", "_related_duration_label", {"re": re}
+        )
+        age = isolated_definition(
+            "audio_screen.py", "_format_published_age",
+            {"date": date, "datetime": datetime, "re": re},
+        )
+        playlist = SimpleNamespace(
+            _normalize_video_id=lambda value: (
+                video_id.search(str(value)).group(1)
+                if video_id.search(str(value)) else ""
+            ),
+            _video_id_from_thumb_url=lambda value: "",
+            _normalize_video_url=lambda value: (
+                "https://www.youtube.com/watch?v=" + value
+                if len(value) == 11 else value
+            ),
+            _normalize_img_url=lambda value: value,
+        )
+        normalizer = isolated_definition(
+            "audio_screen.py", "_normalize_related",
+            {
+                "Playlist": playlist,
+                "_verified_channel_name": lambda name, title: name or "",
+                "_format_published_age": age,
+                "_related_duration_label": duration,
+            },
+        )
+        player = SimpleNamespace(
+            _last_video_url="https://www.youtube.com/watch?v=LTsbyX-l06Y",
+            _fmt_views=lambda n: str(n) + " переглядів",
+        )
+        result = normalizer(player, [
+            {"video_id": "eUgRBJ2akVw", "title": "Grimwind title",
+             "channel": "Grimwind", "duration": "29:27",
+             "views_text": "251 тис.", "published_text": "5 р. тому"},
+            {"video_id": "TBDXLfm-eNE", "title": "Legacy",
+             "uploader": "Champlloo", "duration": 876,
+             "view_count": 90000, "upload_date": "bad date"},
+            {"video_id": "LTsbyX-l06Y", "title": "Currently playing"},
+        ])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["duration"], "29:27")
+        self.assertEqual(result[0]["channel"], "Grimwind")
+        self.assertEqual(result[0]["views_text"], "251 тис.")
+        self.assertEqual(result[0]["published_text"], "5 р. тому")
+        self.assertEqual(result[1]["duration"], "14:36")
+        self.assertEqual(result[1]["views_text"], "90000 переглядів")
+        self.assertEqual(result[1]["published_text"], "")
+        self.assertEqual(duration(None), "")
+        self.assertEqual(duration(0), "")
+        self.assertEqual(duration("not known"), "")
+
+    def test_related_row_renders_duration_and_youtube_statistics(self):
+        import re
+
+        duration = isolated_definition(
+            "audio_screen.py", "_related_duration_label", {"re": re}
+        )
+        fields = (
+            "similar_title", "similar_channel", "similar_duration",
+            "similar_meta", "similar_thumb",
+        )
+        row = SimpleNamespace(
+            ids=SimpleNamespace(**{
+                key: SimpleNamespace(text="", source="") for key in fields
+            }),
+            bind=lambda **_kw: None,
+        )
+        factory = SimpleNamespace(SimilarItem=lambda: row)
+        playlist = SimpleNamespace(
+            _normalize_video_id=lambda value: (
+                "eUgRBJ2akVw" if "eUgRBJ2akVw" in value else ""
+            ),
+            _video_id_from_thumb_url=lambda value: "",
+        )
+        render = isolated_definition(
+            "audio_screen.py", "_make_similar_row",
+            {
+                "Factory": factory,
+                "Playlist": playlist,
+                "_related_duration_label": duration,
+            },
+        )
+        owner = SimpleNamespace(
+            _set_playlist_thumb=lambda widget, thumb: setattr(
+                widget, "source", thumb
+            ),
+            _play_from_related_index=lambda i: i,
+        )
+        render(owner, 2, {
+            "url": "https://www.youtube.com/watch?v=eUgRBJ2akVw",
+            "title": "Grimwind - Хаос Неделимый",
+            "channel": "Grimwind",
+            "duration": "29:27",
+            "views_text": "251 тис.",
+            "published_text": "5 р. тому",
+        })
+        self.assertEqual(row.ids.similar_channel.text, "Grimwind")
+        self.assertEqual(row.ids.similar_duration.text, "29:27")
+        self.assertEqual(row.ids.similar_meta.text, "251 тис. • 5 р. тому")
+        self.assertIn("eUgRBJ2akVw", row.ids.similar_thumb.source)
+
+    def test_related_card_duration_badge_is_on_thumbnail_corner(self):
+        kv = (ROOT / "youtube_gui.kv").read_text(encoding="utf-8")
+        related = kv.split("<SimilarItem@ButtonBehavior+BoxLayout>:", 1)[1].split(
+            "<PlaylistTrackItem@ButtonBehavior+BoxLayout>:", 1
+        )[0]
+        self.assertIn("FloatLayout:", related)
+        self.assertIn("id: similar_thumb", related)
+        self.assertIn("id: similar_duration", related)
+        self.assertIn("id: similar_channel", related)
+        self.assertIn("id: similar_meta", related)
+        self.assertIn("pos_hint: {'right': 0.96, 'y': 0.06}", related)
+        self.assertIn("opacity: 1 if self.text else 0", related)
+        source = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn("str(item.get(\"duration\") or \"\")", source)
+        self.assertIn('str(item.get("published_text") or "")', source)
+
+
 if __name__ == "__main__":
     unittest.main()
