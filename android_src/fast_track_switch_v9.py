@@ -402,10 +402,12 @@ def _install_now() -> bool:
 
             def worker(expected_url=url, expected_gen=gen, token=key):
                 try:
-                    # Fresh extraction already carries title/channel/thumb and
-                    # marks _metadata_loaded_urls.  Waiting lets that path win,
-                    # so a duplicate yt-dlp extraction is normally avoided.
-                    deadline = time.monotonic() + 5.0
+                    # On the Redmi, cold yt-dlp+MediaPlayer takes >5s.
+                    # The old 5s timeout launched a SECOND yt-dlp extraction
+                    # while the first audio source was still preparing.
+                    # The author/oEmbed worker already fills the channel;
+                    # other optional metadata must never race the first sound.
+                    deadline = time.monotonic() + 30.0
                     while time.monotonic() < deadline:
                         if int(getattr(self, "_load_gen", -1)) != expected_gen:
                             return
@@ -429,6 +431,11 @@ def _install_now() -> bool:
                         str(getattr(self, "_last_video_url", "") or ""),
                         expected_url,
                     ):
+                        return
+                    # A slow/failed start must not spawn an unrelated full
+                    # extractor; doing so doubles network and Python CPU use.
+                    if not _audio_ready(media):
+                        print("[META] deferred full extraction until audio is audible")
                         return
                     if (expected_url in getattr(self, "_metadata_loaded_urls", set())
                         and audio_screen._verified_channel_name(

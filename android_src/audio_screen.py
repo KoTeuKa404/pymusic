@@ -2502,6 +2502,8 @@ class AudioPlayerScreen(Screen):
         if _clear:
             self._playlist_url = None
         self._last_video_url = video_url
+        self._audio_play_request_t0 = time.monotonic()
+        self._audio_source_attempts = set()
         self._remember_recent(video_url, title, channel, str(thumb or ""))
         self._favorite = bool(is_favorite(video_url))
         self._video_was_active = False
@@ -4463,6 +4465,11 @@ class AudioPlayerScreen(Screen):
         gen = self._load_gen if gen is None else gen
         if not self._is_current_gen(gen):
             return
+        source = str(getattr(self, "_stream_url", "") or "")
+        if source:
+            attempts = getattr(self, "_audio_source_attempts", None)
+            if isinstance(attempts, set):
+                attempts.add(source)
 
         self._pre_start_cleanup()
 
@@ -4486,6 +4493,9 @@ class AudioPlayerScreen(Screen):
         def _on_prepared(mp):
             if not self._is_current_gen(gen) or not self._playback_desired:
                 return
+            t0 = float(getattr(self, "_audio_play_request_t0", 0) or 0)
+            if t0:
+                print(f"[LATENCY] native prepared after {time.monotonic() - t0:.2f}s")
             # не стартуємо відразу, лише базові метадані
             try:
                 ma.set_media_metadata(
@@ -4551,8 +4561,48 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
-            # A failing URL must not be served from the short in-memory
-            # stream cache on the next recovery attempt.
+            current_source = str(getattr(self, "_stream_url", "") or "")
+            used = getattr(self, "_audio_source_attempts", None)
+            if not isinstance(used, set):
+                used = set()
+                self._audio_source_attempts = used
+            if current_source:
+                used.add(current_source)
+
+            # Android sometimes raises (-38,0) just after prepareAsync().
+            # On the previous build this triggered another 5-10s yt-dlp
+            # request for exactly the same AAC 140 stream. Use an already
+            # extracted, different signed audio URL first (no network I/O).
+            if (
+                (what == -38 or extra == -38)
+                and self._stream_error_hits <= 2
+                and self._last_video_url
+            ):
+                other = ydlh.get_cached_alternate_audio_source(
+                    self._last_video_url, current_source, used
+                )
+                if other and other.get("audio_url"):
+                    self._stream_url = other["audio_url"]
+                    self._stream_format_id = str(other.get("format_id") or "")
+                    self._headers = dict(other.get("http_headers") or {})
+                    used.add(self._stream_url)
+                    self._put_cache(
+                        self._last_video_url, self._stream_url,
+                        self._headers, self._expire_ts
+                    )
+                    print(
+                        "[AUDIO] native -38: retry from cached alternate "
+                        f"format={self._stream_format_id!r} without yt-dlp"
+                    )
+                    threading.Thread(
+                        target=lambda: self._start_from_known_stream(gen),
+                        name="pymusic-audio-alternate-native",
+                        daemon=True,
+                    ).start()
+                    return True
+
+            # Invalidate only after local sources have failed; a normal
+            # network recovery then refreshes expired CDN URLs.
             ydlh.invalidate_audio_info_cache(
                 str(getattr(self, "_last_video_url", "") or "")
             )
@@ -5182,7 +5232,16 @@ class AudioPlayerScreen(Screen):
                 pass
 
             ma._mp_start()
+            t0 = float(getattr(self, "_audio_play_request_t0", 0) or 0)
+            if t0:
+                print(f"[LATENCY] audio start queued after {time.monotonic() - t0:.2f}s")
             self._audio_ready_for_extras_gen = gen
+            Clock.schedule_once(
+                lambda _dt, expected=gen: (
+                    self._render_similar_ui(force=True)
+                    if self._is_current_gen(expected) else None
+                ), 0.8,
+            )
             if not ma.is_metered_connection():
                 Clock.schedule_once(
                     lambda _dt, expected=gen: (
@@ -5396,7 +5455,11 @@ class AudioPlayerScreen(Screen):
                 return
 
             self._stream_url = info["audio_url"]
+            getattr(self, "_audio_source_attempts", set()).add(self._stream_url)
             self._stream_format_id = str(info.get("format_id") or "")
+            started = float(getattr(self, "_audio_play_request_t0", 0) or 0)
+            if started:
+                print(f"[LATENCY] audio URL ready after {time.monotonic() - started:.2f}s")
             self._expire_ts = info.get("expire_ts")
             self._headers = info.get("http_headers", {})
             print(
@@ -5434,7 +5497,10 @@ class AudioPlayerScreen(Screen):
                 updated_meta = True
             related = info.get("related_videos") or []
             self._related_items = self._normalize_related(related)
-            Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
+            # Rendering related thumbnails starts 8 concurrent image fetches.
+            # Never compete with the current audio's native prepareAsync().
+            if getattr(self, "_audio_ready_for_extras_gen", -1) == gen:
+                Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
 
             if not self._thumb:
                 self._thumb = info.get("thumb") or ""
