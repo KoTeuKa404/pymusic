@@ -38,7 +38,10 @@ _AUDIO_INFO_CACHE_TTL = 120.0
 # back to Android if TV becomes unavailable. This avoids a redundant failed
 # extractor request without slowing down healthy Android audio clients.
 _AUDIO_CLIENT_HINT_LOCK = threading.RLock()
-_ANDROID_CLIENT_MUXED_ONLY = False
+# On Android 13 the "android" client consistently returned only muxed format
+# 18 (no audio-only sources), wasting ~6 seconds before TV's AAC URL.
+# Start with TV's proven audio-only source; fall back to android when needed.
+_ANDROID_CLIENT_MUXED_ONLY = True
 
 
 def _get_cached_audio_info(video_url: str) -> dict | None:
