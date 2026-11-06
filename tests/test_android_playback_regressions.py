@@ -1606,7 +1606,7 @@ class PlaybackRegressionTests(unittest.TestCase):
         end = source.index("def _cache_audio_async(", start)
         cache = source[start:end]
         self.assertIn("max_bytes = 24 * 1024 * 1024", cache)
-        self.assertIn("total >= 128 * 1024 * 1024", cache)
+        self.assertIn("total + 24 * 1024 * 1024 > 128 * 1024 * 1024", cache)
         self.assertIn("ssl.create_default_context(cafile=certifi.where())", cache)
         self.assertIn("class RejectRedirect(", cache)
         self.assertIn('"untrusted audio redirect destination"', cache)
