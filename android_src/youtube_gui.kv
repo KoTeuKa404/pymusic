@@ -4,13 +4,16 @@
     allow_stretch: True
     keep_ratio: True
 
+<ChannelNameButton@ButtonBehavior+Label>:
+    # Same layout as Label, with a channel navigation tap.
+
 <VideoTapArea@ButtonBehavior+Widget>:
     size_hint: 1, 1
 
 <CommentsPreview@ButtonBehavior+BoxLayout>:
     orientation: 'horizontal'
 
-<CircularAvatar@AsyncImage>:
+<CircularAvatar@ButtonBehavior+AsyncImage>:
     source: ''
     size_hint: None, None
     size: dp(44), dp(44)
@@ -434,19 +437,6 @@
                         padding: dp(16), dp(8), dp(16), dp(1)
                         spacing: 0
 
-                        Label:
-                            id: now_playing_status
-                            text: ''
-                            size_hint_y: None
-                            height: 0
-                            opacity: 0
-                            font_size: '11sp'
-                            bold: True
-                            halign: 'left'
-                            valign: 'middle'
-                            text_size: self.size
-                            color: 0.81, 0.13, 0.17, 1
-
                         ScrollView:
                             id: title_scroll
                             size_hint_y: None
@@ -495,8 +485,9 @@
                                 opacity: 0
                                 size: dp(44), dp(44)
                                 pos_hint: {'center_y': 0.5}
+                                on_release: root.open_current_channel()
     
-                            Label:
+                            ChannelNameButton:
                                 id: audio_channel
                                 text: ''
                                 size_hint_x: 1
@@ -511,6 +502,7 @@
                                 valign: 'middle'
                                 text_size: self.width, self.height
                                 color: 0.15, 0.15, 0.15, 1
+                                on_release: root.open_current_channel()
     
                             PNGIconButton:
                                 id: repeat_inline_btn
@@ -729,14 +721,11 @@
                             text_size: self.size
                             color: 0.42, 0.42, 0.42, 1
 
-                        MDIconButton:
+                        PNGIconButton:
                             id: autoplay_btn
-                            icon: 'autorenew'
-                            theme_text_color: 'Custom'
-                            text_color: 0.12, 0.48, 0.86, 1
-                            user_font_size: '22sp'
-                            size_hint: None, None
-                            size: dp(36), dp(36)
+                            source: 'ico/icoauto_on.png'
+                            size: dp(32), dp(32)
+                            pos_hint: {'center_y': 0.5}
                             on_release: root.toggle_autoskip()
 
                         MDIconButton:
