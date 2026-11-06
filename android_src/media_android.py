@@ -1004,6 +1004,20 @@ def is_network_available():
     except Exception:
         return False
 
+def is_metered_connection() -> bool:
+    """True for mobile/capped networks as reported by Android.
+
+    Do not poll the internet or rely on Wi-Fi SSIDs; Android's metering
+    policy also handles user-marked metered Wi-Fi and roaming.
+    """
+    try:
+        cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE)
+        return bool(cm.isActiveNetworkMetered())
+    except Exception:
+        # Preserve the previous video defaults on unsupported devices.
+        return False
+
+
 # ===================== MediaPlayer listeners =====================
 
 class OnCompletionListener(PythonJavaClass):
