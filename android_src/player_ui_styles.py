@@ -88,7 +88,8 @@ def apply_style(player, name=None):
     row.size_hint_y = None
     row.height = dp(cfg["row"])
     row.spacing = dp(cfg["gap"])
-    row.padding = (dp(2), dp(5), dp(2), dp(5))
+    # Consistent 2dp downward shift across classic/compact/comfortable.
+    row.padding = (dp(2), dp(7), dp(2), dp(3))
 
     avatar = ids.get("channel_avatar")
     if avatar is not None:
