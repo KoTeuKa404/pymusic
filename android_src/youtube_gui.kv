@@ -299,8 +299,9 @@
                 orientation: 'vertical'
                 size_hint_y: None
                 height: self.minimum_height
-                spacing: dp(10)
-                padding: 0, 0, 0, dp(14)
+                # Hidden 0-height rows must not contribute spacing.
+                spacing: 0
+                padding: 0, 0, 0, dp(6)
 
                 BoxLayout:
                     id: video_block
@@ -422,20 +423,34 @@
                     orientation: 'vertical'
                     size_hint_y: None
                     height: self.minimum_height
-                    spacing: dp(10)
-                    padding: 0, 0, 0, dp(14)
-    
+                    # Zero-height optional controls must not leave gaps.
+                    spacing: 0
+                    padding: 0, 0, 0, dp(2)
+
                     BoxLayout:
                         orientation: 'vertical'
                         size_hint_y: None
                         height: self.minimum_height
-                        padding: dp(16), dp(4), dp(16), dp(2)
+                        padding: dp(16), dp(8), dp(16), dp(1)
                         spacing: 0
-    
+
+                        Label:
+                            id: now_playing_status
+                            text: ''
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+                            font_size: '11sp'
+                            bold: True
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                            color: 0.81, 0.13, 0.17, 1
+
                         ScrollView:
                             id: title_scroll
                             size_hint_y: None
-                            height: min(audio_title.texture_size[1], dp(50)) if audio_title.text else 0
+                            height: min(audio_title.texture_size[1], dp(58)) if audio_title.text else 0
                             do_scroll_x: False
                             do_scroll_y: audio_title.texture_size[1] > self.height
                             bar_width: 0
@@ -444,10 +459,11 @@
                                 id: audio_title
                                 text: ''
                                 font_size: '20sp'
+                                bold: True
                                 halign: 'left'
                                 valign: 'top'
                                 text_size: self.width, None
-                                color: 0, 0, 0, 1
+                                color: 0.10, 0.12, 0.16, 1
                                 size_hint_y: None
                                 height: self.texture_size[1]
                                 padding: 0, 0
@@ -455,7 +471,9 @@
                         Label:
                             id: audio_views
                             text: ''
-                            font_size: '14sp'
+                            # Views and release age share a single compact
+                            # YouTube-style secondary information line.
+                            font_size: '13sp'
                             halign: 'left'
                             valign: 'top'
                             text_size: self.width, None
@@ -468,7 +486,8 @@
                             id: channel_actions_row
                             size_hint_y: None
                             height: dp(60)
-                            padding: dp(2), dp(6), dp(2), dp(6)
+                            # Shift all children together 2dp lower.
+                            padding: dp(2), dp(8), dp(2), dp(4)
                             spacing: dp(8)
     
                             CircularAvatar:
@@ -554,8 +573,9 @@
                             size_hint_x: 1
     
                     BoxLayout:
+                        # A thin divider, not the tall gray threshold.
                         size_hint_y: None
-                        height: dp(6)
+                        height: dp(1)
                         canvas.before:
                             Color:
                                 rgba: 0.93, 0.93, 0.93, 1
@@ -620,10 +640,7 @@
                             height: self.minimum_height
                             spacing: dp(4)
                             padding: dp(6), dp(6)
-                    BoxLayout:
-                        size_hint_y: None
-                        height: dp(4)
-    
+                    # No spacer between collapsed playlist and comments.
                     # Comments are loaded only when this row is tapped.
                     # The comment list opens in a bottom sheet, not in the
                     # scrolling recommendation list.

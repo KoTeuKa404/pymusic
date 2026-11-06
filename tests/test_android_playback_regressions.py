@@ -1014,5 +1014,89 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn("os.replace(tmp, path)", fn)
 
 
+    def test_youtube_age_comes_from_real_upload_date_and_handles_boundaries(self):
+        from datetime import date, datetime
+        import re
+        age = isolated_definition(
+            "audio_screen.py", "_format_published_age",
+            {"date": date, "datetime": datetime, "re": re},
+        )
+        today = date(2026, 11, 6)
+        self.assertEqual(age("20220501", today=today), "4 роки тому")
+        self.assertEqual(age("2022-05-01", today=today), "4 роки тому")
+        self.assertEqual(age("20261105", today=today), "учора")
+        self.assertEqual(age("20261106", today=today), "сьогодні")
+        self.assertEqual(age("20261101", today=today), "5 днів тому")
+        self.assertEqual(age("20261006", today=today), "1 місяць тому")
+        self.assertEqual(age("20251107", today=today), "11 місяців тому")
+        self.assertEqual(age("20261107", today=today), "")
+        self.assertEqual(age("20260230", today=today), "")
+        self.assertEqual(age("bogus", today=today), "")
+        self.assertEqual(age(None, today=today), "")
+
+    def test_youtube_video_header_has_no_hidden_spacer_gap(self):
+        kv = (ROOT / "youtube_gui.kv").read_text(encoding="utf-8")
+        content = kv.split("id: player_details_scroll", 1)[1]
+        before_comments = content.split("# Comments are loaded only", 1)[0]
+        # The layout contains invisible playlist/controls rows. A 10dp gap
+        # after each 0-height child previously created a ~50dp blank band.
+        self.assertIn("spacing: 0\n                padding: 0, 0, 0, dp(6)", content)
+        self.assertIn("spacing: 0\n                    padding: 0, 0, 0, dp(2)", content)
+        self.assertIn("id: now_playing_status", content)
+        self.assertIn("id: channel_actions_row", content)
+        self.assertIn("padding: dp(2), dp(8), dp(2), dp(4)", content)
+        self.assertNotIn(
+            "height: dp(4)\n    \n                    # Comments",
+            content,
+        )
+        self.assertIn("height: dp(1)", before_comments)
+
+    def test_youtube_channel_row_offset_survives_style_presets(self):
+        styles = (ROOT / "player_ui_styles.py").read_text(encoding="utf-8")
+        screen = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "row.padding = (dp(2), dp(7), dp(2), dp(3))", styles
+        )
+        self.assertIn("details.padding = (dp(16), dp(8), dp(16), dp(1))", screen)
+        self.assertIn("visible_title_h = min(title_h, dp(58))", screen)
+        self.assertIn("self._update_now_playing_badge(playing=playing)", screen)
+
+    def test_youtube_upload_date_propagates_to_header_without_guesswork(self):
+        source = (ROOT / "ytdlp_helpers.py").read_text(encoding="utf-8")
+        screen = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn('"upload_date": info.get("upload_date")', source)
+        self.assertIn('self._published_date = ""', screen)
+        self.assertIn('self._published_date = published', screen)
+        self.assertIn('_format_published_age(self._published_date)', screen)
+        self.assertIn('" • ".join(', screen)
+
+    def test_now_playing_badge_tracks_current_url_and_pause(self):
+        class Widget:
+            height = 0
+            opacity = 0
+            text = ""
+        from types import SimpleNamespace
+        badge = Widget()
+        show = isolated_definition(
+            "audio_screen.py", "_update_now_playing_badge",
+            {"dp": float},
+        )
+        player = SimpleNamespace(
+            ids={"now_playing_status": badge},
+            _last_video_url="https://www.youtube.com/watch?v=LTsbyX-l06Y",
+            _user_paused=False,
+        )
+        show(player, playing=True)
+        self.assertEqual(badge.height, 18)
+        self.assertEqual(badge.opacity, 1)
+        self.assertIn("ВІДТВОРЮЄТЬСЯ", badge.text)
+        show(player, playing=False)
+        self.assertIn("НА ПАУЗІ", badge.text)
+        player._last_video_url = ""
+        show(player, playing=False)
+        self.assertEqual(badge.height, 0)
+        self.assertEqual(badge.text, "")
+
+
 if __name__ == "__main__":
     unittest.main()

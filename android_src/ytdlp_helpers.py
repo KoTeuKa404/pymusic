@@ -792,7 +792,8 @@ def _extract_info_with_clients(
         # Continue until an actual audio-only stream is available.
         for key in ("channel", "uploader", "creator", "artist",
                     "channel_url", "channel_id", "channel_thumbnail",
-                    "uploader_thumbnail", "title", "thumbnail"):
+                    "uploader_thumbnail", "title", "thumbnail",
+                    "upload_date", "release_date"):
             if info.get(key) and not known_meta.get(key):
                 known_meta[key] = info[key]
         formats = info.get("formats") or []
@@ -877,6 +878,7 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         'title': str,                     # назва відео
         'channel': str,                   # канал/автор
         'view_count': Optional[int],      # кількість переглядів
+        'upload_date': str,                # YYYYMMDD від YouTube (якщо є)
         'channel_thumb': str,             # аватар/іконка каналу
         'related_videos': list,           # raw related videos list
         'expire_ts': Optional[int],       # UNIX time з параметра expire, якщо є
@@ -992,6 +994,9 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "title": title,
         "channel": channel,
         "view_count": view_count,
+        # Use only yt-dlp's actual publication date. Never guess the
+        # upload date from the current time or the audio extraction time.
+        "upload_date": info.get("upload_date") or info.get("release_date") or "",
         "channel_thumb": channel_thumb,
         "related_videos": related_videos,
         "expire_ts": expire_ts,
