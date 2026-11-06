@@ -36,8 +36,8 @@
 
 <SimilarItem@ButtonBehavior+BoxLayout>:
     size_hint_y: None
-    height: dp(76)
-    padding: dp(8), dp(6)
+    height: dp(92)
+    padding: dp(8), dp(7)
     spacing: dp(10)
     canvas.before:
         Color:
@@ -45,40 +45,85 @@
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(8), dp(8), dp(8), dp(8)]
+            radius: [dp(9), dp(9), dp(9), dp(9)]
 
-    ThumbImage:
-        id: similar_thumb
-        source: ''
+    FloatLayout:
+        # A true 16:9 card image with an overlaid YouTube-style time badge.
         size_hint: None, None
-        size: dp(96), dp(54)
-        allow_stretch: True
-        keep_ratio: True
-        nocache: True
+        size: dp(116), dp(65)
+        pos_hint: {'center_y': 0.5}
+
+        ThumbImage:
+            id: similar_thumb
+            source: ''
+            size_hint: 1, 1
+            pos_hint: {'x': 0, 'y': 0}
+            allow_stretch: True
+            keep_ratio: True
+            nocache: True
+
+        Label:
+            id: similar_duration
+            text: ''
+            size_hint: None, None
+            size: self.texture_size
+            pos_hint: {'right': 0.96, 'y': 0.06}
+            font_size: '11sp'
+            bold: True
+            color: 1, 1, 1, 1
+            opacity: 1 if self.text else 0
+            canvas.before:
+                Color:
+                    rgba: 0, 0, 0, 0.85 if self.text else 0
+                RoundedRectangle:
+                    pos: self.x - dp(4), self.y - dp(2)
+                    size: self.width + dp(8), self.height + dp(4)
+                    radius: [dp(4), dp(4), dp(4), dp(4)]
 
     BoxLayout:
         orientation: 'vertical'
-        spacing: dp(4)
+        spacing: dp(2)
+        padding: 0, dp(2), 0, 0
 
         Label:
             id: similar_title
             text: ''
-            font_size: '16sp'
+            font_size: '14sp'
+            bold: True
             halign: 'left'
             valign: 'top'
             text_size: self.width, None
-            color: 0, 0, 0, 1
+            color: 0.10, 0.10, 0.10, 1
             size_hint_y: None
-            height: self.texture_size[1]
+            height: min(self.texture_size[1], dp(36))
+            shorten: True
+            shorten_from: 'right'
 
         Label:
             id: similar_channel
             text: ''
-            font_size: '13sp'
+            font_size: '12sp'
             halign: 'left'
-            color: 0.5, 0.5, 0.5, 1
+            valign: 'middle'
+            text_size: self.width, self.height
+            shorten: True
+            shorten_from: 'right'
+            color: 0.42, 0.42, 0.42, 1
             size_hint_y: None
-            height: self.texture_size[1]
+            height: dp(18) if self.text else 0
+
+        Label:
+            id: similar_meta
+            text: ''
+            font_size: '11sp'
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.width, self.height
+            shorten: True
+            shorten_from: 'right'
+            color: 0.46, 0.46, 0.46, 1
+            size_hint_y: None
+            height: dp(17) if self.text else 0
 
 <PlaylistTrackItem@ButtonBehavior+BoxLayout>:
     size_hint_y: None
