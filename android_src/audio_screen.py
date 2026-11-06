@@ -4712,7 +4712,9 @@ class AudioPlayerScreen(Screen):
                 if entry.is_file(follow_symlinks=False)
                 and not entry.name.endswith(".part")
             )
-            if total >= 128 * 1024 * 1024:
+            # Reserve capacity for the entire maximum single-file download,
+            # so the final total can never exceed the advertised 128 MiB.
+            if total + 24 * 1024 * 1024 > 128 * 1024 * 1024:
                 print("[AUDIO] optional favorite cache is at 128 MiB limit")
                 return None
         except (OSError, ValueError):
