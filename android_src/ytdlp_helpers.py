@@ -79,6 +79,80 @@ def _cache_audio_info(video_url: str, result: dict) -> None:
             _AUDIO_INFO_CACHE.pop(next(iter(_AUDIO_INFO_CACHE)))
 
 
+def get_cached_alternate_audio_source(
+    video_url: str,
+    failed_url: str,
+    attempted_urls: set[str] | None = None,
+) -> dict | None:
+    """Find another already-extracted *audio-only* Googlevideo stream.
+
+    Android MediaPlayer sometimes reports (-38, 0) immediately on a signed
+    AAC URL. Re-running yt-dlp to receive the same format-140 URL costs
+    5-10 seconds and may repeat the failure. Try an alternate audio-only
+    source from the same in-memory TV format listing first, without an HTTP
+    request. Never retry URLs already attempted in this playback generation.
+    """
+    cached = _get_cached_formats(video_url)
+    if not cached:
+        return None
+    attempted = set(attempted_urls or ())
+    attempted.add(str(failed_url or ""))
+    now = time.time()
+    options = []
+    for fmt in cached.get("formats") or ():
+        if not isinstance(fmt, dict):
+            continue
+        source = str(fmt.get("url") or "")
+        if not source or source in attempted:
+            continue
+        try:
+            parsed = urlparse.urlsplit(source)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (
+                host == "googlevideo.com" or host.endswith(".googlevideo.com")
+            ):
+                continue
+        except (ValueError, TypeError):
+            continue
+        expiry = _parse_expire_ts(source)
+        if expiry and expiry <= now + 120:
+            continue
+        if str(fmt.get("vcodec") or "none").lower() != "none":
+            continue
+        codec = str(fmt.get("acodec") or "none").lower()
+        if codec == "none":
+            continue
+        format_id = str(fmt.get("format_id") or "")
+        ext = str(fmt.get("ext") or "").lower()
+        # Prefer another AAC source (format 139 is smaller, HE-AAC); use
+        # Opus only as a last resort because device support can vary.
+        if codec.startswith("mp4a") and ext in ("m4a", "mp4", "aac"):
+            rank = 0 if format_id == "139" else 1
+        elif codec.startswith("opus") and ext in ("webm", "opus"):
+            rank = 2
+        else:
+            continue
+        try:
+            bitrate = float(fmt.get("abr") or fmt.get("tbr") or 0)
+        except (ValueError, TypeError):
+            bitrate = 0
+        options.append((rank, bitrate, source, fmt))
+    if not options:
+        return None
+    options.sort(key=lambda entry: (entry[0], entry[1]))
+    _, _, source, fmt = options[0]
+    return {
+        "audio_url": source,
+        "format_id": str(fmt.get("format_id") or ""),
+        "http_headers": _best_effort_headers(
+            fmt.get("http_headers"), {
+                "User-Agent": _ANDROID_YT_UA,
+                "Referer": "https://www.youtube.com",
+            }
+        ),
+    }
+
+
 def invalidate_audio_info_cache(video_url: str) -> None:
     """Forget a failed/expired CDN URL before recovery re-extracts it."""
     video_id = _extract_video_id_from_url(video_url)
