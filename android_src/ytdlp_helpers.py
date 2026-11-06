@@ -151,7 +151,7 @@ def get_cached_alternate_audio_source(
             if isinstance(item, dict)
         )
         if codec.startswith("opus") and ext in ("webm", "opus"):
-            rank = 3 if failed_opus or _NATIVE_OPUS_REJECTED else 0
+            rank = 3 if failed_opus or globals().get("_NATIVE_OPUS_REJECTED", False) else 0
         elif codec.startswith("mp4a") and ext in ("m4a", "mp4", "aac"):
             if format_id == "140":
                 rank = 0 if failed_opus else 1
