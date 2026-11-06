@@ -165,7 +165,10 @@ def get_cached_alternate_audio_source(
             bitrate = float(fmt.get("abr") or fmt.get("tbr") or 0)
         except (ValueError, TypeError):
             bitrate = 0
-        options.append((rank, bitrate, source, fmt))
+        # For Opus choose a moderate ~80 kbps stream instead of blindly
+        # choosing the lowest (often harsh 48 kbps) profile.
+        cost = abs(bitrate - 80.0) if codec.startswith("opus") else -bitrate
+        options.append((rank, cost, source, fmt))
     if not options:
         return None
     options.sort(key=lambda entry: (entry[0], entry[1]))
