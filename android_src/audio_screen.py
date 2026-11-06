@@ -1187,9 +1187,14 @@ class AudioPlayerScreen(Screen):
         self._buffer_watchdog_ev = None
         self._buffer_watchdog_ts = 0.0
         self._last_watch_pos = None
+        self._buffering_started_at = 0.0
+        self._next_prefetch_requested_gen = -1
+        self._video_launch_requested_gen = -1
 
         self._resume_pos_ms = 0      # позиція для резюму після падіння/паузи
-        self._video_enabled = True   # відео вмикається автоматично
+        # Android mobile/capped data: start in audio-only mode by default.
+        # The video toggle still enables it explicitly on demand.
+        self._video_enabled = not bool(ma.is_metered_connection())
         self._bg_tick_ev = Clock.schedule_interval(self._background_tick, 1.0)
         self._audio_cache_inflight = set()
         self._last_good_dur_ms = 0
@@ -2504,6 +2509,9 @@ class AudioPlayerScreen(Screen):
         self._last_stream_error_ts = 0.0
         self._prefer_compat_audio = False
         self._stream_format_id = ""
+        self._next_prefetch_requested_gen = -1
+        self._video_launch_requested_gen = -1
+        self._buffering_started_at = 0.0
         self._views_text = ""
         self._published_date = ""
         self._related_items = []
@@ -4347,44 +4355,45 @@ class AudioPlayerScreen(Screen):
             pass
 # TODO буфер ламає відтворення відео(через repeat) і ламає роботу з плейлистами
     def _buffer_watchdog(self, dt):
-        """
-        Якщо позиція програвання не змінюється деякий час при активному відтворенні -
-        швидше за все потік завис через проблеми з інтернетом, тоді запускаємо
-        мʼякий рестарт із повторним витягуванням URL.
+        """Wait for a slow network's buffer before re-creating MediaPlayer.
+
+        An 8-second timeout triggered repeat downloads and infinite restarts
+        on mobile links. Recovery now uses the existing bounded error-loop
+        handler and retains playback position.
         """
         if self._app_in_background or (time.time() - float(self._last_bg_resume_ts or 0.0)) < 6.0:
             return
         if not self._playback_desired or self._user_paused:
             return
-        if not ma.android_player:
+        if not ma.android_player or not ma._is_prepared():
             return
         try:
-            pos = ma.android_player.getCurrentPosition() or 0
+            pos = int(ma.android_player.getCurrentPosition() or 0)
         except Exception:
             return
 
         now = time.time()
-        last_pos = self._last_watch_pos if self._last_watch_pos is not None else -1
-
-        if pos == last_pos:
-            # якщо більше 8 секунд стоїмо на одному місці - робимо restart
-            if now - self._buffer_watchdog_ts > 8.0:
-                print("[AUDIO] Watchdog: stream stuck, restarting...")
-                self._buffer_watchdog_ts = now
-                # збережемо позицію для відновлення
-                try:
-                    self._resume_pos_ms = pos
-                except Exception:
-                    self._resume_pos_ms = 0
-                if self._last_video_url:
-                    threading.Thread(
-                        target=lambda: self._extract_and_start_gen(self._last_video_url, self._load_gen),
-                        daemon=True,
-                    ).start()
-        else:
-            self._buffer_watchdog_ts = now
-
+        last_pos = self._last_watch_pos
         self._last_watch_pos = pos
+        if last_pos is None or pos != last_pos:
+            self._buffer_watchdog_ts = now
+            return
+
+        # Mobile/explicitly metered Wi-Fi may require a much longer stall
+        # window. A buffering event is normal on a slow CDN, not a crash.
+        timeout = 45.0 if ma.is_metered_connection() else 28.0
+        if getattr(self, "_buffering_started_at", 0.0):
+            timeout += 15.0
+        if now - float(self._buffer_watchdog_ts or now) < timeout:
+            return
+        if not ma.is_network_available():
+            # Preserve native player/last-known buffer while disconnected.
+            return
+
+        self._buffer_watchdog_ts = now
+        self._resume_pos_ms = pos
+        print(f"[AUDIO] stalled {timeout:.0f}s; recover at {pos} ms")
+        self._recover_stream("buffer_watchdog", pos, force_fresh=True)
 
     def _pre_start_cleanup(self):
         try:
@@ -4422,6 +4431,19 @@ class AudioPlayerScreen(Screen):
         self._pre_start_cleanup()
 
     # ==================== fast path start ====================
+
+    def _on_native_audio_info(self, what: int, extra: int, gen: int) -> None:
+        # Android MEDIA_INFO_BUFFERING_START/END. Watchdog uses the event
+        # to avoid destroying a player that is correctly waiting for bytes.
+        if not self._is_current_gen(gen):
+            return
+        if int(what) == 701:
+            self._buffering_started_at = time.monotonic()
+            print("[AUDIO] native buffering started")
+        elif int(what) == 702:
+            self._buffering_started_at = 0.0
+            self._buffer_watchdog_ts = time.time()
+            print("[AUDIO] native buffering completed")
 
     def _start_from_known_stream(self, gen: int | None = None):
         gen = self._load_gen if gen is None else gen
@@ -4462,22 +4484,13 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
-            # або стартуємо з відео, або тільки аудіо, залежно від кнопки vid
-            if self._video_enabled and not self._app_in_background:
-                # швидкий старт аудіо, відео підвантажуємо паралельно
-                threading.Thread(
-                    target=lambda: self._start_audio_only_after_prepared(gen),
-                    daemon=True,
-                ).start()
-                threading.Thread(
-                    target=lambda: self._auto_video_for_current(gen, sync_start=False),
-                    daemon=True,
-                ).start()
-            else:
-                threading.Thread(
-                    target=lambda: self._start_audio_only_after_prepared(gen),
-                    daemon=True,
-                ).start()
+            # Start audio first. Video extraction/CDN negotiation must not
+            # compete with MediaPlayer's first audible bytes on weak Wi-Fi.
+            # A bounded optional video launch happens *after* audio starts.
+            threading.Thread(
+                target=lambda: self._start_audio_only_after_prepared(gen),
+                daemon=True, name="pymusic-audio-start",
+            ).start()
 
         def _on_complete():
             if not self._is_current_gen(gen):
@@ -4524,6 +4537,11 @@ class AudioPlayerScreen(Screen):
             except Exception:
                 pass
 
+            # A failing URL must not be served from the short in-memory
+            # stream cache on the next recovery attempt.
+            ydlh.invalidate_audio_info_cache(
+                str(getattr(self, "_last_video_url", "") or "")
+            )
             # типові помилки нестабільного інтернету
             NETWORK_ERRORS = (-1004, -110, -38, 1)
 
@@ -4566,7 +4584,7 @@ class AudioPlayerScreen(Screen):
                 self._stream_url, jheaders,
                 _on_prepared, _on_complete,
                 lambda w, e: _on_error(w, e),
-                lambda w, e: None
+                lambda w, e: self._on_native_audio_info(w, e, gen)
             )
         else:
             ma._mp_create(self._stream_url, _on_prepared, _on_complete, lambda w, e: _on_error(w, e))
@@ -5118,11 +5136,50 @@ class AudioPlayerScreen(Screen):
             Clock.schedule_once(lambda dt: self._ui_set_playing(True), 0)
             self._schedule_progress()
             self._schedule_expiry()
-            self._prefetch_next_track_audio()
+            self._launch_video_after_audio_start(gen)
         except Exception as e:
             ma.log(f"audio-only start err: {e}")
 
+    def _launch_video_after_audio_start(self, gen: int) -> None:
+        """Prioritize starting the audio stream before video network work.
+
+        On metered networks the default is audio-only; if the user manually
+        enables video, load it after a larger audio head start. Every delayed
+        operation is generation-checked so switching tracks cannot resurrect
+        stale video or old CDN requests.
+        """
+        if (
+            not self._video_enabled or self._app_in_background
+            or not self._is_screen_active()
+            or getattr(self, "_video_launch_requested_gen", -1) == gen
+        ):
+            return
+        self._video_launch_requested_gen = gen
+
+        def worker():
+            delay = 4.0 if ma.is_metered_connection() else 1.5
+            time.sleep(delay)
+            if (
+                not self._is_current_gen(gen)
+                or not self._video_enabled
+                or self._app_in_background
+                or not self._is_screen_active()
+                or not self._playback_desired
+                or self._user_paused
+                or not ma._is_prepared()
+            ):
+                return
+            self._auto_video_for_current(gen, sync_start=False)
+
+        threading.Thread(
+            target=worker, daemon=True, name="pymusic-video-after-audio"
+        ).start()
+
     def _prefetch_next_track_audio(self):
+        # Prefetch only shortly before a real track transition, on Wi-Fi.
+        # Metered connections must never use data for a track not requested.
+        if ma.is_metered_connection() or not self._auto_skip:
+            return None
         try:
             playlist = getattr(self, "playlist", None)
             tracks = getattr(playlist, "tracks", None) if playlist else None
@@ -5309,7 +5366,10 @@ class AudioPlayerScreen(Screen):
                 Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
 
             self._put_cache(video_url, self._stream_url, self._headers, self._expire_ts)
-            self._cache_audio_async(video_url, self._stream_url, self._headers)
+            # Do NOT auto-download the same song a second time while the
+            # native player is streaming it. That doubled mobile bandwidth
+            # and competed with the audio startup buffer. Explicitly saved
+            # favorite tracks retain their existing cache workflow.
             self._metadata_loaded_urls.add(video_url)
             self._extract_fail_skip_hits = 0
 
@@ -6014,6 +6074,23 @@ class AudioPlayerScreen(Screen):
             pass
 
         try:
+            gen = int(self._load_gen)
+            remaining = int(dur or 0) - int(pos or 0)
+            if (
+                self._auto_skip
+                and not ma.is_metered_connection()
+                and self._playback_desired
+                and not self._user_paused
+                and int(pos or 0) > 1000
+                and 5000 < remaining <= 25000
+                and self._next_prefetch_requested_gen != gen
+            ):
+                self._next_prefetch_requested_gen = gen
+                self._prefetch_next_track_audio()
+        except Exception:
+            pass
+
+        try:
             ma.update_media_session_state(
                 bool(ma.android_player and ma.android_player.isPlaying()),
                 position_ms=int(pos or 0),
@@ -6053,15 +6130,12 @@ class AudioPlayerScreen(Screen):
             pass
 
     def _schedule_expiry(self):
-        if not self._expire_ts:
-            return
-        now = int(time.time())
-        # Не перезапускати надто часто, інакше при короткому TTL отримуємо цикли ресетів.
-        dt = max(30, self._expire_ts - now - 60)
-        self._refresh_ev = Clock.schedule_once(
-            lambda _: self._extract_and_start_gen(self._last_video_url, self._load_gen),
-            dt
-        )
+        # The current MediaPlayer already owns an open stream. Recreating
+        # it proactively at CDN URL expiration interrupts playback, downloads
+        # the same bytes again and may thrash when the network is weak.
+        # Signed URL caches are checked on *reuse*. Native playback errors
+        # trigger a fresh extraction when actually needed.
+        return None
 
     # ==================== buttons ====================
 
