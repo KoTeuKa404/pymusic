@@ -199,6 +199,8 @@ class PlaybackRegressionTests(unittest.TestCase):
         namespace = {
             "Any": Any, "Dict": Dict, "Optional": Optional,
             "Tuple": Tuple, "YoutubeDL": FakeYoutubeDL,
+            "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+            "_ANDROID_CLIENT_MUXED_ONLY": False,
         }
         choose = isolated_definition(
             "ytdlp_helpers.py", "_extract_info_with_clients", namespace
@@ -215,18 +217,39 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertEqual(info["channel"], "Grimwind")
         self.assertEqual(info["thumbnail"], "https://images.example/cover")
         self.assertEqual(len(info["formats"]), 2)
+        self.assertTrue(namespace["_ANDROID_CLIENT_MUXED_ONLY"])
 
 
     def test_healthy_tracks_keep_android_client_and_only_recover_on_failure(self):
         from typing import Tuple
         chooser = isolated_definition(
             "ytdlp_helpers.py", "_audio_client_order",
-            {"Tuple": Tuple, "_env_bool": lambda *_args: False},
+            {"Tuple": Tuple, "_env_bool": lambda *_args: False,
+             "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+             "_ANDROID_CLIENT_MUXED_ONLY": False},
         )
         self.assertEqual(chooser(False), ("android", "tv_embedded"))
         self.assertEqual(
             chooser(True), ("web_embedded", "tv_embedded", "android", "ios")
         )
+
+    def test_muxed_only_client_learning_skips_redundant_android_probe(self):
+        from typing import Tuple
+        ns = {
+            "Tuple": Tuple,
+            "_env_bool": lambda *_args: False,
+            "_AUDIO_CLIENT_HINT_LOCK": threading.RLock(),
+            "_ANDROID_CLIENT_MUXED_ONLY": True,
+        }
+        choose = isolated_definition(
+            "ytdlp_helpers.py", "_audio_client_order", ns
+        )
+        self.assertEqual(choose(False), ("tv_embedded", "android"))
+        self.assertEqual(
+            choose(True), ("web_embedded", "tv_embedded", "android", "ios")
+        )
+        ns["_ANDROID_CLIENT_MUXED_ONLY"] = False
+        self.assertEqual(choose(False), ("android", "tv_embedded"))
 
     def test_channel_name_fallback_uses_official_oembed_and_validated_id(self):
         import json
