@@ -4567,9 +4567,12 @@ class AudioPlayerScreen(Screen):
                 # Learn a device-specific native codec failure. This turns
                 # off future Opus-first attempts if the handset rejects
                 # WebM and keeps AAC as a safe fallback.
-                ydlh.note_native_audio_format_failure(
-                    str(getattr(self, "_stream_format_id", "") or "")
-                )
+                failed_format = str(getattr(self, "_stream_format_id", "") or "")
+                ydlh.note_native_audio_format_failure(failed_format)
+                if failed_format in ("249", "250", "251"):
+                    ydlh.invalidate_audio_info_cache(
+                        str(getattr(self, "_last_video_url", "") or "")
+                    )
             used = getattr(self, "_audio_source_attempts", None)
             if not isinstance(used, set):
                 used = set()
