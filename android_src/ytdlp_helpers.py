@@ -1105,7 +1105,10 @@ def extract_audio_info(video_url: str, *, prefer_compat: bool = False) -> Dict[s
         "format_id": selected_format_id,
         "ext": selected_ext,
         "acodec": selected_acodec,
-    }\n    if not prefer_compat:\n        _cache_audio_info(video_url, result)\n    return result
+    }
+    if not prefer_compat:
+        _cache_audio_info(video_url, result)
+    return result
 
 
 # ============================ VIDEO API ================================
