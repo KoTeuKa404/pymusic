@@ -4638,81 +4638,118 @@ class AudioPlayerScreen(Screen):
         return os.path.join(self._audio_cache_dir(), f"{key}.{ext}")
 
     def _find_cached_audio(self, video_url: str) -> str | None:
+        """Only use finalized files within this app's audio cache directory."""
         if not video_url:
             return None
+        cache_root = os.path.realpath(self._audio_cache_dir())
+        key = self._cache_key(video_url)
+
+        def valid(candidate: str) -> bool:
+            try:
+                path = os.path.realpath(str(candidate or ""))
+                if os.path.commonpath([path, cache_root]) != cache_root:
+                    return False
+                name = os.path.basename(path)
+                if not name.startswith(key + ".") or name.endswith(".part"):
+                    return False
+                return os.path.isfile(path) and os.path.getsize(path) > 128
+            except (OSError, ValueError, TypeError):
+                return False
+
         try:
-            recent = load_recent()
-            for r in recent:
-                if r.get("url") == video_url:
-                    p = str(r.get("cache_path") or "")
-                    if p and os.path.exists(p) and os.path.getsize(p) > 0:
-                        return p
+            for entry in load_recent():
+                if entry.get("url") == video_url:
+                    candidate = str(entry.get("cache_path") or "")
+                    if valid(candidate):
+                        return os.path.realpath(candidate)
         except Exception:
             pass
         try:
-            cache_dir = self._audio_cache_dir()
-            key = self._cache_key(video_url)
-            for name in os.listdir(cache_dir):
-                if name == key or name.startswith(f"{key}."):
-                    path = os.path.join(cache_dir, name)
-                    if os.path.isfile(path) and os.path.getsize(path) > 0:
-                        return path
+            for name in os.listdir(cache_root):
+                path = os.path.join(cache_root, name)
+                if valid(path):
+                    return os.path.realpath(path)
         except Exception:
             pass
         return None
 
     def _download_audio_locally(self, video_url: str, audio_url: str, headers: dict | None = None) -> str | None:
-        if not audio_url or audio_url.startswith("file://") or "m3u8" in audio_url:
+        """Explicit favorite audio cache, with verified HTTPS and size limit.
+
+        Automatic caching during *streaming* is disabled: fetching the same
+        track twice was expensive, especially over weak/mobile networks.
+        Only an explicit favorite action can call this full-file download.
+        """
+        if not video_url or not audio_url or audio_url.startswith("file://") or "m3u8" in audio_url:
+            return None
+
+        # A compromised extractor/cache entry must never fetch loopback,
+        # file:// or another service, or redirect to an untrusted host.
+        try:
+            parsed = urllib.parse.urlsplit(str(audio_url))
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (
+                host == "googlevideo.com" or host.endswith(".googlevideo.com")
+            ):
+                return None
+        except (TypeError, ValueError):
             return None
 
         ext = self._guess_audio_ext(audio_url)
         path = self._audio_cache_path(video_url, ext)
-
-        try:
-            if os.path.exists(path) and os.path.getsize(path) > 0:
-                return path
-        except Exception:
-            pass
+        existing = self._find_cached_audio(video_url)
+        if existing:
+            return existing
 
         headers = headers or {}
         req_headers = {
-            "User-Agent": headers.get("User-Agent") or "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
+            "User-Agent": headers.get("User-Agent") or (
+                "Mozilla/5.0 (Linux; Android 12; Mobile) "
+                "AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
+            ),
             "Referer": headers.get("Referer") or "https://www.youtube.com",
             "Accept-Language": headers.get("Accept-Language") or "en-US,en;q=0.9",
-            "Connection": headers.get("Connection") or "keep-alive",
         }
-
+        # Cap a user-requested favorite cache entry. Very long recordings
+        # remain streamable but never fill the device's storage unexpectedly.
+        max_bytes = 24 * 1024 * 1024
         tmp_path = f"{path}.part"
         try:
-            ctx = ssl._create_unverified_context()
-            req = urllib.request.Request(audio_url, headers=req_headers)
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp, open(tmp_path, "wb") as f:
-                expected_size = 0
-                try:
-                    expected_size = int(resp.headers.get("Content-Length") or 0)
-                except Exception:
-                    expected_size = 0
-                while True:
-                    chunk = resp.read(512 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            actual_size = os.path.getsize(tmp_path)
-            if expected_size > 0 and actual_size < expected_size:
-                raise IOError(f"incomplete audio cache: {actual_size}/{expected_size} bytes")
+            context = ssl.create_default_context(cafile=certifi.where())
+            request = urllib.request.Request(audio_url, headers=req_headers)
+            with urllib.request.urlopen(request, timeout=20, context=context) as resp:
+                final_url = urllib.parse.urlsplit(resp.geturl())
+                final_host = (final_url.hostname or "").lower()
+                if final_url.scheme != "https" or not (
+                    final_host == "googlevideo.com"
+                    or final_host.endswith(".googlevideo.com")
+                ):
+                    raise ValueError("untrusted audio redirect")
+                expected = int(resp.headers.get("Content-Length") or 0)
+                if expected > max_bytes:
+                    raise ValueError("favorite audio exceeds 24 MiB cache limit")
+                received = 0
+                with open(tmp_path, "wb") as output:
+                    while True:
+                        chunk = resp.read(128 * 1024)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > max_bytes:
+                            raise ValueError("favorite audio exceeded cache limit")
+                        output.write(chunk)
+            if received < 128 or (expected and received != expected):
+                raise IOError("favorite audio download was incomplete")
             os.replace(tmp_path, path)
             update_recent_cache(video_url, path)
             update_favorite_cache(video_url, path)
             return path
-        except Exception as e:
+        except Exception as exc:
+            print("[AUDIO] optional favorite cache download failed:", type(exc).__name__)
             try:
-                print("[AUDIO] cache download fail:", e)
-            except Exception:
-                pass
-            try:
-                if os.path.exists(tmp_path):
+                if os.path.isfile(tmp_path):
                     os.remove(tmp_path)
-            except Exception:
+            except OSError:
                 pass
             return None
 
