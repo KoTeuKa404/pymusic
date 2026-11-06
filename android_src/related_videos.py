@@ -311,7 +311,8 @@ def _duration(renderer: dict[str, Any]) -> str:
         for key, child in node.items():
             if key in (
                 "contentImage", "thumbnailViewModel", "thumbnailOverlayBadgeViewModel",
-                "thumbnailBadgeViewModel", "thumbnail", "overlays", "badges",
+                "thumbnailBadgeViewModel", "thumbnailBottomOverlayViewModel",
+                "thumbnail", "overlays", "badges",
                 "badge", "image", "sources",
             ) and isinstance(child, (dict, list)):
                 stack.append(child)
