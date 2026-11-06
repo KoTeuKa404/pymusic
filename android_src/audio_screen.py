@@ -21,6 +21,7 @@ import threading
 import time
 import os
 import re
+from datetime import date, datetime
 import hashlib
 import urllib.request
 import urllib.parse
@@ -629,6 +630,57 @@ class _CurrentTapLabel(ButtonBehavior, Label):
     pass
 
 
+def _format_published_age(raw_date: object, *, today: date | None = None) -> str:
+    """Format an actual yt-dlp upload/release date, never estimate missing data.
+
+    Accept both YYYYMMDD and YYYY-MM-DD. Calendar years/months avoid
+    claiming that a video published near a month boundary is a year older.
+    """
+    value = str(raw_date or "").strip()
+    if not re.fullmatch(r"(?:\d{8}|\d{4}-\d{2}-\d{2})", value):
+        return ""
+    try:
+        published = datetime.strptime(value.replace("-", ""), "%Y%m%d").date()
+        current = today or date.today()
+        age = (current - published).days
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if age < 0:
+        return ""
+    if age == 0:
+        return "сьогодні"
+    if age == 1:
+        return "учора"
+
+    def count_word(count: int, single: str, few: str, many: str) -> str:
+        if count % 100 in (11, 12, 13, 14):
+            word = many
+        elif count % 10 == 1:
+            word = single
+        elif count % 10 in (2, 3, 4):
+            word = few
+        else:
+            word = many
+        return f"{count} {word} тому"
+
+    years = current.year - published.year - (
+        (current.month, current.day) < (published.month, published.day)
+    )
+    if years:
+        return count_word(years, "рік", "роки", "років")
+    months = (
+        (current.year - published.year) * 12
+        + current.month - published.month
+        - (current.day < published.day)
+    )
+    if months:
+        return count_word(months, "місяць", "місяці", "місяців")
+    weeks = age // 7
+    if weeks:
+        return count_word(weeks, "тиждень", "тижні", "тижнів")
+    return count_word(age, "день", "дні", "днів")
+
+
 def _verified_channel_name(value: str, video_title: str = "") -> str:
     """Reject title/placeholder metadata masquerading as a channel name."""
     name = str(value or "").strip()
@@ -1129,6 +1181,7 @@ class AudioPlayerScreen(Screen):
         self._playlist_last_refresh_ts = 0.0
         self._auto_skip = True
         self._views_text = ""
+        self._published_date = ""
         self._related_items = []
         self._channel_thumb = ""
         self._channel_thumb_local = ""
@@ -1719,7 +1772,7 @@ class AudioPlayerScreen(Screen):
             title_text = str(title.text or "").strip()
             title_h = float((title.texture_size or (0, 0))[1] or 0)
             title_h = title_h if title_text else 0.0
-            visible_title_h = min(title_h, dp(50)) if title_h > 0 else 0.0
+            visible_title_h = min(title_h, dp(58)) if title_h > 0 else 0.0
             title_view.height = visible_title_h
             title.height = title_h
             title_view.do_scroll_x = False
@@ -1748,7 +1801,7 @@ class AudioPlayerScreen(Screen):
             details = title_view.parent
             if details is not None:
                 details.spacing = 0
-                details.padding = (dp(16), dp(4), dp(16), dp(2))
+                details.padding = (dp(16), dp(8), dp(16), dp(1))
                 _request_player_layout(details)
 
             outer = self.ids.get("player_details_scroll")
@@ -2425,6 +2478,7 @@ class AudioPlayerScreen(Screen):
         self._prefer_compat_audio = False
         self._stream_format_id = ""
         self._views_text = ""
+        self._published_date = ""
         self._related_items = []
         if ui_allowed:
             self._render_similar_ui()
@@ -4083,8 +4137,14 @@ class AudioPlayerScreen(Screen):
                 pass
 
         vc = info.get("view_count")
-        if vc:
-            self._views_text = self._fmt_views(vc)
+        if vc is not None:
+            new_views = self._fmt_views(vc)
+            if self._views_text != new_views:
+                self._views_text = new_views
+                updated = True
+        published = str(info.get("upload_date") or info.get("release_date") or "")
+        if published and published != self._published_date:
+            self._published_date = published
             updated = True
         related = info.get("related_videos") or []
         if related:
@@ -5170,10 +5230,12 @@ class AudioPlayerScreen(Screen):
                 self._channel_thumb = cthumb
                 self._download_channel_avatar_async(cthumb)
             vc = info.get("view_count")
-            if vc:
+            if vc is not None:
                 self._views_text = self._fmt_views(vc)
-            else:
-                self._views_text = ""
+            published = str(info.get("upload_date") or info.get("release_date") or "")
+            if published and published != self._published_date:
+                self._published_date = published
+                updated_meta = True
             related = info.get("related_videos") or []
             self._related_items = self._normalize_related(related)
             Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
@@ -5364,8 +5426,25 @@ class AudioPlayerScreen(Screen):
 
     # ==================== UI wiring ====================
 
+    def _update_now_playing_badge(self, playing: bool | None = None):
+        # A real status indicator for the selected video; never show it when
+        # there is no current track. It also responds to play/pause callbacks.
+        badge = self.ids.get("now_playing_status")
+        if badge is None:
+            return
+        has_video = bool(str(getattr(self, "_last_video_url", "") or ""))
+        badge.height = dp(18) if has_video else 0
+        badge.opacity = 1 if has_video else 0
+        if not has_video:
+            badge.text = ""
+        elif playing is False or (playing is None and self._user_paused):
+            badge.text = "●  НА ПАУЗІ"
+        else:
+            badge.text = "●  ЗАРАЗ ВІДТВОРЮЄТЬСЯ"
+
     def _sync_ui_loaded(self):
         self._queue_metadata_layout(0.025)
+        self._update_now_playing_badge()
         _player_likes_ensure_and_tune(self)
         current = str(getattr(self, "_last_video_url", "") or "")
         if current:
@@ -5374,7 +5453,10 @@ class AudioPlayerScreen(Screen):
             self.ids.audio_title.text = self._title or ""
             views_lbl = self.ids.get("audio_views")
             if views_lbl:
-                views_lbl.text = self._views_text or ""
+                age = _format_published_age(self._published_date)
+                views_lbl.text = " • ".join(
+                    part for part in (self._views_text, age) if part
+                )
             ch_lbl = self.ids.get("audio_channel")
             if ch_lbl:
                 ch_lbl.text = self._channel or ""
@@ -5670,6 +5752,10 @@ class AudioPlayerScreen(Screen):
             pass
 
     def _ui_set_playing(self, playing: bool):
+        try:
+            self._update_now_playing_badge(playing=playing)
+        except Exception:
+            pass
         try:
             btn = self.ids.play_pause_btn
             if hasattr(btn, "icon") and btn.icon:
