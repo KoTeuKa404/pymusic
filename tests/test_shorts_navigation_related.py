@@ -144,7 +144,7 @@ class ShortsAndNavigationTests(unittest.TestCase):
         self.assertIn("class YoutubeShortsScreen(YoutubeWebScreen):", main)
         self.assertIn('"https://m.youtube.com/shorts"', main)
         self.assertIn('root.open_shorts(url)', main)
-        self.assertIn('url, title, chan, thumb, "Shorts"', (ANDROID / "youtube_search.py").read_text(encoding="utf-8"))
+        self.assertIn('"Shorts" if is_short else dur', (ANDROID / "youtube_search.py").read_text(encoding="utf-8"))
         is_watch = java.split("private static boolean isWatchUrl(", 1)[1].split(
             "private static String forceMobileYoutube", 1
         )[0]
