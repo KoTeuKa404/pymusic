@@ -881,7 +881,13 @@ def webview_show(url: str | None = None):
             _webview.setLayoutParams(lp)
         except Exception:
             pass
-        if _webview_shown and url is None:
+        # State flags may be stale after Activity background/restore. Trust
+        # the actual Android view tree rather than blindly skipping show.
+        try:
+            visible = _webview_container.getVisibility() == View.VISIBLE
+        except Exception:
+            visible = False
+        if _webview_shown and visible and url is None:
             return
         _webview_container.setVisibility(View.VISIBLE)
         _webview_shown = True
@@ -910,12 +916,20 @@ def webview_hide():
         # Screens change before the native UI thread always processes the
         # request; duplicate hide calls must not re-run JavaScript/media
         # cleanup or toggle SDL layers again.
-        if _webview_container is None or not _webview_shown:
+        if _webview_container is None:
             return
         try:
-            _webview_stop_media()
+            native_visible = _webview_container.getVisibility() == View.VISIBLE
         except Exception:
-            pass
+            native_visible = bool(_webview_shown)
+        # After a navigation/lifecycle race _webview_shown can be false while
+        # the full-screen Java View remains visible *above* Kivy+SurfaceView.
+        # The entire video and all touch buttons then appear frozen.
+        if native_visible:
+            try:
+                _webview_stop_media()
+            except Exception:
+                pass
         _webview_container.setVisibility(View.GONE)
         _webview_shown = False
         # SDL was never detached; simply hide the native WebView layer.
