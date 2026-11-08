@@ -209,12 +209,20 @@ def _patch_audio_screen() -> bool:
                 or getattr(self, "_current_video_url_v4", "")
             )
             collapsed = bool(getattr(self, "_similar_collapsed", False))
+            # A queue fallback is *not* YouTube recommendations. Label it
+            # honestly to avoid misleading the user about recommendation
+            # quality or pretending playlist order came from watch-next.
+            source = getattr(self, "_related_source", "youtube")
+            label = (
+                "Наступні з плейлиста"
+                if source == "playlist" else "Схожі відео"
+            )
             if loading and not has_items:
-                title = "Схожі відео · завантаження…"
+                title = label + " · завантаження…"
             elif failed and not has_items:
-                title = "Схожі відео · повторна спроба…"
+                title = label + " · повторна спроба…"
             else:
-                title = "Схожі відео"
+                title = label
             self._set_collapsible_header(
                 self.ids.get("similar_header_row"),
                 self.ids.get("similar_header"),
@@ -468,7 +476,7 @@ def _patch_audio_screen() -> bool:
                 return []
             return output
 
-        def apply_related(self, video_url, items):
+        def apply_related(self, video_url, items, source="youtube"):
             ensure_state(self)
             if video_url != str(
                 getattr(self, "_last_video_url", "") or ""
@@ -481,7 +489,13 @@ def _patch_audio_screen() -> bool:
                 set_similar_visibility(self)
                 return
             self._related_items = normalized[:8]
-            self._hotfix_related_cache[video_url] = list(items)[:8]
+            self._related_source = (
+                "playlist" if source == "playlist" else "youtube"
+            )
+            self._hotfix_related_cache[video_url] = {
+                "source": self._related_source,
+                "items": list(items)[:8],
+            }
             while len(self._hotfix_related_cache) > 24:
                 self._hotfix_related_cache.pop(
                     next(iter(self._hotfix_related_cache)), None
@@ -508,10 +522,17 @@ def _patch_audio_screen() -> bool:
 
             cached = self._hotfix_related_cache.get(video_url)
             if cached and not force:
+                cached_items = (
+                    cached.get("items") if isinstance(cached, dict)
+                    else cached
+                )
+                cached_source = (
+                    cached.get("source", "youtube")
+                    if isinstance(cached, dict) else "youtube"
+                )
                 Clock.schedule_once(
-                    lambda _dt: apply_related(
-                        self, video_url, cached
-                    ),
+                    lambda _dt, items=cached_items, src=cached_source:
+                        apply_related(self, video_url, items, src),
                     0,
                 )
                 return
@@ -547,6 +568,7 @@ def _patch_audio_screen() -> bool:
 
                 def worker():
                     items = []
+                    source = "youtube"
                     try:
                         latest = matching_track(self, video_url)
                         latest_title = str(
@@ -579,6 +601,7 @@ def _patch_audio_screen() -> bool:
                             self, video_url, limit=8
                         )
                         if items:
+                            source = "playlist"
                             print(
                                 "[RELATED] using playlist fallback "
                                 f"({len(items)} items)"
@@ -589,9 +612,8 @@ def _patch_audio_screen() -> bool:
                     )
                     if items:
                         Clock.schedule_once(
-                            lambda _dt: apply_related(
-                                self, video_url, items
-                            ),
+                            lambda _dt, result=items, origin=source:
+                                apply_related(self, video_url, result, origin),
                             0,
                         )
                         return
