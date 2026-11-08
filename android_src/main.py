@@ -462,10 +462,30 @@ class YoutubeSearchScreen(MDScreen):
             box.add_widget(title_w)
             box.add_widget(MDLabel(text=f"{channel} • {dur}", theme_text_color="Secondary", size_hint_y=None, height="30dp"))
             btn_box = MDBoxLayout(orientation="horizontal", spacing="8dp", size_hint_y=None, height="40dp")
-            play_btn = MDRaisedButton(text="♫ Audio", size_hint=(None, None), size=("100dp","40dp"))
-            play_btn.bind(on_press=partial(self.play_audio, url, title, channel, dur, thumb))
+            if "/shorts/" in str(url):
+                play_btn = MDRaisedButton(
+                    text="▶ Shorts", size_hint=(None, None),
+                    size=("110dp", "40dp")
+                )
+                play_btn.bind(
+                    on_release=lambda _inst, u=url: self.open_shorts(u)
+                )
+            else:
+                play_btn = MDRaisedButton(
+                    text="♫ Audio", size_hint=(None, None),
+                    size=("100dp", "40dp")
+                )
+                play_btn.bind(
+                    on_press=partial(self.play_audio, url, title, channel, dur, thumb)
+                )
             btn_box.add_widget(play_btn); box.add_widget(btn_box)
             card.add_widget(box); grid.add_widget(card)
+
+    def open_shorts(self, url: str):
+        app = App.get_running_app()
+        root = getattr(app, "root", None)
+        if root and hasattr(root, "open_shorts"):
+            root.open_shorts(url)
 
     def _show_results_on_ui(self, videos, playlists, continuation=None, cfg=None):
         grid = self.ids.results_grid; grid.clear_widgets()
