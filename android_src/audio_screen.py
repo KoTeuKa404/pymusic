@@ -2548,7 +2548,7 @@ class AudioPlayerScreen(Screen):
             if ui_allowed:
                 self._render_playlist_ui(force=True)
             self._related_items = []
-        self._related_source = "youtube"
+            self._related_source = "youtube"
             self._views_text = ""
             self._channel_thumb = ""
             self._channel_thumb_local = ""
