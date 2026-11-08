@@ -1139,6 +1139,7 @@ class AudioPlayerScreen(Screen):
     _ms_play = None
     _ms_pause = None
     _ms_repeat = None
+    _ms_favorite = None
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -1150,6 +1151,7 @@ class AudioPlayerScreen(Screen):
         self._ms_play = self._act_play
         self._ms_pause = self._act_pause
         self._ms_repeat = self._act_repeat
+        self._ms_favorite = self._act_favorite
         self.repeat = False
         self._playback_desired = False
         self._user_paused = False
@@ -1558,6 +1560,7 @@ class AudioPlayerScreen(Screen):
         self._ms_play = self._act_play
         self._ms_pause = self._act_pause
         self._ms_repeat = self._act_repeat
+        self._ms_favorite = self._act_favorite
         ma.bind_notification_action_router(self)
 
         self._bind_keys()
@@ -2154,7 +2157,9 @@ class AudioPlayerScreen(Screen):
                     is_playing,
                     position_ms=int(pos),
                     duration_ms=int(dur),
-                    can_seek=True
+                    can_seek=True,
+                    repeat_enabled=bool(self.repeat),
+                    favorite_enabled=bool(self._favorite),
                 )
 
                 token = self._media_session.getSessionToken() if self._media_session else None
@@ -2163,7 +2168,9 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=is_playing,
                     session_token=token,
-                    large_icon_path=self._channel_thumb_local
+                    large_icon_path=self._channel_thumb_local,
+                    repeat_enabled=bool(self.repeat),
+                    favorite_enabled=bool(self._favorite),
                 )
         except Exception as e:
             print("[BG TICK] err:", e)
@@ -2641,6 +2648,8 @@ class AudioPlayerScreen(Screen):
                 is_playing=True,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
@@ -3008,7 +3017,9 @@ class AudioPlayerScreen(Screen):
                         subtitle=self._channel or "YouTube",
                         is_playing=bool(ma.android_player and ma.android_player.isPlaying()),
                         session_token=token,
-                        large_icon_path=self._channel_thumb_local
+                        large_icon_path=self._channel_thumb_local,
+                        repeat_enabled=bool(self.repeat),
+                        favorite_enabled=bool(self._favorite),
                     )
                 except Exception:
                     pass
@@ -4353,6 +4364,8 @@ class AudioPlayerScreen(Screen):
                 position_ms=int(pos or 0),
                 duration_ms=dur,
                 can_seek=True,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
             token = self._media_session.getSessionToken() if self._media_session else None
             ma.create_or_update_media_notification(
@@ -4361,6 +4374,8 @@ class AudioPlayerScreen(Screen):
                 is_playing=is_playing,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception as e:
             try:
@@ -4570,7 +4585,9 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
@@ -5387,6 +5404,8 @@ class AudioPlayerScreen(Screen):
                     position_ms=int(self._resume_pos_ms or 0),
                     duration_ms=int(dur or 0),
                     can_seek=True,
+                    repeat_enabled=bool(self.repeat),
+                    favorite_enabled=bool(self._favorite),
                 )
                 token2 = self._media_session.getSessionToken() if self._media_session else None
                 ma.create_or_update_media_notification(
@@ -5395,6 +5414,8 @@ class AudioPlayerScreen(Screen):
                     is_playing=True,
                     session_token=token2,
                     large_icon_path=self._channel_thumb_local,
+                    repeat_enabled=bool(self.repeat),
+                    favorite_enabled=bool(self._favorite),
                 )
             except Exception:
                 pass
@@ -5554,7 +5575,9 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
@@ -6234,7 +6257,9 @@ class AudioPlayerScreen(Screen):
                 bool(playing),
                 position_ms=int(pos or 0),
                 duration_ms=(int(dur) if dur else None),
-                can_seek=True
+                can_seek=True,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
             token = self._media_session.getSessionToken() if self._media_session else None
             ma.create_or_update_media_notification(
@@ -6242,7 +6267,9 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=bool(playing),
                 session_token=token,
-                large_icon_path=self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
@@ -6409,7 +6436,9 @@ class AudioPlayerScreen(Screen):
                 bool(ma.android_player and ma.android_player.isPlaying()),
                 position_ms=int(pos or 0),
                 duration_ms=int(dur or 0),
-                can_seek=True
+                can_seek=True,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
@@ -6473,6 +6502,10 @@ class AudioPlayerScreen(Screen):
                 inline_repeat.source = "ico/icorepeat_active.png" if self.repeat else "ico/icorepeat.png"
         except Exception:
             pass
+        # Refresh Android 13's fourth media button immediately, including
+        # when the song is paused and PlaybackState position is unchanged.
+        if self._last_video_url:
+            self._publish_media_metadata_now()
 
     def toggle_autoskip(self, *a):
         self._auto_skip = not self._auto_skip
@@ -6525,6 +6558,9 @@ class AudioPlayerScreen(Screen):
             update_recent_cache(url, None)
             update_favorite_cache(url, None)
             remove_favorite(url)
+        # Update the rightmost Favorite action with the user's original
+        # selected/unselected PNG, without waiting for the playback ticker.
+        self._publish_media_metadata_now()
 
     def _cache_current_favorite_async(self, url: str):
         if not url or url in self._fav_cache_inflight:
@@ -6785,6 +6821,10 @@ class AudioPlayerScreen(Screen):
         self._last_media_ts = time.time()
         self.toggle_repeat()
 
+    def _act_favorite(self, *a):
+        self._last_media_ts = time.time()
+        self.toggle_favorite()
+
     def _pause_playback(self):
         self._mark_java_transport(True)
         self._user_paused = True
@@ -6908,7 +6948,9 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=False,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local,
+                repeat_enabled=bool(self.repeat),
+                favorite_enabled=bool(self._favorite),
             )
         except Exception:
             pass
