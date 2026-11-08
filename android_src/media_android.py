@@ -1394,16 +1394,21 @@ def _load_bitmap(path: str):
 
 
 def _safe_small_icon():
+    # Android requires a valid nonzero notification small icon; it cannot be
+    # removed. Prefer a neutral built-in media glyph rather than rendering
+    # PyMusic's colourful launcher logo as an additional overlay badge.
+    # MIUI may still draw the app's identity independently of this icon.
     try:
-        app_icon = PythonActivity.mActivity.getApplicationInfo().icon
-        if app_icon and app_icon != 0:
-            return app_icon
+        return int(R_draw.ic_media_play)
     except Exception:
         pass
     try:
-        return R_draw.ic_media_play
+        icon = PythonActivity.mActivity.getApplicationInfo().icon
+        if icon:
+            return int(icon)
     except Exception:
-        return 17301540  # fallback int
+        pass
+    return 17301540  # last-resort platform drawable
 
 
 def _charseq(text: str):
@@ -1509,8 +1514,11 @@ def create_or_update_media_notification(*,
         if hasattr(b, "setOngoing"):
             b.setOngoing(is_playing)
 
-        # The channel avatar is the notification's large icon. The current
-        # video's cover is provided separately through MediaSession artwork.
+        # Small artwork tile: YouTube channel avatar, NOT the video cover.
+        # Album/video artwork is provided to MediaSession separately. On
+        # Android 13/MIUI the OS chooses whether to show the video artwork
+        # or a color-tinted background; a full-bleed photo isn't controllable
+        # through the platform MediaStyle notification API.
         try:
             icon = _load_bitmap(large_icon_path)
             if icon is not None:
@@ -1704,8 +1712,8 @@ def set_media_metadata(title: str = "", artist: str = "", album: str = "",
             b.putBitmap(MediaMetadata.METADATA_KEY_ART, bmp)
         if avatar is not None:
             b.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, avatar)
-        elif bmp is not None:
-            b.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, bmp)
+        # Do not replace a missing channel avatar with the video thumbnail:
+        # it would reappear in the small tile until the avatar arrives.
 
         if art_uri:
             try:

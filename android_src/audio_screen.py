@@ -2163,7 +2163,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=is_playing,
                     session_token=token,
-                    large_icon_path=self._art_path or self._channel_thumb_local
+                    large_icon_path=self._channel_thumb_local
                 )
         except Exception as e:
             print("[BG TICK] err:", e)
@@ -2597,6 +2597,9 @@ class AudioPlayerScreen(Screen):
 
         self._title = title or ""
         self._channel = _verified_channel_name(channel, self._title)
+        # Never show the previous video's artwork or channel avatar while
+        # waiting for the new video's thumbnails to arrive.
+        self._art_path = None
         self._channel_thumb = ""
         self._channel_thumb_local = ""
         thumb_url = thumb or ""
@@ -2627,6 +2630,7 @@ class AudioPlayerScreen(Screen):
             ma.set_media_metadata(
                 title=self._title,
                 artist=self._channel,
+                art_path=self._art_path,
                 art_uri=self._thumb or "",
                 avatar_path=self._channel_thumb_local,
             )
@@ -2636,7 +2640,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local,
+                large_icon_path=self._channel_thumb_local,
             )
         except Exception:
             pass
@@ -2913,15 +2917,20 @@ class AudioPlayerScreen(Screen):
         return result
 
 
-    def _download_art_async(self, url: str): 
+    def _download_art_async(self, url: str):
         if not url or not url.startswith(("http://", "https://")):
             return
+
+        # Bound each artwork request to the selected video. A late image
+        # download from the previous track must not replace current
+        # MediaSession artwork or the notification's background colors.
+        requested_video_url = str(self._last_video_url or "")
 
         def _job():
             try:
                 art_path = None
-                if self._last_video_url:
-                    art_path = self._art_cache_path(self._last_video_url)
+                if requested_video_url:
+                    art_path = self._art_cache_path(requested_video_url)
                 if not art_path:
                     art_path = os.path.join(tempfile.gettempdir(), "pymusic_art.jpg")
                 req = urllib.request.Request(
@@ -2979,9 +2988,11 @@ class AudioPlayerScreen(Screen):
                             os.unlink(temp)
                     except OSError:
                         pass
+                if requested_video_url:
+                    update_recent_art(requested_video_url, art_path)
+                if requested_video_url != str(self._last_video_url or ""):
+                    return
                 self._art_path = art_path
-                if self._last_video_url:
-                    update_recent_art(self._last_video_url, art_path)
                 try:
                     ma.set_media_metadata(
                         title=self._title, artist=self._channel,
@@ -2997,7 +3008,7 @@ class AudioPlayerScreen(Screen):
                         subtitle=self._channel or "YouTube",
                         is_playing=bool(ma.android_player and ma.android_player.isPlaying()),
                         session_token=token,
-                        large_icon_path=self._art_path or self._channel_thumb_local
+                        large_icon_path=self._channel_thumb_local
                     )
                 except Exception:
                     pass
@@ -4349,7 +4360,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=is_playing,
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local,
+                large_icon_path=self._channel_thumb_local,
             )
         except Exception as e:
             try:
@@ -4559,7 +4570,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local
             )
         except Exception:
             pass
@@ -5383,7 +5394,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=True,
                     session_token=token2,
-                    large_icon_path=self._art_path or self._channel_thumb_local,
+                    large_icon_path=self._channel_thumb_local,
                 )
             except Exception:
                 pass
@@ -5543,7 +5554,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6231,7 +6242,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=bool(playing),
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6897,7 +6908,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=False,
                 session_token=token,
-                large_icon_path=self._art_path or self._channel_thumb_local
+                large_icon_path=self._channel_thumb_local
             )
         except Exception:
             pass

@@ -116,7 +116,10 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         self.assertIn("style.setMediaSession(session_token)", updater)
         self.assertIn('style.setShowActionsInCompactView(*idx)', updater)
         audio = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
-        self.assertIn("large_icon_path=self._art_path or self._channel_thumb_local", audio)
+        self.assertIn("large_icon_path=self._channel_thumb_local", audio)
+        self.assertNotIn(
+            "large_icon_path=self._art_path or self._channel_thumb_local", audio
+        )
         self.assertNotIn(
             "large_icon_path=self._channel_thumb_local or self._art_path", audio
         )
@@ -146,6 +149,92 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         )
         self.assertIn(
             'self._media_session.setActive(True)', resume
+        )
+
+    def test_media_metadata_keeps_video_art_separate_from_channel_avatar(self):
+        recorded = []
+        class Keys:
+            METADATA_KEY_TITLE = "title"
+            METADATA_KEY_ARTIST = "artist"
+            METADATA_KEY_ALBUM = "album"
+            METADATA_KEY_DURATION = "duration"
+            METADATA_KEY_ALBUM_ART = "album_art"
+            METADATA_KEY_ART = "art"
+            METADATA_KEY_DISPLAY_ICON = "display_icon"
+            METADATA_KEY_ART_URI = "art_uri"
+            METADATA_KEY_ALBUM_ART_URI = "album_art_uri"
+        class Builder:
+            def __init__(self):
+                self.data = {}
+            def putString(self, key, val):
+                self.data[key] = val
+            def putLong(self, key, val):
+                self.data[key] = val
+            def putBitmap(self, key, value):
+                self.data[key] = value
+            def build(self):
+                return dict(self.data)
+        session = SimpleNamespace(setMetadata=lambda val: recorded.append(val))
+        ns = {
+            "_get_session": lambda: session,
+            "_load_bitmap": lambda path: {
+                "/cache/video.jpg": "VIDEO_BITMAP",
+                "/cache/channel.jpg": "CHANNEL_BITMAP",
+            }.get(path),
+            "MediaMetadataBuilder": Builder,
+            "MediaMetadata": Keys,
+            "log": lambda *_: None,
+            "vlog": lambda *_: None,
+        }
+        publish = isolate("media_android.py", "set_media_metadata", ns)
+        publish(
+            title="video", artist="channel",
+            art_path="/cache/video.jpg",
+            avatar_path="/cache/channel.jpg",
+        )
+        self.assertEqual(recorded[-1]["album_art"], "VIDEO_BITMAP")
+        self.assertEqual(recorded[-1]["art"], "VIDEO_BITMAP")
+        self.assertEqual(recorded[-1]["display_icon"], "CHANNEL_BITMAP")
+
+        publish(
+            title="next", artist="no avatar yet",
+            art_path="/cache/video.jpg",
+        )
+        self.assertEqual(recorded[-1]["album_art"], "VIDEO_BITMAP")
+        self.assertNotIn("display_icon", recorded[-1])
+
+    def test_notification_uses_channel_icon_not_video_artwork(self):
+        source = (ANDROID / "media_android.py").read_text(encoding="utf-8")
+        notification = source.split(
+            "def create_or_update_media_notification(", 1
+        )[1].split("def cancel_media_notification(", 1)[0]
+        self.assertIn("icon = _load_bitmap(large_icon_path)", notification)
+        self.assertIn("b.setLargeIcon(icon)", notification)
+        small_icon = isolate("media_android.py", "_safe_small_icon", {
+            "R_draw": SimpleNamespace(ic_media_play=12345),
+            "PythonActivity": SimpleNamespace(mActivity=SimpleNamespace(
+                getApplicationInfo=lambda: SimpleNamespace(icon=98765)
+            )),
+        })
+        self.assertEqual(small_icon(), 12345)
+
+    def test_previous_video_cover_cannot_reappear_after_track_switch(self):
+        audio = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
+        play = audio.split("def _play_audio_base(", 1)[1].split(
+            "def _download_art_async(", 1
+        )[0] if "def _play_audio_base(" in audio else audio
+        self.assertIn("self._art_path = None", play)
+        method = audio.split("def _download_art_async(", 1)[1].split(
+            "def _channel_avatar_cache_path(", 1
+        )[0]
+        self.assertIn("requested_video_url = str(self._last_video_url or \"\")", method)
+        self.assertIn(
+            'if requested_video_url != str(self._last_video_url or ""):',
+            method,
+        )
+        self.assertLess(
+            method.index('if requested_video_url != str(self._last_video_url or ""):'),
+            method.index("self._art_path = art_path"),
         )
 
     def test_cover_download_does_not_disable_tls_or_allow_unbounded_files(self):
