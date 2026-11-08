@@ -52,7 +52,7 @@ def _extract_thumbnail(obj: dict | None) -> str:
 
 def _is_shorts_video(vr: dict) -> bool:
     """
-    Повертає True, якщо це шорт, який треба проігнорити.
+    Повертає True для окремого відкриття в Shorts-переглядачі.
     """
     # інколи шорти маркуються полями isShort / isShorts
     if vr.get("isShort") or vr.get("isShorts"):
@@ -90,23 +90,34 @@ def _shorts_shelf_items(node, limit=18):
             continue
         renderer = current.get("reelItemRenderer") or current.get("shortsLockupViewModel")
         if isinstance(renderer, dict):
-            endpoint = (
-                renderer.get("onTap", {}).get("innertubeCommand", {})
-                if isinstance(renderer.get("onTap"), dict) else {}
-            )
-            vid = str(
-                renderer.get("videoId")
-                or endpoint.get("reelWatchEndpoint", {}).get("videoId")
-                or ""
-            ).strip()
+            on_tap = renderer.get("onTap")
+            on_tap = on_tap if isinstance(on_tap, dict) else {}
+            endpoint = on_tap.get("innertubeCommand") or {}
+            endpoint = endpoint if isinstance(endpoint, dict) else {}
+            reel = endpoint.get("reelWatchEndpoint") or {}
+            reel = reel if isinstance(reel, dict) else {}
+            vid = str(renderer.get("videoId") or reel.get("videoId") or "").strip()
+            if not vid:
+                # Modern shelves may expose only a namespaced entity ID.
+                entity = str(renderer.get("entityId") or "")
+                match = re.fullmatch(
+                    r"shorts-shelf-item-([A-Za-z0-9_-]{11})", entity
+                )
+                vid = match.group(1) if match else ""
             if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid) and vid not in seen:
                 seen.add(vid)
+                overlay = renderer.get("overlayMetadata") or {}
+                overlay = overlay if isinstance(overlay, dict) else {}
+                primary = overlay.get("primaryText") or {}
+                primary = primary if isinstance(primary, dict) else {}
                 title = (
                     _extract_text(renderer.get("headline"))
-                    or (renderer.get("overlayMetadata") or {}).get("primaryText", {}).get("content")
+                    or str(primary.get("content") or "")
                     or str(renderer.get("title") or "Shorts")
                 )
-                sources = (renderer.get("thumbnail") or {}).get("sources") or []
+                thumbnail = renderer.get("thumbnail") or {}
+                thumbnail = thumbnail if isinstance(thumbnail, dict) else {}
+                sources = thumbnail.get("sources") or []
                 thumb = _extract_thumbnail(renderer)
                 if not thumb and sources and isinstance(sources[-1], dict):
                     thumb = str(sources[-1].get("url") or "")
