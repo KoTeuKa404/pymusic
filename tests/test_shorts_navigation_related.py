@@ -147,6 +147,71 @@ class ShortsAndNavigationTests(unittest.TestCase):
             scheduled, ["https://www.youtube.com/shorts/abc123def45"]
         )
 
+    def test_webview_to_shorts_never_hides_shared_native_browser(self):
+        events = []
+        class Manager:
+            current = "web"
+            screen_names = ("search", "web", "shorts", "audio")
+            def __init__(self):
+                self.screens = {
+                    name: SimpleNamespace(name=name, _keep_webview_on_leave=False)
+                    for name in self.screen_names
+                }
+            def get_screen(self, name):
+                return self.screens[name]
+        manager = Manager()
+        root = SimpleNamespace(
+            sm=manager,
+            _active_tab="web",
+            _switch_relative=lambda delta: None,
+        )
+        go = isolate("main.py", "set_screen", {
+            "ma": SimpleNamespace(
+                apply_light_system_bars=lambda: None
+            )
+        })
+        module = ast.parse((ANDROID / "main.py").read_text(encoding="utf-8"))
+        web_class = next(
+            cls for cls in module.body
+            if isinstance(cls, ast.ClassDef) and cls.name == "YoutubeWebScreen"
+        )
+        web_method = next(
+            node for node in web_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "on_pre_leave"
+        )
+        web_method.decorator_list = []
+        scope = {
+            "ma": SimpleNamespace(webview_hide=lambda: events.append("hide"))
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=[web_method], type_ignores=[])
+        ), "main.py", "exec"), scope)
+        web_leave = scope["on_pre_leave"]
+        # Both screen classes have their own on_pre_leave override. Inspect
+        # its body so a future refactor cannot accidentally reintroduce a
+        # hide() between screens sharing the one Android WebView.
+        source = (ANDROID / "main.py").read_text(encoding="utf-8")
+        shorts = source.split("class YoutubeShortsScreen(", 1)[1].split(
+            "class RootLayout(", 1
+        )[0]
+        self.assertIn('if getattr(self, "_keep_webview_on_leave", False):', shorts)
+
+        go(root, "shorts")
+        self.assertEqual(manager.current, "shorts")
+        self.assertTrue(manager.get_screen("web")._keep_webview_on_leave)
+        web_leave(manager.get_screen("web"))
+        self.assertEqual(events, [])
+        self.assertFalse(manager.get_screen("web")._keep_webview_on_leave)
+
+        go(root, "audio")
+        self.assertEqual(manager.current, "audio")
+        self.assertFalse(manager.get_screen("shorts")._keep_webview_on_leave)
+
+        go(root, "web")
+        self.assertEqual(manager.current, "web")
+        web_leave(manager.get_screen("web"))
+        self.assertEqual(events, ["hide"])
+
     def test_no_black_nav_bar_in_kivy_or_native_youtube(self):
         main = (ANDROID / "main.py").read_text(encoding="utf-8")
         java = JAVA.read_text(encoding="utf-8")
