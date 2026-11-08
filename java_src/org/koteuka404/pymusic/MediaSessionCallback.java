@@ -1,6 +1,7 @@
 package org.koteuka404.pymusic;
 
 import android.content.Intent;
+import android.os.Bundle;
 import android.media.session.MediaSession;
 import org.kivy.android.PythonActivity;
 
@@ -58,5 +59,14 @@ public class MediaSessionCallback extends MediaSession.Callback {
     @Override
     public void onSeekTo(long pos) {
         dispatchSeekTo(pos);
+    }
+
+    @Override
+    public void onCustomAction(String action, Bundle extras) {
+        // Only our own, explicitly declared transport action is handled.
+        // Never dispatch a system-supplied arbitrary string as an Intent.
+        if ("org.koteuka404.pymusic.REPEAT".equals(action)) {
+            dispatchAction(action);
+        }
     }
 }

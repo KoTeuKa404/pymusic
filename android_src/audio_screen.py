@@ -1566,6 +1566,12 @@ class AudioPlayerScreen(Screen):
 
         self._ensure_video_player()
         Clock.schedule_once(self._align_video_to_thumb, 0.3)
+        if getattr(self, "_last_video_url", None) and self._video_enabled:
+            Clock.schedule_once(
+                lambda _dt: self._set_video_controls_visible(
+                    True, auto_hide=not bool(self._user_paused)
+                ), 0.45,
+            )
 
     def on_pre_leave(self):
         sheet = getattr(self, "_current_comments_popup_v4", None)
@@ -1580,7 +1586,13 @@ class AudioPlayerScreen(Screen):
                     is_playing = bool(ma.android_player and ma.android_player.isPlaying())
                 except Exception:
                     is_playing = False
-                if not (is_playing or self._playback_desired):
+                # Android 13/MIUI hides our QS media card when the session
+                # becomes inactive. Pausing or navigating away is not a
+                # Stop action: keep a loaded track's session available.
+                if not (
+                    is_playing or self._playback_desired
+                    or bool(getattr(self, "_last_video_url", None))
+                ):
                     self._media_session.setActive(False)
         except Exception:
             pass
@@ -1645,6 +1657,11 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(_do_open, 0)
 
     def handle_app_resume(self):
+        try:
+            if self._media_session and getattr(self, "_last_video_url", None):
+                self._media_session.setActive(True)
+        except Exception:
+            pass
         for delay in (0.0, 0.06, 0.18, 0.40):
             Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
         self._app_in_background = False
@@ -1689,6 +1706,21 @@ class AudioPlayerScreen(Screen):
                 ).start()
         except Exception:
             pass
+        # Android 13 may discard the SurfaceView holder during pause.
+        # Recreate/reposition the native touch controls on the audio screen
+        # even when playback was paused (then show the thumbnail beneath).
+        if (
+            self._is_screen_active()
+            and self._video_enabled
+            and self._last_video_url
+        ):
+            self._ensure_video_player()
+            Clock.schedule_once(
+                lambda _dt: self._set_video_controls_visible(
+                    True, auto_hide=not bool(self._user_paused)
+                ), 0.16,
+            )
+            Clock.schedule_once(self._align_video_to_thumb, 0.21)
         if _current_video_url_of(self):
             self._ensure_related_current_v4(force=False)
         for delay in (0.0, 0.12, 0.5):
@@ -2131,7 +2163,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=is_playing,
                     session_token=token,
-                    large_icon_path=self._channel_thumb_local or self._art_path
+                    large_icon_path=self._art_path or self._channel_thumb_local
                 )
         except Exception as e:
             print("[BG TICK] err:", e)
@@ -2604,7 +2636,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path,
+                large_icon_path=self._art_path or self._channel_thumb_local,
             )
         except Exception:
             pass
@@ -2901,9 +2933,52 @@ class AudioPlayerScreen(Screen):
                         "Connection": "keep-alive",
                     },
                 )
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=12, context=ctx) as resp, open(art_path, "wb") as f:
-                    f.write(resp.read())
+                # Album art is a bounded, verified HTTPS asset. The old
+                # _create_unverified_context accepted forged certs and wrote
+                # arbitrary response sizes directly into the media cache.
+                def trusted_art(hostname: str) -> bool:
+                    host = str(hostname or "").lower()
+                    return host in (
+                        "i.ytimg.com", "img.youtube.com",
+                        "yt3.ggpht.com", "yt3.googleusercontent.com",
+                    )
+
+                parsed = urllib.parse.urlsplit(url)
+                if parsed.scheme != "https" or not trusted_art(parsed.hostname):
+                    return
+
+                class SafeArtRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, request, fp, code, msg, hdrs, newurl):
+                        target = urllib.parse.urlsplit(newurl)
+                        if target.scheme != "https" or not trusted_art(target.hostname):
+                            raise ValueError("untrusted thumbnail redirect")
+                        return super().redirect_request(
+                            request, fp, code, msg, hdrs, newurl
+                        )
+
+                context = ssl.create_default_context(cafile=certifi.where())
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPSHandler(context=context),
+                    SafeArtRedirect(),
+                )
+                with opener.open(req, timeout=12) as response:
+                    length = int(response.headers.get("Content-Length") or 0)
+                    if length > 2 * 1024 * 1024:
+                        return
+                    image_bytes = response.read(2 * 1024 * 1024 + 1)
+                    if len(image_bytes) > 2 * 1024 * 1024 or len(image_bytes) < 128:
+                        return
+                temp = art_path + ".part"
+                try:
+                    with open(temp, "wb") as output:
+                        output.write(image_bytes)
+                    os.replace(temp, art_path)
+                finally:
+                    try:
+                        if os.path.exists(temp):
+                            os.unlink(temp)
+                    except OSError:
+                        pass
                 self._art_path = art_path
                 if self._last_video_url:
                     update_recent_art(self._last_video_url, art_path)
@@ -2922,7 +2997,7 @@ class AudioPlayerScreen(Screen):
                         subtitle=self._channel or "YouTube",
                         is_playing=bool(ma.android_player and ma.android_player.isPlaying()),
                         session_token=token,
-                        large_icon_path=self._channel_thumb_local or self._art_path
+                        large_icon_path=self._art_path or self._channel_thumb_local
                     )
                 except Exception:
                     pass
@@ -4274,7 +4349,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=is_playing,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path,
+                large_icon_path=self._art_path or self._channel_thumb_local,
             )
         except Exception as e:
             try:
@@ -4484,7 +4559,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -5308,7 +5383,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=True,
                     session_token=token2,
-                    large_icon_path=self._channel_thumb_local or self._art_path,
+                    large_icon_path=self._art_path or self._channel_thumb_local,
                 )
             except Exception:
                 pass
@@ -5468,7 +5543,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6156,7 +6231,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=bool(playing),
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6706,7 +6781,21 @@ class AudioPlayerScreen(Screen):
             ma._mp_start()
             try:
                 if self._video_player and self._video_enabled:
-                    self._video_player.resume()
+                    if self._video_active and getattr(self._video_player, "player", None):
+                        self._video_player.resume()
+                    elif (
+                        self._last_video_url
+                        and self._is_screen_active()
+                        and not self._app_in_background
+                    ):
+                        # Resume after a background pause with a destroyed
+                        # native video holder; a bare .resume() is a no-op.
+                        threading.Thread(
+                            target=lambda: self._auto_video_for_current(
+                                self._load_gen, sync_start=False
+                            ),
+                            daemon=True, name="pymusic-resume-video",
+                        ).start()
             except Exception:
                 pass
             try:
@@ -6779,7 +6868,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=False,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass

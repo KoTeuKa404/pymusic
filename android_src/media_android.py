@@ -881,7 +881,13 @@ def webview_show(url: str | None = None):
             _webview.setLayoutParams(lp)
         except Exception:
             pass
-        if _webview_shown and url is None:
+        # State flags may be stale after Activity background/restore. Trust
+        # the actual Android view tree rather than blindly skipping show.
+        try:
+            visible = _webview_container.getVisibility() == View.VISIBLE
+        except Exception:
+            visible = False
+        if _webview_shown and visible and url is None:
             return
         _webview_container.setVisibility(View.VISIBLE)
         _webview_shown = True
@@ -910,12 +916,20 @@ def webview_hide():
         # Screens change before the native UI thread always processes the
         # request; duplicate hide calls must not re-run JavaScript/media
         # cleanup or toggle SDL layers again.
-        if _webview_container is None or not _webview_shown:
+        if _webview_container is None:
             return
         try:
-            _webview_stop_media()
+            native_visible = _webview_container.getVisibility() == View.VISIBLE
         except Exception:
-            pass
+            native_visible = bool(_webview_shown)
+        # After a navigation/lifecycle race _webview_shown can be false while
+        # the full-screen Java View remains visible *above* Kivy+SurfaceView.
+        # The entire video and all touch buttons then appear frozen.
+        if native_visible:
+            try:
+                _webview_stop_media()
+            except Exception:
+                pass
         _webview_container.setVisibility(View.GONE)
         _webview_shown = False
         # SDL was never detached; simply hide the native WebView layer.
@@ -1335,6 +1349,13 @@ NOTIF_CHANNEL_ID   = "pymusic_player"
 NOTIF_CHANNEL_NAME = "PyMusic Player"
 NOTIF_ID           = 4242
 
+# Android 13 derives Quick Settings media controls from PlaybackState.
+# Rebuilding a notification every ~1s despite no content changes thrashes
+# MIUI's notification and UI threads. Cache only the published UI signature,
+# never playback data or signed media URLs.
+_LAST_NOTIFICATION_SIGNATURE = None
+_LAST_MEDIA_STATE_DETAILS = None
+
 
 _ART_BITMAP_CACHE = {}
 
@@ -1442,11 +1463,30 @@ def create_or_update_media_notification(*,
     session_token=None,
     large_icon_path: str | None = None
 ):
+    """Publish a system MediaStyle card only when its visible content changes.
+
+    The OS, not an app-supplied RemoteViews layout, owns Android 13's Quick
+    Settings media panel. ACTION_PLAY/PAUSE/NEXT/PREV and the optional
+    PlaybackState custom repeat action determine the real buttons.
     """
-    Показуємо три кнопки (prev, play/pause, next) у compact view.
-    """
+    global _LAST_NOTIFICATION_SIGNATURE
     try:
         _ensure_action_constants()
+        try:
+            artwork_version = (
+                os.path.getmtime(large_icon_path)
+                if large_icon_path and os.path.isfile(large_icon_path)
+                else None
+            )
+        except OSError:
+            artwork_version = None
+        signature = (
+            str(title or ""), str(subtitle or ""), bool(is_playing),
+            str(large_icon_path or ""), artwork_version,
+            id(_get_session()), bool(session_token is not None),
+        )
+        if signature == _LAST_NOTIFICATION_SIGNATURE:
+            return
         act = PythonActivity.mActivity
 
         # Builder
@@ -1604,6 +1644,7 @@ def create_or_update_media_notification(*,
         nm = cast('android.app.NotificationManager',
                   act.getSystemService(Context.NOTIFICATION_SERVICE))
         nm.notify(NOTIF_ID, b.build())
+        _LAST_NOTIFICATION_SIGNATURE = signature
         log(f"[NOTIF] updated (actions={actions_added})")
     except Exception as e:
         log(f"[NOTIF] update err: {e}")
@@ -1611,6 +1652,8 @@ def create_or_update_media_notification(*,
 
 @run_on_ui_thread
 def cancel_media_notification():
+    global _LAST_NOTIFICATION_SIGNATURE
+    _LAST_NOTIFICATION_SIGNATURE = None
     try:
         nm = cast('android.app.NotificationManager',
                   activity.getSystemService(Context.NOTIFICATION_SERVICE))
@@ -1867,22 +1910,59 @@ def set_media_session_callback(owner):
 @run_on_ui_thread
 def update_media_session_state(is_playing: bool, position_ms: int = 0,
                                duration_ms: int | None = None, can_seek: bool = True):
+    global _LAST_MEDIA_STATE_DETAILS
     try:
         ms = _get_session()
         if ms is None:
             return
+        _ensure_action_constants()
+        now = time.monotonic()
+        position = int(max(0, position_ms or 0))
+        state_code = PlaybackState.STATE_PLAYING if is_playing else PlaybackState.STATE_PAUSED
+
+        # MediaSession interpolates a playing position at speed=1. It need
+        # not be rebuilt every 0.3-0.5s. Paused position is stable until
+        # seek/track changes; update immediately if that or state changes.
+        last = _LAST_MEDIA_STATE_DETAILS
+        if last is not None:
+            same_state = (
+                last["session_id"] == id(ms)
+                and last["playing"] == bool(is_playing)
+                and last["can_seek"] == bool(can_seek)
+                and last["duration"] == duration_ms
+            )
+            if same_state:
+                drift = abs(position - last["position"])
+                elapsed = now - last["at"]
+                if (not is_playing and drift < 1000) or (
+                    is_playing and elapsed < 7.0
+                    and abs(drift - elapsed * 1000) < 3000
+                ):
+                    return
+
         actions = (PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE |
                    PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_SKIP_TO_NEXT |
                    PlaybackState.ACTION_SKIP_TO_PREVIOUS)
         if can_seek:
             actions |= PlaybackState.ACTION_SEEK_TO
-
-        state_code = PlaybackState.STATE_PLAYING if is_playing else PlaybackState.STATE_PAUSED
         pb = PlaybackStateBuilder()
         pb.setActions(actions)
         speed = 1.0 if is_playing else 0.0
-        pb.setState(state_code, int(max(0, position_ms or 0)), float(speed))
+        pb.setState(state_code, position, float(speed))
+        # Android 13's optional fourth media button comes from custom
+        # PlaybackState actions, not Notification.Action (MIUI may hide it).
+        try:
+            pb.addCustomAction(
+                str(ACTION_REPEAT), "Repeat", int(R_draw.ic_menu_revert)
+            )
+        except Exception as exc:
+            log(f"[MS] optional repeat custom action unavailable: {type(exc).__name__}")
         ms.setPlaybackState(pb.build())
+        _LAST_MEDIA_STATE_DETAILS = {
+            "session_id": id(ms), "playing": bool(is_playing),
+            "can_seek": bool(can_seek), "duration": duration_ms,
+            "position": position, "at": now,
+        }
         vlog("[MS] playback state set")
     except Exception as e:
         log(f"[MS] update state err: {e}")
