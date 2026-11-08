@@ -69,6 +69,61 @@ def _is_shorts_video(vr: dict) -> bool:
     return False
 
 
+def _shorts_shelf_items(node, limit=18):
+    """Read genuine Shorts renderer IDs rather than guessing by duration.
+
+    Returns the same five-field rows used for other search videos. Supports
+    both reelItemRenderer and shortsLockupViewModel variants of YouTube
+    shelves. Traversal is bounded to keep malformed responses inexpensive.
+    """
+    found = []
+    visited = 0
+    stack = [node]
+    seen = set()
+    while stack and visited < 900 and len(found) < limit:
+        current = stack.pop()
+        visited += 1
+        if isinstance(current, list):
+            stack.extend(reversed(current[:60]))
+            continue
+        if not isinstance(current, dict):
+            continue
+        renderer = current.get("reelItemRenderer") or current.get("shortsLockupViewModel")
+        if isinstance(renderer, dict):
+            endpoint = (
+                renderer.get("onTap", {}).get("innertubeCommand", {})
+                if isinstance(renderer.get("onTap"), dict) else {}
+            )
+            vid = str(
+                renderer.get("videoId")
+                or endpoint.get("reelWatchEndpoint", {}).get("videoId")
+                or ""
+            ).strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid) and vid not in seen:
+                seen.add(vid)
+                title = (
+                    _extract_text(renderer.get("headline"))
+                    or (renderer.get("overlayMetadata") or {}).get("primaryText", {}).get("content")
+                    or str(renderer.get("title") or "Shorts")
+                )
+                sources = (renderer.get("thumbnail") or {}).get("sources") or []
+                thumb = _extract_thumbnail(renderer)
+                if not thumb and sources and isinstance(sources[-1], dict):
+                    thumb = str(sources[-1].get("url") or "")
+                if not thumb:
+                    thumb = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+                found.append((
+                    f"https://www.youtube.com/shorts/{vid}",
+                    str(title).strip(), "", thumb, "Shorts"
+                ))
+        for key, value in current.items():
+            if key in ("trackingParams", "menu", "navigationEndpoint"):
+                continue
+            if isinstance(value, (dict, list)):
+                stack.append(value)
+    return found
+
+
 def _find_continuation(obj):
     if isinstance(obj, dict):
         cmd = obj.get("continuationCommand") or {}
@@ -90,17 +145,21 @@ def _find_continuation(obj):
 def _parse_items(items):
     videos = []
     playlists = []
+    seen_videos = set()
     for it in items or []:
         # інколи елементи загорнуті в richItemRenderer
         if "richItemRenderer" in it:
             it = it.get("richItemRenderer", {}).get("content", {}) or it
 
-        # --------- ВІДЕО (без шортів) ---------
+        # Include genuine Shorts from YouTube shelves and regular results.
+        for short in _shorts_shelf_items(it):
+            if short[0] not in seen_videos:
+                videos.append(short)
+                seen_videos.add(short[0])
+
+        # --------- ВІДЕО + SHORTS ---------
         vr = it.get("videoRenderer")
         if vr:
-            # фільтр шортів
-            if _is_shorts_video(vr):
-                continue
             try:
                 title = _extract_text(vr.get("title"))
                 vid = vr.get("videoId") or ""
@@ -109,15 +168,17 @@ def _parse_items(items):
                 thumb = _extract_thumbnail(vr)
                 chan = _extract_text(vr.get("ownerText"))
                 dur = _extract_text(vr.get("lengthText"))
-                videos.append(
-                    (
-                        f"https://www.youtube.com/watch?v={vid}",
-                        title,
-                        chan,
-                        thumb,
-                        dur,
-                    )
+                is_short = _is_shorts_video(vr)
+                url = (
+                    f"https://www.youtube.com/shorts/{vid}"
+                    if is_short else f"https://www.youtube.com/watch?v={vid}"
                 )
+                if url not in seen_videos:
+                    videos.append((
+                        url, title, chan, thumb,
+                        "Shorts" if is_short else dur,
+                    ))
+                    seen_videos.add(url)
             except Exception as e:
                 try:
                     print("[SEARCH] skip video item:", e)
@@ -204,7 +265,10 @@ def fetch_youtube_results(query):
         )
     }
 
-    url = f"https://www.youtube.com/results?search_query={query}&hl=en&persist_gl=1"
+    from urllib.parse import urlencode
+    url = "https://www.youtube.com/results?" + urlencode({
+        "search_query": str(query), "hl": "en", "persist_gl": "1"
+    })
 
     try:
         resp = httpx.get(url, headers=headers, timeout=6.0)
