@@ -1687,7 +1687,7 @@ class AudioPlayerScreen(Screen):
                 if self._last_video_url and self._video_enabled:
                     threading.Thread(
                         target=lambda: self._auto_video_for_current(self._load_gen, sync_start=False),
-                        daemon=True,
+                        daemon=True, name="pymusic-resume-video",
                     ).start()
                     video_resume_started = True
             else:
@@ -1702,7 +1702,7 @@ class AudioPlayerScreen(Screen):
             ):
                 threading.Thread(
                     target=lambda: self._auto_video_for_current(self._load_gen, sync_start=False),
-                    daemon=True,
+                    daemon=True, name="pymusic-resume-video",
                 ).start()
         except Exception:
             pass
