@@ -1315,6 +1315,7 @@ ACTION_PAUSE = None
 ACTION_TOGGLE = None
 ACTION_NEXT = None
 ACTION_REPEAT = None
+ACTION_FAVORITE = None
 ACTION_SEEK = None
 ACTION_WEB_URL = None
 ACTION_WEB_MODE = None
@@ -1322,7 +1323,7 @@ ACTION_OPEN_PLAYER = None
 
 
 def _ensure_action_constants():
-    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_REPEAT, ACTION_SEEK, ACTION_WEB_URL, ACTION_WEB_MODE, ACTION_OPEN_PLAYER
+    global _ACTION_PREFIX, ACTION_PREV, ACTION_PLAY, ACTION_PAUSE, ACTION_TOGGLE, ACTION_NEXT, ACTION_REPEAT, ACTION_FAVORITE, ACTION_SEEK, ACTION_WEB_URL, ACTION_WEB_MODE, ACTION_OPEN_PLAYER
     if _ACTION_PREFIX:
         return
     try:
@@ -1340,6 +1341,7 @@ def _ensure_action_constants():
     ACTION_TOGGLE = f"{_ACTION_PREFIX}.TOGGLE"
     ACTION_NEXT = f"{_ACTION_PREFIX}.NEXT"
     ACTION_REPEAT = f"{_ACTION_PREFIX}.REPEAT"
+    ACTION_FAVORITE = f"{_ACTION_PREFIX}.FAVORITE"
     ACTION_SEEK = f"{_ACTION_PREFIX}.SEEK"
     ACTION_WEB_URL = f"{_ACTION_PREFIX}.WEB_URL"
     ACTION_WEB_MODE = f"{_ACTION_PREFIX}.WEB_MODE"
@@ -1391,6 +1393,50 @@ def _load_bitmap(path: str):
     except Exception as exc:
         log(f"[ART] decode failed: {exc}")
         return None
+
+
+_ACTION_DRAWABLE_NAMES = frozenset((
+    "pymusic_repeat", "pymusic_repeat_active",
+    "pymusic_favorite", "pymusic_favorite_active",
+))
+
+
+def _media_action_icon(resource_name: str, fallback: int) -> int:
+    """Resolve our compiled Android drawable, never an untrusted name/ID.
+
+    SystemUI requires a package resource ID for PlaybackState custom actions.
+    The corresponding Kivy PNG path cannot be passed as a Java drawable ID.
+    """
+    if resource_name not in _ACTION_DRAWABLE_NAMES:
+        return int(fallback)
+    try:
+        act = PythonActivity.mActivity
+        resource_id = int(act.getResources().getIdentifier(
+            resource_name, "drawable", act.getPackageName()
+        ))
+        if resource_id > 0:
+            return resource_id
+    except Exception as exc:
+        log(f"[NOTIF] action icon lookup failed: {type(exc).__name__}")
+    return int(fallback)
+
+
+def _media_custom_action_icons(repeat_enabled: bool, favorite_enabled: bool):
+    repeat_name = "pymusic_repeat_active" if repeat_enabled else "pymusic_repeat"
+    favorite_name = (
+        "pymusic_favorite_active" if favorite_enabled else "pymusic_favorite"
+    )
+    repeat_fallback = int(R_draw.ic_menu_revert)
+    try:
+        favorite_fallback = int(
+            R_draw.btn_star_big_on if favorite_enabled else R_draw.btn_star_big_off
+        )
+    except Exception:
+        favorite_fallback = int(R_draw.ic_menu_add)
+    return (
+        _media_action_icon(repeat_name, repeat_fallback),
+        _media_action_icon(favorite_name, favorite_fallback),
+    )
 
 
 def _safe_small_icon():
@@ -1466,7 +1512,9 @@ def create_or_update_media_notification(*,
     subtitle: str = "",
     is_playing: bool = True,
     session_token=None,
-    large_icon_path: str | None = None
+    large_icon_path: str | None = None,
+    repeat_enabled: bool = False,
+    favorite_enabled: bool = False,
 ):
     """Publish a system MediaStyle card only when its visible content changes.
 
@@ -1489,6 +1537,7 @@ def create_or_update_media_notification(*,
             str(title or ""), str(subtitle or ""), bool(is_playing),
             str(large_icon_path or ""), artwork_version,
             id(_get_session()), bool(session_token is not None),
+            bool(repeat_enabled), bool(favorite_enabled),
         )
         if signature == _LAST_NOTIFICATION_SIGNATURE:
             return
@@ -1626,7 +1675,11 @@ def create_or_update_media_notification(*,
         else:
             _add_action(R_draw.ic_media_play, "Play", _pi_media(KeyEvent.KEYCODE_MEDIA_PLAY, 202))
         _add_action(R_draw.ic_media_next, "Next", _pi_media(KeyEvent.KEYCODE_MEDIA_NEXT, 204))
-        _add_action(R_draw.ic_menu_revert, "Repeat", _pi_action(ACTION_REPEAT, 206))
+        repeat_icon, favorite_icon = _media_custom_action_icons(
+            bool(repeat_enabled), bool(favorite_enabled)
+        )
+        _add_action(repeat_icon, "Repeat", _pi_action(ACTION_REPEAT, 206))
+        _add_action(favorite_icon, "Favorite", _pi_action(ACTION_FAVORITE, 207))
 
         # MediaStyle з compact-кнопками і токеном сесії
         try:
@@ -1917,7 +1970,9 @@ def set_media_session_callback(owner):
 
 @run_on_ui_thread
 def update_media_session_state(is_playing: bool, position_ms: int = 0,
-                               duration_ms: int | None = None, can_seek: bool = True):
+                               duration_ms: int | None = None, can_seek: bool = True,
+                               repeat_enabled: bool = False,
+                               favorite_enabled: bool = False):
     global _LAST_MEDIA_STATE_DETAILS
     try:
         ms = _get_session()
@@ -1938,6 +1993,8 @@ def update_media_session_state(is_playing: bool, position_ms: int = 0,
                 and last["playing"] == bool(is_playing)
                 and last["can_seek"] == bool(can_seek)
                 and last["duration"] == duration_ms
+                and last.get("repeat_enabled") == bool(repeat_enabled)
+                and last.get("favorite_enabled") == bool(favorite_enabled)
             )
             if same_state:
                 drift = abs(position - last["position"])
@@ -1957,18 +2014,26 @@ def update_media_session_state(is_playing: bool, position_ms: int = 0,
         pb.setActions(actions)
         speed = 1.0 if is_playing else 0.0
         pb.setState(state_code, position, float(speed))
-        # Android 13's optional fourth media button comes from custom
-        # PlaybackState actions, not Notification.Action (MIUI may hide it).
+        # Android 13's SystemUI builds the fourth/fifth media-card slots
+        # from PlaybackState CustomActions. The user's own drawable files
+        # provide both normal and selected states.
+        repeat_icon, favorite_icon = _media_custom_action_icons(
+            bool(repeat_enabled), bool(favorite_enabled)
+        )
         try:
-            pb.addCustomAction(
-                str(ACTION_REPEAT), "Repeat", int(R_draw.ic_menu_revert)
-            )
+            pb.addCustomAction(str(ACTION_REPEAT), "Repeat", int(repeat_icon))
         except Exception as exc:
-            log(f"[MS] optional repeat custom action unavailable: {type(exc).__name__}")
+            log(f"[MS] Repeat action unavailable: {type(exc).__name__}")
+        try:
+            pb.addCustomAction(str(ACTION_FAVORITE), "Favorite", int(favorite_icon))
+        except Exception as exc:
+            log(f"[MS] Favorite action unavailable: {type(exc).__name__}")
         ms.setPlaybackState(pb.build())
         _LAST_MEDIA_STATE_DETAILS = {
             "session_id": id(ms), "playing": bool(is_playing),
             "can_seek": bool(can_seek), "duration": duration_ms,
+            "repeat_enabled": bool(repeat_enabled),
+            "favorite_enabled": bool(favorite_enabled),
             "position": position, "at": now,
         }
         vlog("[MS] playback state set")
@@ -2071,6 +2136,10 @@ def _route_action_intent(intent):
                 cb()
         elif act == ACTION_REPEAT:
             cb = getattr(_action_owner, "_ms_repeat", None)
+            if callable(cb):
+                cb()
+        elif act == ACTION_FAVORITE:
+            cb = getattr(_action_owner, "_ms_favorite", None)
             if callable(cb):
                 cb()
         elif act == ACTION_SEEK:
