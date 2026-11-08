@@ -65,7 +65,8 @@ public class MediaSessionCallback extends MediaSession.Callback {
     public void onCustomAction(String action, Bundle extras) {
         // Only our own, explicitly declared transport action is handled.
         // Never dispatch a system-supplied arbitrary string as an Intent.
-        if ("org.koteuka404.pymusic.REPEAT".equals(action)) {
+        if ("org.koteuka404.pymusic.REPEAT".equals(action)
+                || "org.koteuka404.pymusic.FAVORITE".equals(action)) {
             dispatchAction(action);
         }
     }

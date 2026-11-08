@@ -84,6 +84,11 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
             "_get_session": lambda: session,
             "_ensure_action_constants": lambda: None,
             "ACTION_REPEAT": "org.koteuka404.pymusic.REPEAT",
+            "ACTION_FAVORITE": "org.koteuka404.pymusic.FAVORITE",
+            "_media_custom_action_icons": lambda repeat, fav: (
+                42 if not repeat else 44,
+                43 if not fav else 45,
+            ),
             "PlaybackState": FakePlaybackState,
             "PlaybackStateBuilder": FakeBuilder,
             "R_draw": SimpleNamespace(ic_menu_revert=42),
@@ -104,6 +109,27 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         self.assertEqual(len(updates), 2)
         update(True, 103900, 180000, True)
         self.assertEqual(len(updates), 3)
+        self.assertIn(
+            ("custom", "org.koteuka404.pymusic.FAVORITE", "Favorite", 43),
+            updates[-1],
+        )
+        # Pressing Favorite or Repeat while paused must rebuild the custom
+        # buttons despite an unchanged MediaPlayer position.
+        update(False, 103900, 180000, True)
+        self.assertEqual(len(updates), 4)
+        update(False, 103900, 180000, True, favorite_enabled=True)
+        self.assertEqual(len(updates), 5)
+        self.assertIn(
+            ("custom", "org.koteuka404.pymusic.FAVORITE", "Favorite", 45),
+            updates[-1],
+        )
+        update(False, 103900, 180000, True,
+               repeat_enabled=True, favorite_enabled=True)
+        self.assertEqual(len(updates), 6)
+        self.assertIn(
+            ("custom", "org.koteuka404.pymusic.REPEAT", "Repeat", 44),
+            updates[-1],
+        )
 
     def test_notification_has_validated_signature_and_cover(self):
         source = (ANDROID / "media_android.py").read_text(encoding="utf-8")
@@ -236,6 +262,65 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
             method.index('if requested_video_url != str(self._last_video_url or ""):'),
             method.index("self._art_path = art_path"),
         )
+
+    def test_media_icons_are_compiled_android_drawables(self):
+        build = (ROOT / "buildozer.spec").read_text(encoding="utf-8")
+        resources = (
+            ("icorepeat.png", "pymusic_repeat.png"),
+            ("icorepeat_active.png", "pymusic_repeat_active.png"),
+            ("icofavorite.png", "pymusic_favorite.png"),
+            ("icofavorite_active.png", "pymusic_favorite_active.png"),
+        )
+        for original, drawable in resources:
+            self.assertTrue(
+                (ANDROID / "ico" / original).exists(),
+                original + " is missing",
+            )
+            self.assertIn(
+                f"android_src/ico/{original}:drawable/{drawable}", build
+            )
+        ns = {
+            "_ACTION_DRAWABLE_NAMES": frozenset(
+                Path(name).stem for _, name in resources
+            ),
+            "PythonActivity": SimpleNamespace(mActivity=SimpleNamespace(
+                getPackageName=lambda: "org.koteuka404.pymusic",
+                getResources=lambda: SimpleNamespace(
+                    getIdentifier=lambda name, kind, package: (
+                        123 if name == "pymusic_repeat_active"
+                        and kind == "drawable" and package == "org.koteuka404.pymusic"
+                        else 456 if name == "pymusic_favorite" else 0
+                    )
+                )
+            )),
+            "log": lambda _: None,
+        }
+        resolved = isolate("media_android.py", "_media_action_icon", ns)
+        self.assertEqual(resolved("pymusic_repeat_active", 33), 123)
+        self.assertEqual(resolved("pymusic_favorite", 33), 456)
+        self.assertEqual(resolved("not_allowlisted", 33), 33)
+        self.assertEqual(resolved("pymusic_favorite_active", 33), 33)
+
+    def test_favorite_and_repeat_use_same_player_state_as_kivy_buttons(self):
+        player = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn("self._ms_favorite = self._act_favorite", player)
+        self.assertIn("self._ms_repeat = self._act_repeat", player)
+        self.assertIn("self.toggle_favorite()", player)
+        self.assertIn("self.toggle_repeat()", player)
+        self.assertIn(
+            "favorite_enabled=bool(self._favorite)", player
+        )
+        self.assertIn(
+            "repeat_enabled=bool(self.repeat)", player
+        )
+        code = (ANDROID / "media_android.py").read_text(encoding="utf-8")
+        self.assertIn("elif act == ACTION_FAVORITE:", code)
+        self.assertIn('_pi_action(ACTION_FAVORITE, 207)', code)
+        self.assertIn("pb.addCustomAction(str(ACTION_FAVORITE)", code)
+        callback = (
+            ROOT / "java_src/org/koteuka404/pymusic/MediaSessionCallback.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"org.koteuka404.pymusic.FAVORITE".equals(action)', callback)
 
     def test_cover_download_does_not_disable_tls_or_allow_unbounded_files(self):
         audio = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
