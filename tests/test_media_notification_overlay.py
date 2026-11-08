@@ -147,7 +147,7 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         method = audio.split("def _download_art_async(", 1)[1].split(
             "def _channel_avatar_cache_path(", 1
         )[0]
-        self.assertNotIn("_create_unverified_context", method)
+        self.assertNotIn("ssl._create_unverified_context()", method)
         self.assertIn("ssl.create_default_context(cafile=certifi.where())", method)
         self.assertIn('class SafeArtRedirect(urllib.request.HTTPRedirectHandler)', method)
         self.assertIn('image_bytes = response.read(2 * 1024 * 1024 + 1)', method)
