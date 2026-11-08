@@ -1579,11 +1579,10 @@ def create_or_update_media_notification(*,
         if hasattr(b, "setOngoing"):
             b.setOngoing(is_playing)
 
-        # Small artwork tile: YouTube channel avatar, NOT the video cover.
-        # Album/video artwork is provided to MediaSession separately. On
-        # Android 13/MIUI the OS chooses whether to show the video artwork
-        # or a color-tinted background; a full-bleed photo isn't controllable
-        # through the platform MediaStyle notification API.
+        # Best-effort channel avatar for notification layouts that honor
+        # Notification.largeIcon. Android 13/MIUI may instead choose album art
+        # for the tile and use album-art-derived colors for the background.
+        # These positions cannot be independently forced with MediaStyle.
         try:
             icon = _load_bitmap(large_icon_path)
             if icon is not None:
@@ -1757,7 +1756,8 @@ def _get_session():
 @run_on_ui_thread
 def set_media_metadata(title: str = "", artist: str = "", album: str = "",
                        duration_ms: int | None = None, art_path: str | None = None,
-                       art_uri: str | None = None, avatar_path: str | None = None):
+                       art_uri: str | None = None, avatar_path: str | None = None,
+                       avatar_uri: str | None = None):
     try:
         ms = _get_session()
         if ms is None:
@@ -1781,8 +1781,30 @@ def set_media_metadata(title: str = "", artist: str = "", album: str = "",
             b.putBitmap(MediaMetadata.METADATA_KEY_ART, bmp)
         if avatar is not None:
             b.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, avatar)
-        # Do not replace a missing channel avatar with the video thumbnail:
-        # it would reappear in the small tile until the avatar arrives.
+        # MediaDescription supports a distinct channel icon URI even before
+        # the avatar bitmap is cached. SystemUI/MIUI may ignore this field for
+        # the album-art tile, but we publish accurate metadata regardless.
+        if avatar_uri:
+            try:
+                from urllib.parse import urlsplit
+                candidate = str(avatar_uri)
+                parsed = urlsplit(candidate)
+                if (
+                    len(candidate) <= 3072
+                    and parsed.scheme == "https"
+                    and (parsed.hostname or "").lower() in (
+                        "yt3.ggpht.com", "yt3.googleusercontent.com"
+                    )
+                    and parsed.port in (None, 443)
+                    and parsed.username is None
+                    and parsed.password is None
+                    and bool(parsed.path)
+                    and not any(ord(ch) < 32 for ch in candidate)
+                ):
+                    b.putString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI, candidate)
+            except (TypeError, ValueError, AttributeError):
+                pass
+        # Never use video artwork as a fallback for channel icon metadata.
 
         if art_uri:
             try:
