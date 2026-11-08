@@ -52,6 +52,7 @@ _pymusic_bootstrap_exception._pymusic_early = True
 sys.excepthook = _pymusic_bootstrap_exception
 
 import re
+import time
 import threading
 from urllib.parse import parse_qs, urlparse
 
@@ -64,7 +65,7 @@ except Exception as e:
 
 from kivymd.app import MDApp
 from kivy.lang import Builder
-from kivy.uix.screenmanager import ScreenManager
+from kivy.uix.screenmanager import ScreenManager, NoTransition
 from youtube_search import fetch_youtube_results, fetch_youtube_continuation
 from audio_screen import AudioPlayerScreen, _pymusic_mix_video_url
 from kivymd.uix.screen import MDScreen
@@ -920,6 +921,16 @@ class YoutubeWebScreen(MDScreen):
         try:
             if not url:
                 return
+            from urllib.parse import urlparse
+            parsed = urlparse(str(url))
+            if (
+                parsed.hostname in ("youtube.com", "www.youtube.com", "m.youtube.com")
+                and parsed.path.startswith("/shorts/")
+            ):
+                root = getattr(App.get_running_app(), "root", None)
+                if root and hasattr(root, "open_shorts"):
+                    root.open_shorts(url)
+                return
             mix = _pymusic_mix_video_url(url)
             if mix is not None:
                 canonical, _video_id = mix
@@ -998,46 +1009,61 @@ class YoutubeWebScreen(MDScreen):
 
 
 
-class BottomNavButton(ButtonBehavior, Label):
-    """Однакові нижні кнопки для Kivy-екрана і WebView-injected панелі."""
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.size_hint = (None, None)
-        self.size = (dp(84), dp(34))
-        self.font_size = "14sp"
-        self.color = (1, 1, 1, 1)
-        self.halign = "center"
-        self.valign = "middle"
-        self.bind(pos=self._redraw, size=self._redraw, state=self._redraw)
-        self._redraw()
+class YoutubeShortsScreen(YoutubeWebScreen):
+    """Native YouTube Shorts feed in the existing browser overlay.
 
-    def _redraw(self, *args):
+    The YouTube WebView renders the real vertical Shorts interface; PyMusic
+    never tries to reinterpret their audio/video as ordinary watch tracks.
+    """
+    _next_shorts_url = None
+
+    def open_short(self, url: str) -> None:
+        from urllib.parse import urlparse
+        import re
+        parsed = urlparse(str(url or ""))
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() not in {
+                "youtube.com", "www.youtube.com", "m.youtube.com"
+            }
+            or not re.fullmatch(r"/shorts/[A-Za-z0-9_-]{11}/?", parsed.path)
+        ):
+            return
+        self._next_shorts_url = (
+            "https://m.youtube.com" + parsed.path.rstrip("/")
+        )
+        if self.manager and self.manager.current == self.name:
+            ma.webview_show(self._next_shorts_url)
+
+    def on_pre_enter(self):
         try:
-            self.text_size = self.size
-            self.canvas.before.clear()
-            with self.canvas.before:
-                if self.state == "down":
-                    Color(1, 1, 1, 0.10)
-                    RoundedRectangle(
-                        pos=self.pos,
-                        size=self.size,
-                        radius=[dp(18), dp(18), dp(18), dp(18)],
-                    )
-                Color(1, 1, 1, 0.35)
-                Line(
-                    rounded_rectangle=(self.x, self.y, self.width, self.height, dp(18)),
-                    width=dp(1),
-                )
-        except Exception:
-            pass
+            ma.bind_webview_action_router(self)
+            ma.bind_intent_router()
+            # YouTube Shorts supplies its own vertical up/down gestures,
+            # overlay actions, comments and autoplay behavior in WebView.
+            url = self._next_shorts_url or "https://m.youtube.com/shorts"
+            self._next_shorts_url = None
+            ma.webview_show(url)
+            # Native audio must not play over a Shorts video.
+            player = self.manager.get_screen("audio")
+            if ma.is_playing:
+                player._user_paused = True
+                ma._mp_pause()
+                player._ui_set_playing(False)
+        except Exception as exc:
+            ma.log(f"[SHORTS] open failed: {type(exc).__name__}")
+
+    def on_pre_leave(self):
+        ma.webview_hide()
 
 class RootLayout(MDBoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation="vertical", **kwargs)
         self._active_tab = "web"
 
-        self.sm = ScreenManager()
+        self._swipe_order = ("search", "web", "shorts", "audio")
+        self.sm = ScreenManager(transition=NoTransition())
 
         # Якщо інтернету немає, не стартуємо одразу YT WebView.
         # Інакше Android показує сторінку net::ERR_TIMED_OUT на m.youtube.com.
@@ -1056,9 +1082,9 @@ class RootLayout(MDBoxLayout):
             self.sm.add_widget(YoutubeWebScreen(name="web"))
             self._active_tab = "search"
 
+        self.sm.add_widget(YoutubeShortsScreen(name="shorts"))
         self.sm.add_widget(AudioPlayerScreen(name="audio"))
         self.add_widget(self.sm)
-        self._build_bottom_bar()
         # Persisted style is applied after the Kivy player widgets exist.
         Clock.schedule_once(
             lambda _dt: _ui_styles.bind_player(self.sm.get_screen("audio")),
@@ -1074,34 +1100,57 @@ class RootLayout(MDBoxLayout):
         except Exception:
             self.sm.current = "search"
 
-    def _build_bottom_bar(self):
-        bar = MDBoxLayout(
-            size_hint_y=None,
-            height=dp(56),
-            padding=(dp(10), 0, dp(10), 0),
-            spacing=0,
-            md_bg_color=(0, 0, 0, 1),
-        )
-        center = MDBoxLayout(
-            size_hint=(None, 1),
-            width=dp(280),
-            spacing=dp(12),
-            padding=(0, dp(11), 0, dp(11)),
-        )
-        btn_web = BottomNavButton(text="Web")
-        btn_web.bind(on_release=lambda _btn: self.set_screen("search"))
-        btn_yt = BottomNavButton(text="YT")
-        btn_yt.bind(on_release=lambda _btn: self.set_screen("web"))
-        btn_ui = BottomNavButton(text="UI")
-        btn_ui.bind(on_release=lambda _btn: self.show_ui_presets())
+    def _switch_relative(self, delta: int) -> bool:
+        """Use ordered screens; a disabled edge does not wrap unexpectedly."""
+        current = self.sm.current
+        if current not in self._swipe_order:
+            return False
+        index = self._swipe_order.index(current) + int(delta)
+        if index < 0 or index >= len(self._swipe_order):
+            return False
+        self.set_screen(self._swipe_order[index])
+        return True
 
-        bar.add_widget(Widget())
-        center.add_widget(btn_web)
-        center.add_widget(btn_yt)
-        center.add_widget(btn_ui)
-        bar.add_widget(center)
-        bar.add_widget(Widget())
-        self.add_widget(bar)
+    def on_touch_down(self, touch):
+        # The native WebView is above SDL and has its own Java touch router.
+        if self.sm.current not in ("web", "shorts") and self.collide_point(*touch.pos):
+            edge = dp(80)
+            if touch.x <= self.x + edge or touch.x >= self.right - edge:
+                touch.ud["pymusic_edge_swipe"] = (
+                    touch.x, touch.y, time.monotonic()
+                )
+        return super().on_touch_down(touch)
+
+    def on_touch_up(self, touch):
+        origin = touch.ud.pop("pymusic_edge_swipe", None)
+        handled = super().on_touch_up(touch)
+        if not origin or self.sm.current in ("web", "shorts"):
+            return handled
+        x, y, started = origin
+        dx, dy = touch.x - x, touch.y - y
+        if not (0.06 < time.monotonic() - started < 0.95):
+            return handled
+        if abs(dx) < dp(110) or abs(dx) < abs(dy) * 1.8:
+            return handled
+        if self.sm.current == "audio":
+            try:
+                if self.sm.get_screen("audio")._is_scrubbing:
+                    return handled
+            except Exception:
+                pass
+        # Swipe from the physical edge towards the screen centre only.
+        right_to_left = x >= self.right - dp(80) and dx < 0
+        left_to_right = x <= self.x + dp(80) and dx > 0
+        if right_to_left:
+            return self._switch_relative(1) or handled
+        if left_to_right:
+            return self._switch_relative(-1) or handled
+        return handled
+
+    def open_shorts(self, url: str | None = None):
+        if url:
+            self.sm.get_screen("shorts").open_short(url)
+        self.set_screen("shorts")
 
     def show_ui_presets(self):
         # Native WebView sits above Kivy dialogs. Open the player first so
@@ -1116,12 +1165,18 @@ class RootLayout(MDBoxLayout):
         )
 
     def set_screen(self, name: str):
+        if name == "swipe_left":
+            return self._switch_relative(1)
+        if name == "swipe_right":
+            return self._switch_relative(-1)
+        if name not in self.sm.screen_names:
+            return
         # ScreenManager calls on_pre_leave/on_pre_enter itself. Let each screen
         # own one transition: running hide_video_overlay_fast() here *and*
         # AudioPlayerScreen.on_pre_leave used to release MediaPlayer twice.
         if name == self.sm.current:
             return
-        if name in ("web", "search"):
+        if name in ("web", "search", "shorts"):
             self._active_tab = name
         self.sm.current = name
         try:
