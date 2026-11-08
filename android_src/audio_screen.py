@@ -1566,6 +1566,12 @@ class AudioPlayerScreen(Screen):
 
         self._ensure_video_player()
         Clock.schedule_once(self._align_video_to_thumb, 0.3)
+        if getattr(self, "_last_video_url", None) and self._video_enabled:
+            Clock.schedule_once(
+                lambda _dt: self._set_video_controls_visible(
+                    True, auto_hide=not bool(self._user_paused)
+                ), 0.45,
+            )
 
     def on_pre_leave(self):
         sheet = getattr(self, "_current_comments_popup_v4", None)
@@ -1689,6 +1695,21 @@ class AudioPlayerScreen(Screen):
                 ).start()
         except Exception:
             pass
+        # Android 13 may discard the SurfaceView holder during pause.
+        # Recreate/reposition the native touch controls on the audio screen
+        # even when playback was paused (then show the thumbnail beneath).
+        if (
+            self._is_screen_active()
+            and self._video_enabled
+            and self._last_video_url
+        ):
+            self._ensure_video_player()
+            Clock.schedule_once(
+                lambda _dt: self._set_video_controls_visible(
+                    True, auto_hide=not bool(self._user_paused)
+                ), 0.16,
+            )
+            Clock.schedule_once(self._align_video_to_thumb, 0.21)
         if _current_video_url_of(self):
             self._ensure_related_current_v4(force=False)
         for delay in (0.0, 0.12, 0.5):
@@ -2131,7 +2152,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=is_playing,
                     session_token=token,
-                    large_icon_path=self._channel_thumb_local or self._art_path
+                    large_icon_path=self._art_path or self._channel_thumb_local
                 )
         except Exception as e:
             print("[BG TICK] err:", e)
@@ -2604,7 +2625,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path,
+                large_icon_path=self._art_path or self._channel_thumb_local,
             )
         except Exception:
             pass
@@ -2922,7 +2943,7 @@ class AudioPlayerScreen(Screen):
                         subtitle=self._channel or "YouTube",
                         is_playing=bool(ma.android_player and ma.android_player.isPlaying()),
                         session_token=token,
-                        large_icon_path=self._channel_thumb_local or self._art_path
+                        large_icon_path=self._art_path or self._channel_thumb_local
                     )
                 except Exception:
                     pass
@@ -4274,7 +4295,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=is_playing,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path,
+                large_icon_path=self._art_path or self._channel_thumb_local,
             )
         except Exception as e:
             try:
@@ -4484,7 +4505,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -5308,7 +5329,7 @@ class AudioPlayerScreen(Screen):
                     subtitle=self._channel or "YouTube",
                     is_playing=True,
                     session_token=token2,
-                    large_icon_path=self._channel_thumb_local or self._art_path,
+                    large_icon_path=self._art_path or self._channel_thumb_local,
                 )
             except Exception:
                 pass
@@ -5468,7 +5489,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=True,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6156,7 +6177,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "YouTube",
                 is_playing=bool(playing),
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
@@ -6706,7 +6727,21 @@ class AudioPlayerScreen(Screen):
             ma._mp_start()
             try:
                 if self._video_player and self._video_enabled:
-                    self._video_player.resume()
+                    if self._video_active and getattr(self._video_player, "player", None):
+                        self._video_player.resume()
+                    elif (
+                        self._last_video_url
+                        and self._is_screen_active()
+                        and not self._app_in_background
+                    ):
+                        # Resume after a background pause with a destroyed
+                        # native video holder; a bare .resume() is a no-op.
+                        threading.Thread(
+                            target=lambda: self._auto_video_for_current(
+                                self._load_gen, sync_start=False
+                            ),
+                            daemon=True, name="pymusic-resume-video",
+                        ).start()
             except Exception:
                 pass
             try:
@@ -6779,7 +6814,7 @@ class AudioPlayerScreen(Screen):
                 subtitle=self._channel or "",
                 is_playing=False,
                 session_token=token,
-                large_icon_path=self._channel_thumb_local or self._art_path
+                large_icon_path=self._art_path or self._channel_thumb_local
             )
         except Exception:
             pass
