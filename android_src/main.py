@@ -950,6 +950,12 @@ class YoutubeWebScreen(MDScreen):
             pass
 
     def on_pre_leave(self):
+        # Web and Shorts share one native WebView. Hiding it between
+        # these two ScreenManager pages races the destination's show()
+        # (observed on Redmi: hidden -> shown -> hidden in 50 ms).
+        if getattr(self, "_keep_webview_on_leave", False):
+            self._keep_webview_on_leave = False
+            return
         try:
             ma.webview_hide()
         except Exception:
@@ -1095,6 +1101,9 @@ class YoutubeShortsScreen(YoutubeWebScreen):
             ma.log(f"[SHORTS] open failed: {type(exc).__name__}")
 
     def on_pre_leave(self):
+        if getattr(self, "_keep_webview_on_leave", False):
+            self._keep_webview_on_leave = False
+            return
         ma.webview_hide()
 
 class RootLayout(MDBoxLayout):
@@ -1218,9 +1227,15 @@ class RootLayout(MDBoxLayout):
             return
         if name in ("web", "search", "shorts"):
             self._active_tab = name
-        if self.sm.current == "shorts" and name == "web":
-            # One native WebView is shared by Web and Shorts; entering Web
-            # must not leave the user trapped in the Shorts vertical player.
+        previous = self.sm.current
+        if previous in ("web", "shorts") and name in ("web", "shorts"):
+            # No native hide/show cycle for a WebView-to-WebView transition.
+            # On Android the decorated hide() can otherwise run after show(),
+            # exposing a blank Kivy page while consuming all touches.
+            self.sm.get_screen(previous)._keep_webview_on_leave = True
+        if previous == "shorts" and name == "web":
+            # Both screens share one browser. Returning to Web resets the
+            # Shorts player to normal YouTube browsing.
             self.sm.get_screen("web")._reset_after_shorts = True
         self.sm.current = name
         try:
