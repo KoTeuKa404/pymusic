@@ -266,10 +266,10 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
     def test_media_icons_are_compiled_android_drawables(self):
         build = (ROOT / "buildozer.spec").read_text(encoding="utf-8")
         resources = (
-            ("icorepeat.png", "pymusic_repeat.png"),
-            ("icorepeat_active.png", "pymusic_repeat_active.png"),
-            ("icofavorite.png", "pymusic_favorite.png"),
-            ("icofavorite_active.png", "pymusic_favorite_active.png"),
+            ("notification_repeat.png", "pymusic_repeat.png"),
+            ("notification_repeat_active.png", "pymusic_repeat_active.png"),
+            ("notification_favorite.png", "pymusic_favorite.png"),
+            ("notification_favorite_active.png", "pymusic_favorite_active.png"),
         )
         for original, drawable in resources:
             self.assertTrue(
@@ -279,6 +279,13 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
             self.assertIn(
                 f"android_src/ico/{original}:drawable/{drawable}", build
             )
+            icon_data = (ANDROID / "ico" / original).read_bytes()
+            self.assertEqual(icon_data[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(
+                (int.from_bytes(icon_data[16:20], "big"),
+                 int.from_bytes(icon_data[20:24], "big")), (24, 24)
+            )
+            self.assertEqual(icon_data[25], 6)  # RGBA
         ns = {
             "_ACTION_DRAWABLE_NAMES": frozenset(
                 Path(name).stem for _, name in resources
@@ -300,6 +307,20 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         self.assertEqual(resolved("pymusic_favorite", 33), 456)
         self.assertEqual(resolved("not_allowlisted", 33), 33)
         self.assertEqual(resolved("pymusic_favorite_active", 33), 33)
+
+    def test_album_art_republishes_when_downloaded_or_cached(self):
+        audio = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
+        extract = audio.split("def _extract_and_start(", 1)[1]
+        self.assertIn("art_path=self._art_path, art_uri=self._thumb", extract)
+        download = audio.split("def _download_art_async(", 1)[1].split(
+            "def _channel_avatar_cache_path(", 1
+        )[0]
+        self.assertIn("Clock.schedule_once(publish_art, 0)", download)
+        self.assertIn("self._publish_media_metadata_now()", download)
+        self.assertIn("artwork_path=self._art_path", audio)
+        media = (ANDROID / "media_android.py").read_text(encoding="utf-8")
+        self.assertIn("b.setColorized(True)", media)
+        self.assertIn('str(artwork_path or ""), cover_version', media)
 
     def test_favorite_and_repeat_use_same_player_state_as_kivy_buttons(self):
         player = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")

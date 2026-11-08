@@ -1513,6 +1513,7 @@ def create_or_update_media_notification(*,
     is_playing: bool = True,
     session_token=None,
     large_icon_path: str | None = None,
+    artwork_path: str | None = None,
     repeat_enabled: bool = False,
     favorite_enabled: bool = False,
 ):
@@ -1533,9 +1534,18 @@ def create_or_update_media_notification(*,
             )
         except OSError:
             artwork_version = None
+        try:
+            cover_version = (
+                os.path.getmtime(artwork_path)
+                if artwork_path and os.path.isfile(artwork_path)
+                else None
+            )
+        except OSError:
+            cover_version = None
         signature = (
             str(title or ""), str(subtitle or ""), bool(is_playing),
             str(large_icon_path or ""), artwork_version,
+            str(artwork_path or ""), cover_version,
             id(_get_session()), bool(session_token is not None),
             bool(repeat_enabled), bool(favorite_enabled),
         )
@@ -1555,6 +1565,12 @@ def create_or_update_media_notification(*,
         b.setSmallIcon(_safe_small_icon())
         b.setOnlyAlertOnce(True)
         b.setVisibility(Notification.VISIBILITY_PUBLIC)
+        # Permit SystemUI/MIUI to use the media session's cover-derived
+        # colors. Android, not the app, chooses the actual shade layout.
+        try:
+            b.setColorized(True)
+        except Exception:
+            pass
         b.setShowWhen(False)
         try:
             b.setCategory(Notification.CATEGORY_TRANSPORT)

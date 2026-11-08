@@ -43,7 +43,7 @@ android.add_src = java_src
 # Register PyMusic's existing PNG action icons as real Android drawable
 # resources. Android 13 SystemUI PlaybackState.CustomAction requires a
 # resource ID; an image path inside the Python/Kivy APK is not sufficient.
-android.add_resources = android_src/ico/icorepeat.png:drawable/pymusic_repeat.png, android_src/ico/icorepeat_active.png:drawable/pymusic_repeat_active.png, android_src/ico/icofavorite.png:drawable/pymusic_favorite.png, android_src/ico/icofavorite_active.png:drawable/pymusic_favorite_active.png
+android.add_resources = android_src/ico/notification_repeat.png:drawable/pymusic_repeat.png, android_src/ico/notification_repeat_active.png:drawable/pymusic_repeat_active.png, android_src/ico/notification_favorite.png:drawable/pymusic_favorite.png, android_src/ico/notification_favorite_active.png:drawable/pymusic_favorite_active.png
 
 android.archs = arm64-v8a
 p4a.bootstrap = sdl2
