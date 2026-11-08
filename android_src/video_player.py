@@ -491,27 +491,41 @@ class AndroidVideoPlayer:
                 return
         except Exception:
             pass
-        try:
-            if self.surface_view is not None:
-                self.surface_view.bringToFront()
-        except Exception:
-            pass
+        # Never bring the SurfaceView to the front when buttons are hidden.
+        # MIUI may retain that native layer above the transparent controls
+        # overlay, leaving video playing but all button touch targets gone.
+        # Android renders SurfaceView below normal View children already.
 
     @run_on_ui_thread
     def _ensure_controls_overlay(self):
         try:
             if self.controls_overlay is not None:
-                self._bind_controls_tap()
-                self._apply_native_timeline()
-                # A previously queued native visibility update may have run
-                # before this view existed. Reconcile with the stored state.
                 try:
-                    self.controls_overlay.setVisibility(
-                        View.VISIBLE if self._controls_visible else 4
-                    )
+                    attached = self.controls_overlay.getParent() is not None
                 except Exception:
-                    pass
-                return
+                    attached = False
+                if not attached:
+                    # Activity recreation invalidated the old native
+                    # window; do not bind controls to detached Java Views.
+                    self.controls_overlay = None
+                    self._controls_touch_views = []
+                    self._native_play_button = None
+                    self._native_seek_bar = None
+                    self._native_current_time = None
+                    self._native_total_time = None
+                else:
+                    self._bind_controls_tap()
+                    self._apply_native_timeline()
+                    # Reconcile requested visibility after rotation/resume.
+                    try:
+                        self.controls_overlay.setVisibility(
+                            View.VISIBLE if self._controls_visible else 4
+                        )
+                        if self._controls_visible:
+                            self._bring_controls_or_surface_front()
+                    except Exception:
+                        pass
+                    return
 
             activity = PythonActivity.mActivity
             overlay = FrameLayout(activity)
@@ -661,6 +675,8 @@ class AndroidVideoPlayer:
                             sv.invalidate()
                         except Exception:
                             pass
+                self._ensure_controls_overlay()
+                self._bring_controls_or_surface_front()
             except Exception as e:
                 print("[VIDEO] reuse surface_view err:", e)
             return
