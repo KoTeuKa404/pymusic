@@ -6324,6 +6324,23 @@ class AudioPlayerScreen(Screen):
 
         # Start-to-first-real-progress is the metric users perceive.
         # MediaPlayer.start() can return before a single frame is audible.
+        # Measure the *actual* time from Play to position advancing.
+        # This distinguishes decoder rebuffering from a slow UI callback.
+        try:
+            resumed_at = float(getattr(self, "_resume_requested_t0", 0) or 0)
+            before = int(getattr(self, "_resume_probe_pos_ms", 0) or 0)
+            if (
+                resumed_at and self._playback_desired and not self._user_paused
+                and int(pos or 0) >= before + 250
+            ):
+                print(
+                    f"[LATENCY] pause-to-first-progress "
+                    f"{time.monotonic() - resumed_at:.2f}s"
+                )
+                self._resume_requested_t0 = 0.0
+        except Exception:
+            pass
+
         try:
             gen = int(self._load_gen)
             if (
@@ -6428,7 +6445,10 @@ class AudioPlayerScreen(Screen):
     def toggle_play_pause(self, *a):
         if not self._debounce():
             return
-        if ma.android_player and ma.android_player.isPlaying():
+        # During HTTP buffering MediaPlayer.isPlaying() can be False
+        # although the user explicitly wants playback. Use logical state
+        # for the button so tapping Pause actually pauses the pending stream.
+        if self._playback_desired and not self._user_paused:
             self._pause_playback()
         else:
             self._resume_playback()
@@ -6735,17 +6755,17 @@ class AudioPlayerScreen(Screen):
 
     def _act_play(self, *a):
         self._last_media_ts = time.time()
-        if not (ma.android_player and ma.android_player.isPlaying()):
+        if self._user_paused or not self._playback_desired:
             self._resume_playback()
 
     def _act_pause(self, *a):
         self._last_media_ts = time.time()
-        if ma.android_player and ma.android_player.isPlaying():
+        if self._playback_desired and not self._user_paused:
             self._pause_playback()
 
     def _act_toggle(self, *a):
         self._last_media_ts = time.time()
-        if ma.android_player and ma.android_player.isPlaying():
+        if self._playback_desired and not self._user_paused:
             self._pause_playback()
         else:
             self._resume_playback()
@@ -6758,6 +6778,7 @@ class AudioPlayerScreen(Screen):
         self._mark_java_transport(True)
         self._user_paused = True
         self._playback_desired = False
+        self._resume_requested_t0 = 0.0
         try:
             self._resume_pos_ms = ma.android_player.getCurrentPosition() or 0
         except Exception:
@@ -6777,35 +6798,43 @@ class AudioPlayerScreen(Screen):
         self._mark_java_transport(False)
         self._user_paused = False
         self._playback_desired = True
+        self._resume_requested_t0 = time.monotonic()
+        self._resume_probe_pos_ms = int(getattr(self, "_resume_pos_ms", 0) or 0)
+
+        # Resume the existing prepared audio decoder and its buffered bytes.
+        # Do not seek, rebuild the video stream, or run yt-dlp on a normal
+        # Play press. Background/surface recovery is handled separately.
         try:
-            ma._mp_start()
-            try:
-                if self._video_player and self._video_enabled:
-                    if self._video_active and getattr(self._video_player, "player", None):
-                        self._video_player.resume()
-                    elif (
-                        self._last_video_url
-                        and self._is_screen_active()
-                        and not self._app_in_background
-                    ):
-                        # Resume after a background pause with a destroyed
-                        # native video holder; a bare .resume() is a no-op.
-                        threading.Thread(
-                            target=lambda: self._auto_video_for_current(
-                                self._load_gen, sync_start=False
-                            ),
-                            daemon=True, name="pymusic-resume-video",
-                        ).start()
-            except Exception:
-                pass
-            try:
-                Clock.schedule_once(lambda dt: self._force_video_resync(), 0.35)
-            except Exception:
-                pass
+            if ma.android_player is not None:
+                ma._mp_start()
+            elif self._last_video_url:
+                # The player was actually released (not merely paused).
+                # This is the only case where fresh extraction is required.
+                threading.Thread(
+                    target=lambda: self._extract_and_start_gen(
+                        self._last_video_url, self._load_gen
+                    ),
+                    name="pymusic-resume-missing-audio",
+                    daemon=True,
+                ).start()
+        except Exception as exc:
+            print("[AUDIO] native resume command failed:", type(exc).__name__)
+
+        try:
+            if (
+                self._video_player is not None
+                and self._video_enabled and self._video_active
+                and getattr(self._video_player, "player", None) is not None
+            ):
+                self._video_player.resume()
+            # The old 0.35s forced seekTo on every resume needlessly flushed
+            # remote video buffers. Periodic drift correction remains active.
+        except Exception as exc:
+            print("[VIDEO] optional resume failed:", type(exc).__name__)
+        try:
             self._ui_set_playing(True)
-        except Exception:
-            if self._last_video_url:
-                self._extract_and_start_gen(self._last_video_url, self._load_gen)
+        except Exception as exc:
+            print("[AUDIO] resume UI update failed:", type(exc).__name__)
 
     def _force_video_resync(self):
         try:
