@@ -1216,6 +1216,7 @@ class AudioPlayerScreen(Screen):
         self._views_text = ""
         self._published_date = ""
         self._related_items = []
+        self._related_source = "youtube"
         self._channel_thumb = ""
         self._channel_thumb_local = ""
         self._meta_inflight = False
@@ -2522,6 +2523,7 @@ class AudioPlayerScreen(Screen):
         self._views_text = ""
         self._published_date = ""
         self._related_items = []
+        self._related_source = "youtube"
         if ui_allowed:
             self._render_similar_ui()
 
@@ -2546,6 +2548,7 @@ class AudioPlayerScreen(Screen):
             if ui_allowed:
                 self._render_playlist_ui(force=True)
             self._related_items = []
+            self._related_source = "youtube"
             self._views_text = ""
             self._channel_thumb = ""
             self._channel_thumb_local = ""

@@ -220,12 +220,25 @@
             padding: 0, dp(0), 0, dp(4)
             adaptive_height: True
 
-        MDRaisedButton:
-            text: "Search"
+        MDBoxLayout:
             size_hint_y: None
             height: dp(44)
-            pos_hint: {"center_x": 0.5}
-            on_release: root.perform_search()
+            spacing: dp(8)
+            padding: dp(2), 0, dp(2), 0
+
+            Widget:
+
+            MDRaisedButton:
+                text: "Search"
+                size_hint_y: None
+                height: dp(44)
+                on_release: root.perform_search()
+
+            MDIconButton:
+                icon: "cog-outline"
+                on_release: app.root.show_ui_presets()
+
+            Widget:
 
         MDScrollView:
             id: results_scroll
