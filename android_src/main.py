@@ -373,6 +373,20 @@ class YoutubeSearchScreen(MDScreen):
         threading.Thread(target=self._fetch_results_thread, args=(query,), daemon=True).start()
 
     def _fetch_results_thread(self, query):
+        # A pasted Shorts link belongs to the vertical Shorts player, not
+        # the generic audio-only watch?v= flow.
+        parsed = urlparse(str(query or "").strip())
+        if (
+            parsed.scheme == "https"
+            and (parsed.hostname or "").lower() in {
+                "youtube.com", "www.youtube.com", "m.youtube.com"
+            }
+            and re.fullmatch(r"/shorts/[A-Za-z0-9_-]{11}/?", parsed.path)
+        ):
+            Clock.schedule_once(
+                lambda _dt, url=query: self.open_shorts(url), 0
+            )
+            return
         mix = _pymusic_mix_video_url(query)
         if mix is not None:
             canonical, video_id = mix
@@ -386,7 +400,8 @@ class YoutubeSearchScreen(MDScreen):
         normalized_watch_url = None
         if "youtube.com" in query or "youtu.be" in query:
             try:
-                from urllib.parse import urlparse, parse_qs
+                # Use the module imports; a function-local urlparse import
+                # shadows the name before the Shorts fast-path above.
                 parsed = urlparse(query.strip())
                 host = (parsed.netloc or "").lower()
                 q = parse_qs(parsed.query or "")

@@ -124,6 +124,29 @@ class ShortsAndNavigationTests(unittest.TestCase):
         self.assertTrue(switch(holder, -1))
         self.assertEqual(holder.sm.current, "shorts")
 
+    def test_pasted_shorts_link_is_routed_before_audio_extraction(self):
+        import re
+        from urllib.parse import urlparse
+        scheduled = []
+        player = SimpleNamespace(open_shorts=lambda url: scheduled.append(url))
+        scope = {
+            "re": re,
+            "urlparse": urlparse,
+            "Clock": SimpleNamespace(
+                schedule_once=lambda fn, delay: fn(0)
+            ),
+            "_pymusic_mix_video_url": lambda value: (
+                (_ for _ in ()).throw(
+                    AssertionError("Shorts URL must not become watch audio")
+                )
+            ),
+        }
+        fetch = isolate("main.py", "_fetch_results_thread", scope)
+        fetch(player, "https://www.youtube.com/shorts/abc123def45")
+        self.assertEqual(
+            scheduled, ["https://www.youtube.com/shorts/abc123def45"]
+        )
+
     def test_no_black_nav_bar_in_kivy_or_native_youtube(self):
         main = (ANDROID / "main.py").read_text(encoding="utf-8")
         java = JAVA.read_text(encoding="utf-8")
