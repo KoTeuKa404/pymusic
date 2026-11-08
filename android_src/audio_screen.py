@@ -2169,6 +2169,7 @@ class AudioPlayerScreen(Screen):
                     is_playing=is_playing,
                     session_token=token,
                     large_icon_path=self._channel_thumb_local,
+                    artwork_path=self._art_path,
                     repeat_enabled=bool(self.repeat),
                     favorite_enabled=bool(self._favorite),
                 )
@@ -2648,6 +2649,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=True,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
@@ -3002,27 +3004,12 @@ class AudioPlayerScreen(Screen):
                 if requested_video_url != str(self._last_video_url or ""):
                     return
                 self._art_path = art_path
-                try:
-                    ma.set_media_metadata(
-                        title=self._title, artist=self._channel,
-                        art_path=self._art_path, art_uri=self._thumb,
-                        avatar_path=self._channel_thumb_local,
-                    )
-                except Exception:
-                    pass
-                try:
-                    token = self._media_session.getSessionToken() if self._media_session else None
-                    ma.create_or_update_media_notification(
-                        title=self._title or "Playing",
-                        subtitle=self._channel or "YouTube",
-                        is_playing=bool(ma.android_player and ma.android_player.isPlaying()),
-                        session_token=token,
-                        large_icon_path=self._channel_thumb_local,
-                        repeat_enabled=bool(self.repeat),
-                        favorite_enabled=bool(self._favorite),
-                    )
-                except Exception:
-                    pass
+                # Republish the decoded video cover, session state and
+                # notification on Kivy's thread once the download is complete.
+                def publish_art(_dt, expected=requested_video_url):
+                    if expected == str(self._last_video_url or ""):
+                        self._publish_media_metadata_now()
+                Clock.schedule_once(publish_art, 0)
             except Exception:
                 pass
 
@@ -4374,6 +4361,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=is_playing,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
@@ -4586,6 +4574,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=True,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
@@ -5414,6 +5403,7 @@ class AudioPlayerScreen(Screen):
                     is_playing=True,
                     session_token=token2,
                     large_icon_path=self._channel_thumb_local,
+                    artwork_path=self._art_path,
                     repeat_enabled=bool(self.repeat),
                     favorite_enabled=bool(self._favorite),
                 )
@@ -5576,6 +5566,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=True,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
@@ -5655,7 +5646,8 @@ class AudioPlayerScreen(Screen):
                 except Exception:
                     pass
                 ma.set_media_metadata(
-                    title=self._title, artist=self._channel, art_uri=self._thumb,
+                    title=self._title, artist=self._channel,
+                    art_path=self._art_path, art_uri=self._thumb,
                     avatar_path=self._channel_thumb_local,
                 )
             except Exception:
@@ -6268,6 +6260,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=bool(playing),
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
@@ -6949,6 +6942,7 @@ class AudioPlayerScreen(Screen):
                 is_playing=False,
                 session_token=token,
                 large_icon_path=self._channel_thumb_local,
+                artwork_path=self._art_path,
                 repeat_enabled=bool(self.repeat),
                 favorite_enabled=bool(self._favorite),
             )
