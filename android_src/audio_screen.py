@@ -2641,6 +2641,7 @@ class AudioPlayerScreen(Screen):
                 art_path=self._art_path,
                 art_uri=self._thumb or "",
                 avatar_path=self._channel_thumb_local,
+                avatar_uri=self._channel_thumb or "",
             )
             token = self._media_session.getSessionToken() if self._media_session else None
             ma.create_or_update_media_notification(
@@ -4345,6 +4346,7 @@ class AudioPlayerScreen(Screen):
                 art_path=self._art_path,
                 art_uri=self._thumb or "",
                 avatar_path=self._channel_thumb_local,
+                avatar_uri=self._channel_thumb or "",
             )
             ma.update_media_session_state(
                 is_playing,
@@ -4600,6 +4602,7 @@ class AudioPlayerScreen(Screen):
                     art_path=self._art_path,
                     art_uri=self._thumb,
                     avatar_path=self._channel_thumb_local,
+                    avatar_uri=self._channel_thumb or "",
                 )
             except Exception:
                 pass
@@ -5383,6 +5386,7 @@ class AudioPlayerScreen(Screen):
                     art_path=self._art_path,
                     art_uri=self._thumb,
                     avatar_path=self._channel_thumb_local,
+                    avatar_uri=self._channel_thumb or "",
                 )
             except Exception:
                 pass
@@ -5649,6 +5653,7 @@ class AudioPlayerScreen(Screen):
                     title=self._title, artist=self._channel,
                     art_path=self._art_path, art_uri=self._thumb,
                     avatar_path=self._channel_thumb_local,
+                    avatar_uri=self._channel_thumb or "",
                 )
             except Exception:
                 pass

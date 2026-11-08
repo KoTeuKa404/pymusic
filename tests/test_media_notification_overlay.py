@@ -9,6 +9,7 @@ import ast
 import os
 import time
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,60 @@ def isolate(filename: str, func_name: str, namespace: dict):
     module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
     exec(compile(module, filename, "exec"), namespace)
     return namespace[func_name]
+
+
+def _png_rgba_alpha_bounds(path: Path):
+    """Return the actual painted extent of a small, noninterlaced RGBA PNG."""
+    png = path.read_bytes()
+    assert png[:8] == bytes((137, 80, 78, 71, 13, 10, 26, 10))
+    width = int.from_bytes(png[16:20], "big")
+    height = int.from_bytes(png[20:24], "big")
+    assert (width, height, png[24], png[25], png[28]) == (24, 24, 8, 6, 0)
+    pos, compressed = 8, []
+    while pos < len(png):
+        length = int.from_bytes(png[pos:pos + 4], "big")
+        tag = png[pos + 4:pos + 8]
+        if tag == b"IDAT":
+            compressed.append(png[pos + 8:pos + 8 + length])
+        pos += 12 + length
+        if tag == b"IEND":
+            break
+    stride = width * 4
+    data = zlib.decompress(b"".join(compressed))
+    assert len(data) == height * (stride + 1)
+    offset, previous, painted = 0, bytearray(stride), []
+    for y in range(height):
+        filter_type = data[offset]
+        offset += 1
+        scanline = data[offset:offset + stride]
+        offset += stride
+        row = bytearray(stride)
+        for i, v in enumerate(scanline):
+            a = row[i - 4] if i >= 4 else 0
+            b = previous[i]
+            c = previous[i - 4] if i >= 4 else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = a
+            elif filter_type == 2:
+                predictor = b
+            elif filter_type == 3:
+                predictor = (a + b) // 2
+            elif filter_type == 4:
+                guess = a + b - c
+                diffs = (abs(guess - a), abs(guess - b), abs(guess - c))
+                predictor = (a, b, c)[diffs.index(min(diffs))]
+            else:
+                raise AssertionError("unsupported PNG scanline filter")
+            row[i] = (v + predictor) & 255
+        for x in range(width):
+            if row[4 * x + 3] > 8:
+                painted.append((x, y))
+        previous = row
+    assert painted, "empty notification icon"
+    return (min(x for x, _ in painted), max(x for x, _ in painted),
+            min(y for _, y in painted), max(y for _, y in painted))
 
 
 class NativeLayerAndNotificationTests(unittest.TestCase):
@@ -187,6 +242,7 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
             METADATA_KEY_ALBUM_ART = "album_art"
             METADATA_KEY_ART = "art"
             METADATA_KEY_DISPLAY_ICON = "display_icon"
+            METADATA_KEY_DISPLAY_ICON_URI = "display_icon_uri"
             METADATA_KEY_ART_URI = "art_uri"
             METADATA_KEY_ALBUM_ART_URI = "album_art_uri"
         class Builder:
@@ -217,6 +273,11 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
             title="video", artist="channel",
             art_path="/cache/video.jpg",
             avatar_path="/cache/channel.jpg",
+            avatar_uri="https://yt3.ggpht.com/channel-image=s88",
+        )
+        self.assertEqual(
+            recorded[-1]["display_icon_uri"],
+            "https://yt3.ggpht.com/channel-image=s88",
         )
         self.assertEqual(recorded[-1]["album_art"], "VIDEO_BITMAP")
         self.assertEqual(recorded[-1]["art"], "VIDEO_BITMAP")
@@ -228,6 +289,17 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         )
         self.assertEqual(recorded[-1]["album_art"], "VIDEO_BITMAP")
         self.assertNotIn("display_icon", recorded[-1])
+        self.assertNotIn("display_icon_uri", recorded[-1])
+        for disallowed in (
+            "http://yt3.ggpht.com/avatar",
+            "https://yt3.ggpht.com.evil.example/avatar",
+            "https://user:pass@yt3.ggpht.com/avatar",
+            "https://example.com/avatar",
+        ):
+            publish(title="safety", art_path="/cache/video.jpg",
+                    avatar_uri=disallowed)
+            self.assertNotIn("display_icon_uri", recorded[-1])
+        self.assertIn("album_art", recorded[-1])
 
     def test_notification_uses_channel_icon_not_video_artwork(self):
         source = (ANDROID / "media_android.py").read_text(encoding="utf-8")
@@ -286,6 +358,16 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
                  int.from_bytes(icon_data[20:24], "big")), (24, 24)
             )
             self.assertEqual(icon_data[25], 6)  # RGBA
+            # Keep original 512px Kivy icons intact, but constrain SystemUI's
+            # custom actions to a centered 12px glyph with 6px transparent
+            # padding per side (MIUI scales the resource up in its 5 slots).
+            left, right, top, bottom = _png_rgba_alpha_bounds(
+                ANDROID / "ico" / original
+            )
+            self.assertGreaterEqual(left, 6)
+            self.assertLessEqual(right, 17)
+            self.assertGreaterEqual(top, 6)
+            self.assertLessEqual(bottom, 17)
         ns = {
             "_ACTION_DRAWABLE_NAMES": frozenset(
                 Path(name).stem for _, name in resources
