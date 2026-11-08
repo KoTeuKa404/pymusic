@@ -2922,9 +2922,52 @@ class AudioPlayerScreen(Screen):
                         "Connection": "keep-alive",
                     },
                 )
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=12, context=ctx) as resp, open(art_path, "wb") as f:
-                    f.write(resp.read())
+                # Album art is a bounded, verified HTTPS asset. The old
+                # _create_unverified_context accepted forged certs and wrote
+                # arbitrary response sizes directly into the media cache.
+                def trusted_art(hostname: str) -> bool:
+                    host = str(hostname or "").lower()
+                    return host in (
+                        "i.ytimg.com", "img.youtube.com",
+                        "yt3.ggpht.com", "yt3.googleusercontent.com",
+                    )
+
+                parsed = urllib.parse.urlsplit(url)
+                if parsed.scheme != "https" or not trusted_art(parsed.hostname):
+                    return
+
+                class SafeArtRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, request, fp, code, msg, hdrs, newurl):
+                        target = urllib.parse.urlsplit(newurl)
+                        if target.scheme != "https" or not trusted_art(target.hostname):
+                            raise ValueError("untrusted thumbnail redirect")
+                        return super().redirect_request(
+                            request, fp, code, msg, hdrs, newurl
+                        )
+
+                context = ssl.create_default_context(cafile=certifi.where())
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPSHandler(context=context),
+                    SafeArtRedirect(),
+                )
+                with opener.open(req, timeout=12) as response:
+                    length = int(response.headers.get("Content-Length") or 0)
+                    if length > 2 * 1024 * 1024:
+                        return
+                    image_bytes = response.read(2 * 1024 * 1024 + 1)
+                    if len(image_bytes) > 2 * 1024 * 1024 or len(image_bytes) < 128:
+                        return
+                temp = art_path + ".part"
+                try:
+                    with open(temp, "wb") as output:
+                        output.write(image_bytes)
+                    os.replace(temp, art_path)
+                finally:
+                    try:
+                        if os.path.exists(temp):
+                            os.unlink(temp)
+                    except OSError:
+                        pass
                 self._art_path = art_path
                 if self._last_video_url:
                     update_recent_art(self._last_video_url, art_path)
