@@ -648,11 +648,11 @@ def _dispatch_mode(mode: str):
         except Exception:
             pass
         log(f"[WEB] mode {mode}")
-        if mode != "web":
-            try:
-                webview_hide()
-            except Exception:
-                pass
+        # Never hide a native WebView before ScreenManager chooses the
+        # destination. Swipe modes (e.g. "swipe_left") are not screen names,
+        # and Web ↔ Shorts reuses the exact same Android WebView instance.
+        # Eager hide here caused a white screen on the Redmi:
+        # hidden -> shown -> hidden within ~50 ms. on_pre_leave owns hide.
         cb = _mode_handler
         if callable(cb):
             Clock.schedule_once(lambda dt: cb(mode), 0)

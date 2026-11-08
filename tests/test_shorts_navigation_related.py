@@ -147,6 +147,32 @@ class ShortsAndNavigationTests(unittest.TestCase):
             scheduled, ["https://www.youtube.com/shorts/abc123def45"]
         )
 
+    def test_native_swipe_does_not_hide_browser_before_screen_transition(self):
+        calls = []
+        namespace = {
+            "_mode_handler": lambda mode: calls.append(("route", mode)),
+            "webview_hide": lambda: calls.append(("hide", None)),
+            "Clock": SimpleNamespace(
+                schedule_once=lambda callback, dt: callback(dt)
+            ),
+            "log": lambda message: None,
+        }
+        dispatch = isolate("media_android.py", "_dispatch_mode", namespace)
+        dispatch("swipe_left")
+        dispatch("swipe_right")
+        dispatch("search")
+        self.assertEqual(calls, [
+            ("route", "swipe_left"), ("route", "swipe_right"),
+            ("route", "search"),
+        ])
+        # The destination screen's on_pre_leave is responsible for hiding
+        # when switching to a Kivy screen, not this Android intent router.
+        source = (ANDROID / "media_android.py").read_text(encoding="utf-8")
+        mode = source.split("def _dispatch_mode(", 1)[1].split(
+            "def _is_youtube_playback_browse_url(", 1
+        )[0]
+        self.assertNotIn("webview_hide()", mode)
+
     def test_webview_to_shorts_never_hides_shared_native_browser(self):
         events = []
         class Manager:
