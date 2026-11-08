@@ -400,7 +400,8 @@ class YoutubeSearchScreen(MDScreen):
         normalized_watch_url = None
         if "youtube.com" in query or "youtu.be" in query:
             try:
-                from urllib.parse import urlparse, parse_qs
+                # Use the module imports; a function-local urlparse import
+                # shadows the name before the Shorts fast-path above.
                 parsed = urlparse(query.strip())
                 host = (parsed.netloc or "").lower()
                 q = parse_qs(parsed.query or "")
