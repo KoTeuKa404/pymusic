@@ -928,6 +928,9 @@ class YoutubeWebScreen(MDScreen):
             ma.bind_intent_router()
             # Не скидаємо сторінку при поверненні — WebView зберігає попередній стан.
             ma.webview_show()
+            if getattr(self, "_reset_after_shorts", False):
+                self._reset_after_shorts = False
+                ma.webview_load("https://m.youtube.com/")
         except Exception:
             pass
 
@@ -1037,6 +1040,7 @@ class YoutubeShortsScreen(YoutubeWebScreen):
     never tries to reinterpret their audio/video as ordinary watch tracks.
     """
     _next_shorts_url = None
+    _shorts_entry_url = "https://m.youtube.com/shorts"
 
     def open_short(self, url: str) -> None:
         from urllib.parse import urlparse
@@ -1062,7 +1066,8 @@ class YoutubeShortsScreen(YoutubeWebScreen):
             ma.bind_intent_router()
             # YouTube Shorts supplies its own vertical up/down gestures,
             # overlay actions, comments and autoplay behavior in WebView.
-            url = self._next_shorts_url or "https://m.youtube.com/shorts"
+            url = self._next_shorts_url or self._shorts_entry_url
+            self._shorts_entry_url = url
             self._next_shorts_url = None
             ma.webview_show(url)
             # Native audio must not play over a Shorts video.
@@ -1198,6 +1203,10 @@ class RootLayout(MDBoxLayout):
             return
         if name in ("web", "search", "shorts"):
             self._active_tab = name
+        if self.sm.current == "shorts" and name == "web":
+            # One native WebView is shared by Web and Shorts; entering Web
+            # must not leave the user trapped in the Shorts vertical player.
+            self.sm.get_screen("web")._reset_after_shorts = True
         self.sm.current = name
         try:
             ma.apply_light_system_bars()
