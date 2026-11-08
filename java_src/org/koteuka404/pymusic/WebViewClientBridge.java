@@ -310,6 +310,7 @@ public class WebViewClientBridge extends WebViewClient {
                 + "}"
                 + "function scheduleMusicFilter(){"
                 + "try{"
+                + "if((location.pathname||'').indexOf('/shorts')===0){return;}"
                 + "var key=(location.pathname||'')+'?'+(location.search||'');"
                 + "if(window.__pymusic_music_key===key){return;}"
                 + "window.__pymusic_music_key=key;"
