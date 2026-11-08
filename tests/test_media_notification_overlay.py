@@ -141,6 +141,12 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         self.assertIn("self._set_video_controls_visible(", resume)
         self.assertIn("self._align_video_to_thumb", resume)
         self.assertIn("name=\"pymusic-resume-video\"", audio)
+        self.assertIn(
+            'or bool(getattr(self, "_last_video_url", None))', audio
+        )
+        self.assertIn(
+            'self._media_session.setActive(True)', resume
+        )
 
     def test_cover_download_does_not_disable_tls_or_allow_unbounded_files(self):
         audio = (ANDROID / "audio_screen.py").read_text(encoding="utf-8")
