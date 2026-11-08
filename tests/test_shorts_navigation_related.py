@@ -170,9 +170,23 @@ class ShortsAndNavigationTests(unittest.TestCase):
                 apply_light_system_bars=lambda: None
             )
         })
-        web_leave = isolate("main.py", "on_pre_leave", {
-            "ma": SimpleNamespace(webview_hide=lambda: events.append("hide")),
-        })
+        module = ast.parse((ANDROID / "main.py").read_text(encoding="utf-8"))
+        web_class = next(
+            cls for cls in module.body
+            if isinstance(cls, ast.ClassDef) and cls.name == "YoutubeWebScreen"
+        )
+        web_method = next(
+            node for node in web_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "on_pre_leave"
+        )
+        web_method.decorator_list = []
+        scope = {
+            "ma": SimpleNamespace(webview_hide=lambda: events.append("hide"))
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=[web_method], type_ignores=[])
+        ), "main.py", "exec"), scope)
+        web_leave = scope["on_pre_leave"]
         # Both screen classes have their own on_pre_leave override. Inspect
         # its body so a future refactor cannot accidentally reintroduce a
         # hide() between screens sharing the one Android WebView.
