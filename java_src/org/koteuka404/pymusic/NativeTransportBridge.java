@@ -32,6 +32,9 @@ public final class NativeTransportBridge {
     private static volatile MediaPlayer audioPlayer;
     private static volatile MediaPlayer videoPlayer;
     private static volatile boolean userPaused = false;
+    // Once a native toggle was used, follow logical user intent rather than
+    // querying MediaPlayer.isPlaying() while its network buffer is stalled.
+    private static volatile boolean toggledOnce = false;
     private static volatile long stateVersion = 0L;
     private static volatile int lastEvent = EVENT_NONE;
     private static volatile long lastTargetMs = -1L;
@@ -49,11 +52,12 @@ public final class NativeTransportBridge {
     }
 
     public static void setAudioPlayer(MediaPlayer player) {
-        audioPlayer = player;
-        if (player != null) {
-            int pos = safePosition(player);
-            if (pos >= 0) logicalPositionMs = pos;
+        if (audioPlayer != player) {
+            toggledOnce = false;
         }
+        audioPlayer = player;
+        // Avoid a synchronous JNI position query on the UI hot path.
+        // Actual positions are sampled only for explicit +/-10s seeks.
     }
 
     public static void setVideoPlayer(MediaPlayer player) {
@@ -193,20 +197,21 @@ public final class NativeTransportBridge {
     private static synchronized void toggle(final ImageButton sourceButton) {
         final MediaPlayer audio = audioPlayer;
         final MediaPlayer video = videoPlayer;
-        final boolean playing = safeIsPlaying(audio) || safeIsPlaying(video);
+        // A rapid second tap may arrive before the queued native pause
+        // finishes. Respect the first tap's logical state so Pause -> Play
+        // is not mistaken for two Pause commands.
+        final boolean playing = toggledOnce
+                ? !userPaused
+                : (safeIsPlaying(audio) || safeIsPlaying(video));
+        toggledOnce = true;
 
         if (playing) {
-            // Capture the logical pause point before the worker can be delayed.
-            int pos = safePosition(audio);
-            if (pos < 0) pos = safePosition(video);
-            final long pauseAt = Math.max(0L, pos);
-            logicalPositionMs = pauseAt;
-
-            // Immediate perceived response: icon + mute happen before any possibly
-            // blocking pause() call. Video is already muted by the Python player.
+            // A normal pause does NOT need a seek. The previous code queried
+            // the remote media position on the UI thread and then performed
+            // two seekTo() calls after pausing, discarding the buffered range.
+            // That caused long rebuffering even for an immediate Play tap.
             userPaused = true;
             lastEvent = EVENT_PAUSE;
-            lastTargetMs = pauseAt;
             stateVersion++;
             try {
                 if (sourceButton != null) {
@@ -218,12 +223,8 @@ public final class NativeTransportBridge {
             safeMute(audio);
 
             TRANSPORT_EXECUTOR.execute(() -> {
-                safePause(video);
-                safePause(audio);
-                // If pause() itself took time, return both players to the point
-                // where the user actually touched the button.
-                safeSeekFast(audio, pauseAt);
-                safeSeekFast(video, pauseAt);
+                if (audio == audioPlayer) safePause(audio);
+                if (video == videoPlayer) safePause(video);
             });
         } else {
             userPaused = false;
@@ -239,14 +240,15 @@ public final class NativeTransportBridge {
             }
 
             TRANSPORT_EXECUTOR.execute(() -> {
-                long resumeAt = logicalPositionMs;
-                if (resumeAt >= 0) {
-                    safeSeekFast(audio, resumeAt);
-                    safeSeekFast(video, resumeAt);
+                // Resume the same prepared MediaPlayer at its current
+                // position. A seekTo() on a Googlevideo HTTP stream before
+                // every Play forced range requests and 5–10s rebuffering.
+                // Only explicit +/-10s controls call safeSeekFast().
+                if (audio == audioPlayer) {
+                    safeUnmute(audio);
+                    safeStart(audio); // audible stream first
                 }
-                safeStart(audio);
-                safeStart(video);
-                safeUnmute(audio);
+                if (video == videoPlayer) safeStart(video);
             });
         }
     }
