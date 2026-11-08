@@ -5,6 +5,8 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
+import android.view.View;
+import android.view.MotionEvent;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -23,9 +25,51 @@ public class WebViewClientBridge extends WebViewClient {
         try {
             if (this.webView != null) {
                 this.webView.addJavascriptInterface(this, "PyMusicBridge");
+                installEdgeSwipeRouter(this.webView);
             }
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * Horizontal edge swipe changes PyMusic screens while preserving WebView's
+     * native touch stream. Vertical scrolling inside Shorts is never consumed.
+     * Use a native listener: the WebView is above the Kivy SDL surface.
+     */
+    private void installEdgeSwipeRouter(WebView view) {
+        final float density = ctx.getResources().getDisplayMetrics().density;
+        final float edge = 72f * density;
+        final float minSwipe = 110f * density;
+        view.setOnTouchListener(new View.OnTouchListener() {
+            private float downX, downY;
+            private long downAt;
+            private boolean fromEdge;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent e) {
+                int action = e.getActionMasked();
+                if (action == MotionEvent.ACTION_DOWN) {
+                    downX = e.getX();
+                    downY = e.getY();
+                    downAt = SystemClock.uptimeMillis();
+                    fromEdge = downX <= edge
+                            || downX >= Math.max(0, v.getWidth() - edge);
+                } else if (action == MotionEvent.ACTION_UP) {
+                    float dx = e.getX() - downX;
+                    float dy = e.getY() - downY;
+                    long elapsed = SystemClock.uptimeMillis() - downAt;
+                    if (fromEdge && elapsed > 50 && elapsed < 950
+                            && Math.abs(dx) >= minSwipe
+                            && Math.abs(dx) > Math.abs(dy) * 1.8f) {
+                        dispatchMode(dx < 0 ? "swipe_left" : "swipe_right");
+                    }
+                    fromEdge = false;
+                } else if (action == MotionEvent.ACTION_CANCEL) {
+                    fromEdge = false;
+                }
+                return false;
+            }
+        });
     }
 
     private static boolean isPlaybackBrowseUrl(String url) {
@@ -72,8 +116,6 @@ public class WebViewClientBridge extends WebViewClient {
                 || u.contains("music.youtube.com/playlist")
                 || isPlaybackBrowseUrl(url)
                 || u.contains("youtu.be/")
-                || u.contains("youtube.com/shorts/")
-                || u.contains("m.youtube.com/shorts/")
                 || u.contains("youtube.com/live/")
                 || u.contains("m.youtube.com/live/");
     }
@@ -214,29 +256,16 @@ public class WebViewClientBridge extends WebViewClient {
                 + "if(window.__pymusic_hooked){return;}window.__pymusic_hooked=true;"
                 + "function notify(){try{PyMusicBridge.onUrl(location.href);}catch(e){}}"
                 + "function isPlaybackBrowse(u){try{var a=new URL(u,location.href);var m=(a.pathname||\'\').match(/\\/browse\\/([^\\/?#]+)/);if(!m)return false;var id=m[1]||\'\';if(/^UC/.test(id)||/^@/.test(id))return false;return /^(MPRE|OLAK5uy|VL|PL|RD)/.test(id);}catch(e){return /\\/browse\\/(MPRE|OLAK5uy|VL|PL|RD)/i.test(u)&&!/\\/browse\\/UC/i.test(u);}}"
-                + "function isWatch(u){return /youtube\\.com\\/(watch|shorts|live|playlist)\\b/.test(u)||/m\\.youtube\\.com\\/(watch|shorts|live|playlist)\\b/.test(u)||/music\\.youtube\\.com\\/(watch|playlist)\\b/.test(u)||/youtu\\.be\\//.test(u)||isPlaybackBrowse(u);}"
+                + "function isWatch(u){return /youtube\\.com\\/(watch|live|playlist)\\b/.test(u)||/m\\.youtube\\.com\\/(watch|live|playlist)\\b/.test(u)||/music\\.youtube\\.com\\/(watch|playlist)\\b/.test(u)||/youtu\\.be\\//.test(u)||isPlaybackBrowse(u);}"
                 + "function ensureUi(){"
                 + "try{"
-                + "if(!document.getElementById('pymusic-style')){"
+                + "var old=document.getElementById('pymusic-bottom');if(old)old.remove();"
+                + "var style=document.getElementById('pymusic-style');if(style)style.remove();"
                 + "var s=document.createElement('style');s.id='pymusic-style';"
-                + "s.textContent='#pymusic-bottom{position:fixed;left:0;right:0;bottom:0;z-index:2147483647;"
-                + "background:rgba(0,0,0,.92);height:56px;display:flex;align-items:center;justify-content:center;"
-                + "gap:16px;padding:0 10px 0 10px;}"
-                + "#pymusic-bottom button{min-width:84px;height:34px;padding:0 14px;border-radius:18px;"
-                + "border:1px solid rgba(255,255,255,.35);background:transparent;color:#fff;font:14px sans-serif;}"
-                + "ytm-pivot-bar-renderer, ytm-pivot-bar-item-renderer, .pivot-bar, #pivot-bar, "
-                + "tp-yt-app-bottom-nav, ytd-mini-guide-renderer, #footer{display:none!important;}"
-                + "body{padding-bottom:0!important;}';"
+                + "s.textContent='#pymusic-bottom{display:none!important;}'"
+                + "+'ytm-pivot-bar-renderer,ytm-pivot-bar-item-renderer,.pivot-bar,#pivot-bar, '"
+                + "+'tp-yt-app-bottom-nav{display:none!important;}';"
                 + "document.documentElement.appendChild(s);"
-                + "}"
-                + "if(!document.getElementById('pymusic-bottom')){"
-                + "var bar=document.createElement('div');bar.id='pymusic-bottom';"
-                + "var bWeb=document.createElement('button');bWeb.textContent='Web';"
-                + "var bYt=document.createElement('button');bYt.textContent='YT';"
-                + "bWeb.onclick=function(e){try{e.preventDefault();e.stopPropagation();}catch(_e){};try{PyMusicBridge.onMode('search');}catch(_e){}};"
-                + "bYt.onclick=function(e){try{e.preventDefault();e.stopPropagation();}catch(_e){};try{PyMusicBridge.onMode('web');}catch(_e){}};"
-                + "bar.appendChild(bWeb);bar.appendChild(bYt);document.documentElement.appendChild(bar);"
-                + "}"
                 + "}catch(e){}"
                 + "}"
                 + "function isMusicSelected(){"
