@@ -1586,7 +1586,13 @@ class AudioPlayerScreen(Screen):
                     is_playing = bool(ma.android_player and ma.android_player.isPlaying())
                 except Exception:
                     is_playing = False
-                if not (is_playing or self._playback_desired):
+                # Android 13/MIUI hides our QS media card when the session
+                # becomes inactive. Pausing or navigating away is not a
+                # Stop action: keep a loaded track's session available.
+                if not (
+                    is_playing or self._playback_desired
+                    or bool(getattr(self, "_last_video_url", None))
+                ):
                     self._media_session.setActive(False)
         except Exception:
             pass
@@ -1651,6 +1657,11 @@ class AudioPlayerScreen(Screen):
         Clock.schedule_once(_do_open, 0)
 
     def handle_app_resume(self):
+        try:
+            if self._media_session and getattr(self, "_last_video_url", None):
+                self._media_session.setActive(True)
+        except Exception:
+            pass
         for delay in (0.0, 0.06, 0.18, 0.40):
             Clock.schedule_once(lambda _dt: self._bind_player_geometry(), delay)
         self._app_in_background = False
