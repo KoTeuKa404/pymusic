@@ -2670,7 +2670,11 @@ class AudioPlayerScreen(Screen):
             if ui_allowed:
                 Clock.schedule_once(self._align_video_to_thumb, 0.5)
             # Offline playback must never wait on YouTube metadata requests.
-            if ma.is_network_available():
+            try:
+                online = bool(ma.is_network_available())
+            except Exception:
+                online = False
+            if online:
                 self._ensure_metadata_async(video_url)
             return
 
@@ -4850,9 +4854,12 @@ class AudioPlayerScreen(Screen):
                     continue
                 candidate = str(entry.get("cache_path") or "")
                 if valid(candidate):
-                    os.utime(candidate, None)
+                    try:
+                        os.utime(candidate, None)
+                    except OSError:
+                        pass
                     return os.path.realpath(candidate)
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             pass
         try:
             for name in os.listdir(cache_root):
@@ -4860,7 +4867,10 @@ class AudioPlayerScreen(Screen):
                     continue
                 candidate = os.path.join(cache_root, name)
                 if valid(candidate):
-                    os.utime(candidate, None)
+                    try:
+                        os.utime(candidate, None)
+                    except OSError:
+                        pass
                     return os.path.realpath(candidate)
         except OSError:
             pass
@@ -5466,12 +5476,16 @@ class AudioPlayerScreen(Screen):
             ma._mp_start()
             # Save the complete audio bytes for tomorrow's offline replay.
             # A delayed worker handles network/disk I/O, never this playback path.
-            self._cache_audio_async(
-                str(self._last_video_url or ""),
-                str(self._stream_url or ""),
-                dict(self._headers or {}),
-                gen=gen,
-            )
+            try:
+                self._cache_audio_async(
+                    str(self._last_video_url or ""),
+                    str(self._stream_url or ""),
+                    dict(self._headers or {}),
+                    gen=gen,
+                )
+            except Exception as exc:
+                # Optional caching must never stop audio or playback UI updates.
+                print("[OFFLINE-CACHE] scheduling failed:", type(exc).__name__)
             pending_art = getattr(self, "_pending_audio_art", None)
             if (
                 isinstance(pending_art, tuple)
