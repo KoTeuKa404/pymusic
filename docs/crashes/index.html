@@ -45,6 +45,9 @@
     .pill {display:inline-flex;border-radius:40px;background:#e7f8ed;color:#216844;font-size:11px;padding:5px 9px;font-weight:750;}
     .pill.closed {background:#f0eef6;color:#665785;}
     .issue-link {white-space:nowrap;font-size:13px;text-decoration:none;font-weight:750;}
+    .details {margin-top:12px;border:1px solid #e5eee8;border-radius:10px;background:#f9fcfa;}
+    .details summary {padding:9px 12px;font-size:12px;font-weight:700;color:#2b7252;cursor:pointer;}
+    .details pre {white-space:pre-wrap;word-break:break-word;margin:0;padding:14px;border-top:1px solid #e5eee8;max-height:300px;overflow:auto;color:#40594a;font-size:12px;line-height:1.5;}
     .notice {padding:30px 22px;color:#698075;line-height:1.6;font-size:14px;}
     .foot {margin-top:28px;padding:20px;border:1px solid #d8ecdf;border-radius:14px;background:#edf9f1;color:#416453;font-size:13px;line-height:1.7;}
     footer {color:#94a79a;font-size:12px;margin-top:36px;text-align:center;}
@@ -140,6 +143,14 @@
       date.textContent = new Date(r.created_at).toLocaleDateString("uk-UA", {year:"numeric",month:"long",day:"numeric"});
       meta.appendChild(date);
       content.append(heading, meta);
+      const details = document.createElement("details");
+      details.className = "details";
+      const detailsSummary = document.createElement("summary");
+      detailsSummary.textContent = "Переглянути текст репорту";
+      const diagnostic = document.createElement("pre");
+      diagnostic.textContent = String(r.body || "У цьому Issue немає тексту репорту.").slice(0, 12000);
+      details.append(detailsSummary, diagnostic);
+      content.append(details);
       const open = document.createElement("a");
       open.className = "issue-link";
       open.href = r.html_url;
