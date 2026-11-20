@@ -204,14 +204,13 @@ def _open_url(url: str) -> None:
 
 
 def send_crash_report() -> None:
-    """Single explicit button: upload if configured; otherwise open GitHub draft.
+    """Tap to submit an anonymized, public GitHub Issue through the gateway.
 
-    The fallback copies the scrubbed report for pasting into GitHub. It does
-    not expose the traceback in URL parameters or silently send it to a server.
+    Without a deployed endpoint, the fallback copies only scrubbed diagnostics
+    and opens the Issue form. No automatic telemetry runs at application start.
     """
     try:
         from kivy.clock import Clock
-        from kivy.app import App
         from kivy.core.clipboard import Clipboard
         from kivymd.toast import toast
         import media_android as media
@@ -221,21 +220,51 @@ def send_crash_report() -> None:
     if not _SEND_LOCK.acquire(blocking=False):
         return
 
-    def on_ui(action, message="", clipboard_text=None):
+    def on_ui(action: str, message: str = "", clipboard_text: str | None = None):
         def run(_dt):
             if clipboard_text is not None:
                 try:
-                    sanitized_body = (
+                    Clipboard.copy(clipboard_text)
+                except Exception:
+                    pass
+            if message:
+                try:
+                    toast(message)
+                except Exception:
+                    print("[CRASH-REPORT] " + message)
+            if action:
+                _open_url(action)
+        Clock.schedule_once(run, 0)
+
+    def worker():
+        try:
+            report = make_report(media.LOG_DIR)
+            if _gateway_url():
+                try:
+                    public_issue = _send_to_gateway(report)
+                except Exception as exc:
+                    print("[CRASH-REPORT] upload failed:", type(exc).__name__)
+                    on_ui("", "Не вдалося надіслати репорт. Перевір з'єднання.")
+                    return
+                on_ui(public_issue, "Звіт надіслано на GitHub")
+            else:
+                sanitized_body = (
                     "## " + report["summary"] + "\n\n"
                     + "Time: " + report["created_at"] + "\n\n"
                     + chr(96) * 3 + "text\n"
                     + report["details"] + "\n" + chr(96) * 3
                 )
-                on_ui(ISSUE_NEW_PAGE, "Лог скопійовано. Встав його у GitHub Issue.", sanitized_body)
+                on_ui(
+                    ISSUE_NEW_PAGE,
+                    "Лог скопійовано. Встав його у GitHub Issue.",
+                    sanitized_body,
+                )
         except Exception as exc:
-            print("[CRASH-REPORT] could not prepare report:", type(exc).__name__)
+            print("[CRASH-REPORT] preparation failed:", type(exc).__name__)
             on_ui("", "Не вдалося підготувати звіт.")
         finally:
             _SEND_LOCK.release()
 
-    threading.Thread(target=worker, name="pymusic-manual-crash-report", daemon=True).start()
+    threading.Thread(
+        target=worker, name="pymusic-manual-crash-report", daemon=True
+    ).start()
