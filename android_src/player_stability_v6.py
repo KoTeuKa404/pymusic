@@ -261,6 +261,15 @@ def _install_now() -> bool:
         def extract_gen_network_safe(self, video_url: str, gen=None, *, prefer_compat=None):
             ensure_network_state(self)
             if not _network_available(media):
+                # Offline files must play even when real connectivity is lost.
+                # Previously this wrapper returned before the core playback
+                # could resolve a complete locally cached audio track.
+                try:
+                    expected_gen = self._load_gen if gen is None else gen
+                    if self._try_start_cached_audio(video_url, expected_gen):
+                        return None
+                except Exception as exc:
+                    print("[STABILITY-V6] local cache fallback failed:", type(exc).__name__)
                 self._playback_desired = True
                 self._user_paused = False
                 try:

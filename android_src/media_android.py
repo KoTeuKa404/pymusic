@@ -988,35 +988,47 @@ def _ensure_audio_attrs():
 # ===================== Network check =====================
 
 def is_network_available():
+    """Only report offline when Android confirms no usable network.
+
+    A previous fallback attempted TCP to 1.1.1.1:53, which many carriers
+    block independently of HTTPS. That wrongly paused background playback.
+    ACCESS_NETWORK_STATE is now explicitly declared in buildozer.spec.
+    Unknown connectivity (permission/API/transient error) is *not* offline;
+    let MediaPlayer handle actual HTTP failures instead.
+    """
     try:
         cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE)
+        if cm is None:
+            return True
         net = cm.getActiveNetwork()
-        if net is None:
-            return False
-        caps = cm.getNetworkCapabilities(net)
-        if caps is None:
-            return False
-        try:
-            if caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED):
+        if net is not None:
+            caps = cm.getNetworkCapabilities(net)
+            if caps is None:
                 return True
-        except Exception:
-            pass
-        # Some Android/WebView builds do not mark the network as VALIDATED fast enough
-        # during app startup. If the active network at least advertises INTERNET, allow YT;
-        # pure offline mode still returns False when there is no active network at all.
-        try:
-            if caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET):
+            try:
+                if caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET):
+                    return True
+            except Exception:
+                pass
+            try:
+                return bool(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+            except Exception:
                 return True
+
+        # Fallback for API 21/22 and transient getActiveNetwork() == None.
+        try:
+            info = cm.getActiveNetworkInfo()
+            if info is not None:
+                return bool(info.isConnected())
         except Exception:
-            pass
-    except Exception:
-        pass
-    try:
-        sock = socket.create_connection(("1.1.1.1", 53), timeout=1.0)
-        sock.close()
-        return True
-    except Exception:
+            # Older APIs/permission failure: unknown must not silently block
+            # all streaming and network recovery forever.
+            return True
         return False
+    except Exception:
+        # Do not use external DNS ports or hardcode Google DNS here.
+        return True
+
 
 def is_metered_connection() -> bool:
     """True for mobile/capped networks as reported by Android.

@@ -5210,7 +5210,7 @@ class AudioPlayerScreen(Screen):
                 )
             except Exception as exc:
                 # Optional caching must never stop audio or playback UI updates.
-                print("[OFFLINE-CACHE] scheduling failed:", type(exc).__name__)
+                print("[OFFLINE-CACHE] scheduling failed:", type(exc).__name__, str(exc)[:240])
             pending_art = getattr(self, "_pending_audio_art", None)
             if (
                 isinstance(pending_art, tuple)
