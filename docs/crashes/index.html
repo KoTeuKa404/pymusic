@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Публічні краш-репорти Android-застосунку PyMusic.">
+  <title>Crash Reports · PyMusic</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:#192e28; background:#f7fcf9; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; }
+    a { color:#185c45; }
+    a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {outline:3px solid #49b78a; outline-offset:3px;}
+    .wrap { max-width:1060px; margin:0 auto; padding:26px 22px 70px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    .brand { display:flex; align-items:center; gap:10px; font-weight:800; font-size:17px; text-decoration:none; letter-spacing:-.04em; }
+    .logo { background:#d8f7e6; color:#127f58; border:1px solid #abe7ca; border-radius:13px; padding:9px 11px; }
+    .nav { display:flex; gap:18px; font-size:14px; }
+    .nav a { text-decoration:none; font-weight:650; }
+    header { margin:60px 0 30px; }
+    .eyebrow { display:inline-flex; border:1px solid #b9e9cf; background:#e3f8eb; border-radius:100px; padding:6px 12px; color:#226a48; font-size:12px; font-weight:750; }
+    h1 { font-size:clamp(36px,6vw,62px); line-height:1.07; letter-spacing:-.065em; margin:16px 0 18px; }
+    .lead { max-width:670px; line-height:1.65; font-size:16px; color:#61756c; margin:0; }
+    .actions { margin-top:24px; display:flex; gap:12px; flex-wrap:wrap; }
+    .button { border:1px solid #b9d9c9; background:white; color:#254b3b; border-radius:11px; padding:12px 17px; font-size:14px; font-weight:700; text-decoration:none; cursor:pointer; }
+    .button.primary { background:#176d4b; color:white; border-color:#176d4b; }
+    .button:hover { filter:brightness(.96); }
+    .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:35px 0 28px; }
+    .stat { background:white; border:1px solid #e0ede6; border-radius:16px; padding:22px; }
+    .stat .num {font-size:29px;font-weight:800;letter-spacing:-.04em;}
+    .stat .label {color:#748b7d;font-size:13px;margin-top:5px;}
+    .panel { background:white; border:1px solid #e0ede6; box-shadow:0 12px 32px rgba(28,86,52,.04); border-radius:17px; overflow:hidden; }
+    .toolbar {display:flex; align-items:center; gap:10px; padding:20px; flex-wrap:wrap; border-bottom:1px solid #e9f1ed;}
+    h2 {margin:0 14px 0 0;letter-spacing:-.025em;font-size:19px;}
+    .search { flex:1; min-width:200px; border:1px solid #d6e8dd; border-radius:9px; background:#fcfffd; padding:11px 12px;font:inherit;color:inherit; }
+    select {padding:10px 12px;border-radius:9px;border:1px solid #d6e8dd;background:white;font:inherit;color:inherit;}
+    .entries {padding:0 20px;}
+    .entry {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:20px 0;border-bottom:1px solid #edf2ef;align-items:center;}
+    .entry:last-child {border-bottom:0;}
+    .entry h3 {font-size:15px;letter-spacing:-.015em;margin:0 0 8px;overflow-wrap:anywhere;}
+    .entry h3 a {text-decoration:none;color:#263e32;}
+    .entry h3 a:hover {text-decoration:underline;}
+    .meta {display:flex;gap:12px;flex-wrap:wrap;color:#809088;font-size:12px;align-items:center;}
+    .pill {display:inline-flex;border-radius:40px;background:#e7f8ed;color:#216844;font-size:11px;padding:5px 9px;font-weight:750;}
+    .pill.closed {background:#f0eef6;color:#665785;}
+    .issue-link {white-space:nowrap;font-size:13px;text-decoration:none;font-weight:750;}
+    .notice {padding:30px 22px;color:#698075;line-height:1.6;font-size:14px;}
+    .foot {margin-top:28px;padding:20px;border:1px solid #d8ecdf;border-radius:14px;background:#edf9f1;color:#416453;font-size:13px;line-height:1.7;}
+    footer {color:#94a79a;font-size:12px;margin-top:36px;text-align:center;}
+    @media(max-width:650px){.stats{gap:8px}.stat{padding:14px}.stat .num{font-size:24px}.toolbar{align-items:stretch}.toolbar h2{width:100%}.search{min-width:100%}.entry{grid-template-columns:1fr}.issue-link{margin-top:0}.nav{gap:10px}header{margin-top:42px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <a class="brand" href="../"><span class="logo">♪</span> PyMusic <span style="color:#95aa9a;font-weight:500">/ Crash Reports</span></a>
+      <nav class="nav">
+        <a href="https://github.com/KoTeuKa404/pymusic">GitHub</a>
+        <a href="https://github.com/KoTeuKa404/pymusic/releases/tag/latest-debug">APK</a>
+      </nav>
+    </div>
+    <header>
+      <div class="eyebrow">DIAGNOSTICS · ANDROID</div>
+      <h1>Crash <span style="color:#249365">Reports.</span></h1>
+      <p class="lead">Звіти про збої PyMusic зібрані в одному місці. Переглядай проблеми, стеж за виправленнями й відкривай подробиці в GitHub Issues.</p>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/KoTeuKa404/pymusic/issues/new?template=crash_report.yml">+ Повідомити про збій</a>
+        <a class="button" href="https://github.com/KoTeuKa404/pymusic/issues?q=is%3Aissue+%22PyMusic+Crash%22">Усі репорти на GitHub</a>
+      </div>
+    </header>
+    <section class="stats" aria-label="Статистика">
+      <div class="stat"><div id="total" class="num">—</div><div class="label">Всього репортів</div></div>
+      <div class="stat"><div id="open" class="num">—</div><div class="label">Відкриті</div></div>
+      <div class="stat"><div id="fixed" class="num">—</div><div class="label">Закриті / перевірені</div></div>
+    </section>
+    <section class="panel" aria-label="Репорти">
+      <div class="toolbar">
+        <h2>Журнал збоїв</h2>
+        <input class="search" id="search" type="search" autocomplete="off" placeholder="Пошук за описом або №..." aria-label="Пошук репортів">
+        <select id="filter" aria-label="Фільтр стану">
+          <option value="all">Всі стани</option>
+          <option value="open">Відкриті</option>
+          <option value="closed">Закриті</option>
+        </select>
+        <button type="button" class="button" id="refresh">Оновити</button>
+      </div>
+      <div id="entries" class="entries" aria-live="polite">
+        <div class="notice">Завантажуємо репорти з GitHub…</div>
+      </div>
+    </section>
+    <div class="foot"><strong>Приватність.</strong> Цей розділ відображає публічні GitHub Issues. PyMusic надсилає лише репорт після натискання кнопки користувачем; діагностичний текст проходить очищення від URL, токенів та ідентифікаторів. Не додавайте приватні дані до репортів вручну. Якщо звіт містить чутливі дані, видаліть їх з GitHub Issue.</div>
+    <footer>PyMusic · Community crash diagnostics · <span id="updated">—</span></footer>
+  </div>
+<script>
+  const REPO = "KoTeuKa404/pymusic";
+  const api = "https://api.github.com/repos/" + REPO + "/issues";
+  const entries = document.getElementById("entries");
+  const search = document.getElementById("search");
+  const filter = document.getElementById("filter");
+  let reports = [];
+
+  function view() {
+    const q = search.value.toLowerCase().trim();
+    const state = filter.value;
+    const filtered = reports.filter(r => {
+      return (state === "all" || r.state === state) &&
+        (!q || (r.title + " #" + r.number).toLowerCase().includes(q));
+    });
+    entries.replaceChildren();
+    if (!filtered.length) {
+      const msg = document.createElement("div");
+      msg.className = "notice";
+      msg.textContent = reports.length ? "Немає репортів за цим фільтром." : "Поки що немає опублікованих краш-репортів.";
+      entries.appendChild(msg);
+      return;
+    }
+    for (const r of filtered) {
+      const row = document.createElement("article");
+      row.className = "entry";
+      const content = document.createElement("div");
+      const heading = document.createElement("h3");
+      const link = document.createElement("a");
+      link.href = r.html_url;
+      link.textContent = r.title;
+      link.rel = "noopener noreferrer";
+      link.target = "_blank";
+      heading.append(link);
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const chip = document.createElement("span");
+      chip.className = "pill" + (r.state === "closed" ? " closed" : "");
+      chip.textContent = r.state === "closed" ? "Закрито" : "Відкрито";
+      meta.appendChild(chip);
+      const number = document.createElement("span");
+      number.textContent = "#" + r.number;
+      meta.appendChild(number);
+      const date = document.createElement("time");
+      date.dateTime = r.created_at;
+      date.textContent = new Date(r.created_at).toLocaleDateString("uk-UA", {year:"numeric",month:"long",day:"numeric"});
+      meta.appendChild(date);
+      content.append(heading, meta);
+      const open = document.createElement("a");
+      open.className = "issue-link";
+      open.href = r.html_url;
+      open.rel = "noopener noreferrer";
+      open.target = "_blank";
+      open.textContent = "Відкрити в GitHub ↗";
+      row.append(content, open);
+      entries.append(row);
+    }
+  }
+
+  async function load() {
+    const button = document.getElementById("refresh");
+    button.disabled = true;
+    entries.replaceChildren();
+    const status = document.createElement("div");
+    status.className = "notice";
+    status.textContent = "Оновлюємо список…";
+    entries.append(status);
+    try {
+      const pages = [];
+      // GitHub's unauthenticated API may rate-limit this public page.
+      for (let page=1; page<=3; page++) {
+        const response = await fetch(api + "?state=all&per_page=100&page=" + page, { headers: { Accept:"application/vnd.github+json" } });
+        if (!response.ok) throw new Error(response.status === 403 ? "Досягнуто ліміту запитів GitHub. Повторіть пізніше." : "GitHub API: HTTP " + response.status);
+        const data = await response.json();
+        if (!Array.isArray(data)) throw new Error("Некоректна відповідь GitHub.");
+        pages.push(...data);
+        if (data.length < 100) break;
+      }
+      reports = pages.filter(r => !r.pull_request && (
+        String(r.title || "").startsWith("[PyMusic Crash]") ||
+        (r.labels || []).some(l => l.name === "crash-report")
+      )).filter(r => /^https:\/\/github\.com\/KoTeuKa404\/pymusic\/issues\/\d+$/.test(String(r.html_url || "")));
+      reports.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+      document.getElementById("total").textContent = reports.length + (pages.length === 300 ? "+" : "");
+      document.getElementById("open").textContent = reports.filter(r=>r.state==="open").length;
+      document.getElementById("fixed").textContent = reports.filter(r=>r.state==="closed").length;
+      document.getElementById("updated").textContent = "Оновлено " + new Date().toLocaleTimeString("uk-UA",{hour:"2-digit",minute:"2-digit"});
+      view();
+    } catch (error) {
+      entries.replaceChildren();
+      const message = document.createElement("div");
+      message.className = "notice";
+      message.textContent = "Не вдалося отримати репорти: " + error.message;
+      entries.append(message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  search.addEventListener("input", view);
+  filter.addEventListener("change", view);
+  document.getElementById("refresh").addEventListener("click", load);
+  load();
+</script>
+</body>
+</html>

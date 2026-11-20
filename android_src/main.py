@@ -1289,6 +1289,11 @@ def _log_build_info():
 
 # ================= APP =================
 class YoutubeSearchApp(MDApp):
+    def send_crash_report(self):
+        """Opt-in public diagnostic report. Safe, non-blocking network upload."""
+        from crash_reporter import send_crash_report
+        send_crash_report()
+
     def build(self):
         self.theme_cls.theme_style = "Light"
         self.theme_cls.primary_palette = "Blue"

@@ -234,6 +234,11 @@
                 height: dp(44)
                 on_release: root.perform_search()
 
+            MDFlatButton:
+                text: "Crash report"
+                font_size: "13sp"
+                on_release: app.send_crash_report()
+
             MDIconButton:
                 icon: "cog-outline"
                 on_release: app.root.show_ui_presets()

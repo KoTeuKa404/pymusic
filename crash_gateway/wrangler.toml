@@ -1,0 +1,16 @@
+name = "pymusic-crash-gateway"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# The GitHub token is a secret: run "npx wrangler secret put GITHUB_TOKEN".
+# Fine-grained token: repository "KoTeuKa404/pymusic", Issues: Read & Write.
+# It is never committed, returned by the API or bundled into Android.
+
+[[ratelimits]]
+name = "REPORT_LIMITER"
+namespace_id = "1001"
+
+[ratelimits.simple]
+limit = 3
+period = 60
