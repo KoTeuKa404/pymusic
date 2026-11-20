@@ -20,6 +20,7 @@ from kivymd.uix.list import OneLineListItem, TwoLineListItem
 import threading
 import time
 import os
+import weakref
 import re
 from datetime import date, datetime
 import hashlib
@@ -32,12 +33,13 @@ import ssl
 
 import media_android as ma
 import ytdlp_helpers as ydlh
+from offline_image_cache import get_cached_image_path, request_cached_image
 
 # Audio bytes persist in app-private storage. Signed yt-dlp URLs are never
 # treated as offline media, and only complete downloads enter the cache.
 _OFFLINE_AUDIO_DOWNLOAD_LOCK = threading.Lock()
 _OFFLINE_AUDIO_MAX_TRACK_BYTES = 96 * 1024 * 1024
-_OFFLINE_AUDIO_MAX_TOTAL_BYTES = 384 * 1024 * 1024
+_OFFLINE_AUDIO_MAX_TOTAL_BYTES = 768 * 1024 * 1024
 _OFFLINE_AUDIO_MIN_FREE_BYTES = 128 * 1024 * 1024
 from headset_listener import headset_router
 from recent_utils import (
@@ -45,6 +47,8 @@ from recent_utils import (
     save_recent,
     update_recent_cache,
     update_recent_art,
+    update_recent_avatar,
+    upsert_recent,
     is_favorite,
     upsert_favorite,
     remove_favorite,
@@ -2423,28 +2427,9 @@ class AudioPlayerScreen(Screen):
 # TODO створи клас для відео з всіма полями тайлтлу і тд щоб їх отримувати тут
     def _remember_recent(self, url: str, title: str, channel: str, thumb: str):
         try:
-            if not url:
-                return
-            recent = load_recent()
-            existing = {}
-            try:
-                existing = next((r for r in recent if r.get("url") == url), {}) or {}
-            except Exception:
-                existing = {}
-            entry = {
-                "url": url,
-                "title": title or existing.get("title") or "",
-                "channel": channel or existing.get("channel") or "",
-                "thumb": thumb or existing.get("thumb") or "",
-            }
-            for key in ("cache_path", "art_path"):
-                if existing.get(key):
-                    entry[key] = existing.get(key)
-            recent = [r for r in recent if r.get("url") != url]
-            recent.insert(0, entry)
-            save_recent(recent)
-        except Exception:
-            pass
+            upsert_recent(url, title, channel, thumb)
+        except Exception as exc:
+            print("[RECENT] metadata saving skipped:", type(exc).__name__)
 
     def _hydrate_metadata_from_known_sources(self, video_url: str) -> bool:
         """Fill title/channel/thumb from playlist/recent/favorites without network."""
@@ -2491,7 +2476,20 @@ class AudioPlayerScreen(Screen):
             if thumb and not self._thumb:
                 self._thumb = thumb
                 changed = True
-            if self._title and self._channel and self._thumb:
+            avatar_url = str(item.get("avatar_url") or "").strip()
+            avatar_path = str(item.get("avatar_path") or "").strip()
+            if avatar_url and not avatar_path:
+                candidate = self._channel_avatar_cache_path(avatar_url)
+                if os.path.isfile(candidate) and not os.path.islink(candidate):
+                    avatar_path = candidate
+            if avatar_url and not self._channel_thumb:
+                self._channel_thumb = avatar_url
+                changed = True
+            if (avatar_path and not self._channel_thumb_local
+                    and os.path.isfile(avatar_path) and not os.path.islink(avatar_path)):
+                self._channel_thumb_local = avatar_path
+                changed = True
+            if self._title and self._channel and self._thumb and self._channel_thumb_local:
                 break
         return changed
 
@@ -2944,91 +2942,32 @@ class AudioPlayerScreen(Screen):
 
 
     def _download_art_async(self, url: str):
-        if not url or not url.startswith(("http://", "https://")):
+        """Persist the selected video's actual image before showing it offline."""
+        if not url or not url.startswith(("https://", "//")):
+            return
+        video_url = str(self._last_video_url or "")
+        if not video_url:
+            return
+        cached = self._find_cached_art(video_url)
+        if cached:
+            self._art_path = cached
+            Clock.schedule_once(lambda _dt: self._sync_thumb_now(), 0)
             return
 
-        # Bound each artwork request to the selected video. A late image
-        # download from the previous track must not replace current
-        # MediaSession artwork or the notification's background colors.
-        requested_video_url = str(self._last_video_url or "")
+        def applied(path):
+            if not path or not os.path.isfile(path):
+                return
+            update_recent_art(video_url, path)
+            if _playlist_same_video_core(
+                str(self._last_video_url or ""), video_url
+            ):
+                self._art_path = path
+                self._sync_thumb_now()
+                self._publish_media_metadata_now()
 
-        def _job():
-            try:
-                art_path = None
-                if requested_video_url:
-                    art_path = self._art_cache_path(requested_video_url)
-                if not art_path:
-                    art_path = os.path.join(tempfile.gettempdir(), "pymusic_art.jpg")
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
-                        "Referer": "https://www.youtube.com",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Connection": "keep-alive",
-                    },
-                )
-                # Album art is a bounded, verified HTTPS asset. The old
-                # _create_unverified_context accepted forged certs and wrote
-                # arbitrary response sizes directly into the media cache.
-                def trusted_art(hostname: str) -> bool:
-                    host = str(hostname or "").lower()
-                    return host in (
-                        "i.ytimg.com", "img.youtube.com",
-                        "yt3.ggpht.com", "yt3.googleusercontent.com",
-                    )
-
-                parsed = urllib.parse.urlsplit(url)
-                if parsed.scheme != "https" or not trusted_art(parsed.hostname):
-                    return
-
-                class SafeArtRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, request, fp, code, msg, hdrs, newurl):
-                        target = urllib.parse.urlsplit(newurl)
-                        if target.scheme != "https" or not trusted_art(target.hostname):
-                            raise ValueError("untrusted thumbnail redirect")
-                        return super().redirect_request(
-                            request, fp, code, msg, hdrs, newurl
-                        )
-
-                context = ssl.create_default_context(cafile=certifi.where())
-                opener = urllib.request.build_opener(
-                    urllib.request.HTTPSHandler(context=context),
-                    SafeArtRedirect(),
-                )
-                with opener.open(req, timeout=12) as response:
-                    length = int(response.headers.get("Content-Length") or 0)
-                    if length > 2 * 1024 * 1024:
-                        return
-                    image_bytes = response.read(2 * 1024 * 1024 + 1)
-                    if len(image_bytes) > 2 * 1024 * 1024 or len(image_bytes) < 128:
-                        return
-                temp = art_path + ".part"
-                try:
-                    with open(temp, "wb") as output:
-                        output.write(image_bytes)
-                    os.replace(temp, art_path)
-                finally:
-                    try:
-                        if os.path.exists(temp):
-                            os.unlink(temp)
-                    except OSError:
-                        pass
-                if requested_video_url:
-                    update_recent_art(requested_video_url, art_path)
-                if requested_video_url != str(self._last_video_url or ""):
-                    return
-                self._art_path = art_path
-                # Republish the decoded video cover, session state and
-                # notification on Kivy's thread once the download is complete.
-                def publish_art(_dt, expected=requested_video_url):
-                    if expected == str(self._last_video_url or ""):
-                        self._publish_media_metadata_now()
-                Clock.schedule_once(publish_art, 0)
-            except Exception:
-                pass
-
-        threading.Thread(target=_job, daemon=True).start()
+        # Shared 64 MiB LRU, HTTPS allowlist, validated image headers,
+        # complete-file atomic replacement and max three fetch workers.
+        request_cached_image(url, applied)
 
     def _channel_avatar_cache_path(self, channel_thumb_url: str) -> str:
         key = self._cache_key(channel_thumb_url or self._channel or "channel")
@@ -3036,10 +2975,13 @@ class AudioPlayerScreen(Screen):
 
     def _download_channel_avatar_async(self, url: str):
         """Cache only verified YouTube channel images, never HTML/video art."""
+        requested_video_url = str(self._last_video_url or "")
         avatar_url = ydlh._validated_yt_avatar_url(url)
         if not avatar_url:
             print("[META] rejected non-YouTube channel avatar URL")
             return
+        if requested_video_url:
+            update_recent_avatar(requested_video_url, avatar_url, None)
 
         def _apply_file(path: str) -> None:
             # UI updates must happen on the Kivy thread and belong to the
@@ -3047,6 +2989,8 @@ class AudioPlayerScreen(Screen):
             if str(getattr(self, "_channel_thumb", "") or "") != avatar_url:
                 return
             self._channel_thumb_local = path
+            if requested_video_url:
+                update_recent_avatar(requested_video_url, avatar_url, path)
             try:
                 ma.log(f"[META] avatar saved: {path}")
             except Exception:
@@ -3118,284 +3062,59 @@ class AudioPlayerScreen(Screen):
         return os.path.join(self._art_cache_dir(), f"pl_{key}.jpg")
 
     def _set_playlist_thumb(self, img_widget, thumb_url: str):
-        """
-        Стабільна заставка для рядків плейлиста/рекомендацій.
-
-        Важливо: тут НЕ ставимо https URL напряму в AsyncImage/Image. На Android/Kivy
-        це може дати баг, коли кілька превʼю відмальовуються тільки в останньому
-        рядку. Тому спочатку качаємо файл у локальний кеш, а потім ставимо texture
-        саме на той widget, який чекає цей thumb.
-        """
+        """Show persisted playlist/recommendation images before any network I/O."""
         src = Playlist._normalize_img_url(str(thumb_url or "")).strip()
         src = src.replace("https://img.youtube.com/", "https://i.ytimg.com/")
-
         try:
+            img_widget._pymusic_expected_thumb = src
             if hasattr(img_widget, "clear_image"):
                 img_widget.clear_image()
             else:
                 img_widget.source = ""
                 img_widget.texture = None
-        except Exception:
-            pass
-
-        if not src.startswith(("http://", "https://")):
+        except (ReferenceError, AttributeError):
             return
-
-        path = self._playlist_thumb_cache_path(src)
-
+        if not src:
+            return
         try:
-            ma.log(f"[PLAYLIST] thumb row request src={src} path={path}")
-        except Exception:
-            pass
+            owner = weakref.ref(img_widget)
+        except TypeError:
+            owner = lambda: img_widget
 
-        try:
-            setattr(img_widget, "_pymusic_expected_thumb", src)
-            setattr(img_widget, "_pymusic_expected_thumb_path", path)
-        except Exception:
-            pass
-
-        def _apply_file_to_widget(widget):
+        def apply(path):
             try:
-                if getattr(widget, "_pymusic_expected_thumb", None) != src:
+                widget = owner()
+                if widget is None or getattr(widget, "_pymusic_expected_thumb", None) != src:
                     return
-                if getattr(widget, "_pymusic_expected_thumb_path", None) != path:
+                if not path or not os.path.isfile(path):
                     return
-                if not (os.path.exists(path) and os.path.getsize(path) > 0):
-                    return
-
-                # Прибираємо старий cache по обох ключах. Далі ставимо texture напряму,
-                # без remote loader і без повторного AsyncImage-завантаження.
-                try:
-                    Cache.remove("kv.image", path)
-                    Cache.remove("kv.texture", path)
-                    if getattr(widget, "source", None):
-                        Cache.remove("kv.image", widget.source)
-                        Cache.remove("kv.texture", widget.source)
-                except Exception:
-                    pass
-
-                # Main path: custom ThumbImage owns its canvas texture, so rows cannot
-                # accidentally reuse the last AsyncImage/Image loader result.
                 if hasattr(widget, "set_local_file"):
-                    try:
-                        widget.source = path
-                        widget.set_local_file(path)
-                    except Exception:
-                        pass
+                    widget.set_local_file(path)
                 else:
-                    # Fallback for normal Kivy Image. Set a local file source and reload
-                    # on the next frame; do not ever assign a remote https URL here.
-                    try:
-                        widget.source = path
-                        if hasattr(widget, "reload"):
-                            widget.reload()
-                    except Exception:
-                        pass
-                    try:
-                        texture = CoreImage(path, nocache=True).texture
-                        widget.texture = texture
-                    except TypeError:
-                        try:
-                            widget.texture = CoreImage(path).texture
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-
-                try:
-                    widget.canvas.ask_update()
-                except Exception:
-                    pass
-                try:
-                    ma.log(f"[PLAYLIST] thumb applied path={path} widget={id(widget)}")
-                except Exception:
-                    pass
-                # Some Kivy builds paint after layout stabilizes. Re-apply once more.
-                try:
-                    # The widget stored in ids/MDList can be a Kivy weak proxy.
-                    # If the row is recycled/removed before this delayed callback runs,
-                    # touching that proxy raises ReferenceError and kills the app.
-                    def _safe_reapply_thumb(_dt, w=widget, p=path):
-                        try:
-                            if getattr(w, "_pymusic_expected_thumb_path", None) != p:
-                                return
-                            setter = getattr(w, "set_local_file", None)
-                            if setter:
-                                setter(p)
-                        except ReferenceError:
-                            return
-                        except Exception:
-                            return
-
-                    Clock.schedule_once(_safe_reapply_thumb, 0.08)
-                except Exception:
-                    pass
-            except ReferenceError:
-                # The list can recycle its Kivy weak proxies before a delayed
-                # thumbnail callback runs. This is normal and needs no retry.
-                return
-            except Exception as e:
-                try:
-                    ma.log(f"[PLAYLIST] apply thumb fail: path={path} err={e}")
-                except Exception:
-                    pass
-
-        def _apply_all(_dt=None):
-            try:
-                waiters = self._playlist_thumb_waiters.pop(path, [])
-            except Exception:
-                waiters = []
-            if img_widget not in waiters:
-                waiters.append(img_widget)
-            # Захист від дублювання одного й того самого widget у waiters.
-            seen_widgets = set()
-            for widget in list(waiters):
-                try:
-                    wid_key = id(widget)
-                    if wid_key in seen_widgets:
-                        continue
-                    seen_widgets.add(wid_key)
-                    _apply_file_to_widget(widget)
-                except Exception:
-                    pass
-
-        def _retry_apply_to_this_widget(_dt=None):
-            # Extra safety for Windows/Kivy: even if a waiter is lost due to a
-            # fast re-render, this exact row checks the cache again later.
-            try:
-                _apply_file_to_widget(img_widget)
-            except Exception:
+                    widget.source = path
+                    if hasattr(widget, "reload"):
+                        widget.reload()
+            except (ReferenceError, OSError):
                 pass
+            except Exception as exc:
+                print("[IMAGE-CACHE] playlist image skipped:", type(exc).__name__)
 
-        for _delay in (0.05, 0.25, 0.75, 1.5, 3.0):
-            try:
-                Clock.schedule_once(_retry_apply_to_this_widget, _delay)
-            except Exception:
-                pass
-
-        def _local_file_valid() -> bool:
-            try:
-                if not (os.path.exists(path) and os.path.getsize(path) > 0):
-                    return False
-                try:
-                    CoreImage(path, nocache=True)
-                except TypeError:
-                    CoreImage(path)
-                return True
-            except Exception:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                return False
-
+        # Compatibility with the complete JPEG files saved by old APK builds.
+        legacy = self._playlist_thumb_cache_path(src)
         try:
-            self._playlist_thumb_waiters.setdefault(path, []).append(img_widget)
-        except Exception:
+            if (os.path.isfile(legacy) and not os.path.islink(legacy)
+                    and 128 <= os.path.getsize(legacy) <= 2 * 1024 * 1024):
+                with open(legacy, "rb") as existing:
+                    if existing.read(3) == bytes.fromhex("ffd8ff"):
+                        apply(legacy)
+                        return
+        except OSError:
             pass
-
-        if _local_file_valid():
-            Clock.schedule_once(_apply_all, 0)
-            return
-
-        try:
-            if path in self._playlist_thumb_inflight:
-                return
-            self._playlist_thumb_inflight.add(path)
-        except Exception:
-            pass
-
-        def _download_to_cache(url: str) -> bool:
-            tmp = f"{path}.tmp"
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except Exception:
-                pass
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Mobile Safari/537.36",
-                    "Referer": "https://www.youtube.com",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "image/jpeg,image/png,image/*;q=0.9,*/*;q=0.8",
-                    "Connection": "keep-alive",
-                },
-            )
-            ctx = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=12, context=ctx) as resp, open(tmp, "wb") as f:
-                f.write(resp.read())
-
-            if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-                # Перевіряємо, що файл реально відкривається Kivy, щоб не кешувати HTML/помилку.
-                try:
-                    try:
-                        CoreImage(tmp, nocache=True)
-                    except TypeError:
-                        CoreImage(tmp)
-                except Exception:
-                    try:
-                        os.remove(tmp)
-                    except Exception:
-                        pass
-                    return False
-                os.replace(tmp, path)
-                return True
-
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-            return False
-
-        def _job():
-            ok = False
-            try:
-                with self._playlist_thumb_sem:
-                    candidates = [src]
-                    if "/vi/" in src or "/vi_webp/" in src:
-                        for name in ("mqdefault.jpg", "hqdefault.jpg", "default.jpg"):
-                            alt = re.sub(r"/(maxresdefault|sddefault|hqdefault|mqdefault|default)\.jpg(?:\?.*)?$", f"/{name}", src)
-                            if alt not in candidates:
-                                candidates.append(alt)
-                    if "i.ytimg.com" in src:
-                        alt_host = src.replace("i.ytimg.com", "img.youtube.com")
-                        if alt_host not in candidates:
-                            candidates.append(alt_host)
-
-                    for candidate in candidates:
-                        if _download_to_cache(candidate):
-                            ok = True
-                            break
-
-                if ok:
-                    Clock.schedule_once(_apply_all, 0)
-                else:
-                    try:
-                        self._playlist_thumb_waiters.pop(path, None)
-                    except Exception:
-                        pass
-                    try:
-                        ma.log(f"[PLAYLIST] thumb not downloaded: {src}")
-                    except Exception:
-                        pass
-            except Exception as e:
-                try:
-                    self._playlist_thumb_waiters.pop(path, None)
-                except Exception:
-                    pass
-                try:
-                    ma.log(f"[PLAYLIST] thumb download fail: url={src} err={e}")
-                except Exception:
-                    pass
-            finally:
-                try:
-                    self._playlist_thumb_inflight.discard(path)
-                except Exception:
-                    pass
-
-        threading.Thread(target=_job, daemon=True).start()
-
+        path = get_cached_image_path(src)
+        if path:
+            apply(path)
+        else:
+            request_cached_image(src, apply)
 
     def toggle_playlist_collapsed(self):
         self._playlist_collapsed = not bool(getattr(self, "_playlist_collapsed", False))
@@ -4319,6 +4038,11 @@ class AudioPlayerScreen(Screen):
             self._related_items = self._normalize_related(related)
             Clock.schedule_once(lambda dt: self._render_similar_ui(), 0)
         if updated:
+            if self._last_video_url:
+                upsert_recent(
+                    self._last_video_url, self._title, self._channel,
+                    self._thumb or "",
+                )
             self._publish_media_metadata_now()
             Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
 
@@ -5083,7 +4807,8 @@ class AudioPlayerScreen(Screen):
             try:
                 # Let the playing stream buffer first. Never block UI/MediaPlayer
                 # preparation or continue a speculative download after a switch.
-                for _ in range(8):
+                warmup_seconds = 8 if ma.is_metered_connection() else 4
+                for _ in range(warmup_seconds):
                     time.sleep(1.0)
                     if gen is not None and (
                         not self._is_current_gen(gen)
@@ -5813,6 +5538,7 @@ class AudioPlayerScreen(Screen):
             # and competed with the audio startup buffer. Explicitly saved
             # favorite tracks retain their existing cache workflow.
             self._metadata_loaded_urls.add(video_url)
+            upsert_recent(video_url, self._title, self._channel, self._thumb or "")
             self._extract_fail_skip_hits = 0
 
         except Exception as e:
@@ -6066,10 +5792,9 @@ class AudioPlayerScreen(Screen):
             avatar = self.ids.get("channel_avatar")
             if avatar:
                 src = self._channel_thumb_local or self._channel_thumb or ""
+                if str(src).startswith(("http://", "https://")):
+                    src = get_cached_image_path(src) or ""
                 if src:
-                    if src.startswith("http"):
-                        sep = "&" if "?" in src else "?"
-                        src = f"{src}{sep}ts={int(time.time())}"
                     avatar.source = src
                     avatar.opacity = 1
                     try:
@@ -6091,6 +5816,8 @@ class AudioPlayerScreen(Screen):
             avatar = self.ids.get("channel_avatar")
             if avatar:
                 src = self._channel_thumb_local or self._channel_thumb or ""
+                if str(src).startswith(("http://", "https://")):
+                    src = get_cached_image_path(src) or ""
                 if src:
                     avatar.source = src
                     avatar.opacity = 1
@@ -6357,18 +6084,23 @@ class AudioPlayerScreen(Screen):
 
     def _sync_thumb_now(self):
         try:
-            if self._thumb:
-                try:
-                    Cache.remove("kv.image", self.ids.audio_thumbnail.source)
-                except Exception:
-                    pass
-                src = self._thumb
-                if src.startswith("http"):
-                    sep = "&" if "?" in src else "?"
-                    src = f"{src}{sep}ts={int(time.time())}"
-                self.ids.audio_thumbnail.source = src
-        except Exception:
+            thumb = self.ids.get("audio_thumbnail")
+            if thumb is None:
+                return
+            local = str(self._art_path or "")
+            if not (local and os.path.isfile(local)):
+                local = self._find_cached_art(str(self._last_video_url or "")) or ""
+            src = local or str(self._thumb or "")
+            if src.startswith(("http://", "https://")):
+                # Never issue an additional uncached Kivy HTTP image request.
+                # The shared image worker writes it locally and refreshes UI.
+                src = get_cached_image_path(src) or ""
+            if thumb.source != src:
+                thumb.source = src
+        except (OSError, ReferenceError):
             pass
+        except Exception as exc:
+            print("[IMAGE-CACHE] cover apply skipped:", type(exc).__name__)
 
     def _ui_set_playing(self, playing: bool):
         try:

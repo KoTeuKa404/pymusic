@@ -103,6 +103,7 @@ from kivymd.uix.label     import MDLabel
 from kivymd.uix.scrollview import MDScrollView
 from kivymd.uix.dialog    import MDDialog
 from kivy.uix.image       import AsyncImage
+from offline_image_cache import CachedAsyncImage
 from kivy.animation       import Animation
 from kivy.uix.widget      import Widget
 from kivy.uix.stencilview import StencilView
@@ -349,8 +350,10 @@ class YoutubeSearchScreen(MDScreen):
             grid.add_widget(MDLabel(text="Recently Watched", halign="left", font_style="Subtitle1"))
             for rec in recent:
                 url, title, channel, thumb = rec["url"], rec["title"], rec["channel"], rec["thumb"]
+                cached_art = str(rec.get("art_path") or "")
+                display_thumb = cached_art if os.path.isfile(cached_art) else thumb
                 card = MDCard(orientation="horizontal", size_hint_y=None, height="120dp", padding="8dp")
-                card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="110dp"))
+                card.add_widget(CachedAsyncImage(source=display_thumb, size_hint=(None, 1), width="110dp"))
                 box = MDBoxLayout(orientation="vertical", spacing="2dp", padding="2dp")
                 box.add_widget(MDLabel(text=title, theme_text_color="Primary", size_hint_y=None, height="36dp"))
                 box.add_widget(MDLabel(text=channel, theme_text_color="Secondary", size_hint_y=None, height="26dp"))
@@ -453,7 +456,7 @@ class YoutubeSearchScreen(MDScreen):
             grid.add_widget(MDLabel(text="Збірки", halign="left", font_style="Subtitle1"))
         for url, title, channel, thumb, count in playlists:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
-            card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
+            card.add_widget(CachedAsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
             box = MDBoxLayout(orientation="vertical", spacing="4dp", padding="4dp")
             title_w = MarqueeLabel(size_hint_y=None, height="40dp")
             title_w._label.markup = True
@@ -469,7 +472,7 @@ class YoutubeSearchScreen(MDScreen):
             grid.add_widget(MDLabel(text="Відео", halign="left", font_style="Subtitle1"))
         for url, title, channel, thumb, dur in videos:
             card = MDCard(orientation="horizontal", size_hint_y=None, height="150dp", padding="8dp")
-            card.add_widget(AsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
+            card.add_widget(CachedAsyncImage(source=thumb, size_hint=(None, 1), width="180dp"))
             box = MDBoxLayout(orientation="vertical", spacing="4dp", padding="4dp")
             title_w = MarqueeLabel(size_hint_y=None, height="40dp")
             title_w._label.markup = True
