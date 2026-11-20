@@ -23,6 +23,8 @@ function reply(body, status = 200, origin = "") {
 
 function clean(value, max) {
   let text = String(value ?? "").replace(/\0/g, "").slice(0, max);
+  // Remove the entire credential-bearing line before other substitutions.
+  text = text.replace(/^[ \t]*(?:authorization|cookie|set-cookie|password|passwd|secret|access_token|refresh_token|client_secret|api_key)[ \t]*[:=][^\r\n]*/gim, "[SENSITIVE_LINE_REMOVED]");
   text = text.replace(/https?:\/\/[^\s<>"']+/gi, "[URL]");
   text = text.replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]");
   text = text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[IP]");

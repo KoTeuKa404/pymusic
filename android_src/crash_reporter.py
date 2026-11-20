@@ -40,6 +40,14 @@ _PATTERNS = [
 
 def _scrub(text: str) -> str:
     value = str(text or "").replace("\x00", "")
+    # Entire credential-bearing lines must disappear BEFORE value redaction.
+    # Otherwise "Authorization: Bearer SECRET" could leave "SECRET" behind.
+    value = re.sub(
+        r"(?im)^[ \t]*(?:authorization|cookie|set-cookie|password|passwd|"
+        r"secret|access_token|refresh_token|client_secret|api_key)[ \t]*"
+        r"[:=][^\r\n]*",
+        "[SENSITIVE_LINE_REMOVED]", value,
+    )
     for pattern, replacement in _PATTERNS:
         value = pattern.sub(replacement, value)
     # Never include a line containing raw secrets or client-supplied cookies.
