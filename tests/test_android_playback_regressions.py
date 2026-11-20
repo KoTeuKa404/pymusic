@@ -1574,7 +1574,9 @@ class PlaybackRegressionTests(unittest.TestCase):
         fn = isolated_definition(
             "audio_screen.py", "_find_cached_audio", {
                 "os": os,
+                "hashlib": hashlib,
                 "load_recent": lambda: [],
+                "load_favorites": lambda: [],
             }
         )
         url = "https://www.youtube.com/watch?v=LTsbyX-l06Y"
@@ -1591,8 +1593,13 @@ class PlaybackRegressionTests(unittest.TestCase):
                 _cache_key=lambda _url: key,
             )
             self.assertIsNone(fn(owner, url))
+            # A partial/suspiciously short file is not accepted as playable.
             with open(complete, "wb") as fp:
                 fp.write(b"x" * 1024)
+            self.assertIsNone(fn(owner, url))
+            # Complete local files must exceed the conservative minimum size.
+            with open(complete, "wb") as fp:
+                fp.write(b"x" * 8192)
             self.assertEqual(fn(owner, url), complete)
             os.remove(complete)
             foreign = os.path.join(root, key + ".m4a")
@@ -1605,8 +1612,13 @@ class PlaybackRegressionTests(unittest.TestCase):
         start = source.index("def _download_audio_locally(")
         end = source.index("def _cache_audio_async(", start)
         cache = source[start:end]
-        self.assertIn("max_bytes = 24 * 1024 * 1024", cache)
-        self.assertIn("total + 24 * 1024 * 1024 > 128 * 1024 * 1024", cache)
+        self.assertIn("max_bytes = _OFFLINE_AUDIO_MAX_TRACK_BYTES", cache)
+        self.assertIn("total + received > _OFFLINE_AUDIO_MAX_TOTAL_BYTES", cache)
+        self.assertIn("_OFFLINE_AUDIO_MAX_TRACK_BYTES = 96 * 1024 * 1024", source)
+        self.assertIn("_OFFLINE_AUDIO_MAX_TOTAL_BYTES = 768 * 1024 * 1024", source)
+        self.assertIn("shutil.disk_usage(cache_root).free", cache)
+        self.assertIn("expected and received != expected", cache)
+        self.assertIn("if cancelled():", cache)
         self.assertIn("ssl.create_default_context(cafile=certifi.where())", cache)
         self.assertIn("class RejectRedirect(", cache)
         self.assertIn('"untrusted audio redirect destination"', cache)

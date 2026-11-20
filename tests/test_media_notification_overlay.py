@@ -325,14 +325,14 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         method = audio.split("def _download_art_async(", 1)[1].split(
             "def _channel_avatar_cache_path(", 1
         )[0]
-        self.assertIn("requested_video_url = str(self._last_video_url or \"\")", method)
-        self.assertIn(
-            'if requested_video_url != str(self._last_video_url or ""):',
-            method,
-        )
+        self.assertIn('video_url = str(self._last_video_url or "")', method)
+        self.assertIn('if _playlist_same_video_core(', method)
+        self.assertIn('str(self._last_video_url or ""), video_url', method)
+        # A late result may be saved as that video's cover, but must never
+        # overwrite the current player's artwork.
         self.assertLess(
-            method.index('if requested_video_url != str(self._last_video_url or ""):'),
-            method.index("self._art_path = art_path"),
+            method.index("if _playlist_same_video_core("),
+            method.index("self._art_path = path", method.index("if _playlist_same_video_core(")),
         )
 
     def test_media_icons_are_compiled_android_drawables(self):
@@ -397,8 +397,12 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         download = audio.split("def _download_art_async(", 1)[1].split(
             "def _channel_avatar_cache_path(", 1
         )[0]
-        self.assertIn("Clock.schedule_once(publish_art, 0)", download)
+        self.assertIn("request_cached_image(url, applied)", download)
         self.assertIn("self._publish_media_metadata_now()", download)
+        # The new centralized image-cache layer marshals the callback to
+        # Kivy's UI thread rather than scheduling in the cover method.
+        images = (ANDROID / "offline_image_cache.py").read_text(encoding="utf-8")
+        self.assertIn("Clock.schedule_once(lambda _dt, path=result: callback(path), 0)", images)
         self.assertIn("artwork_path=self._art_path", audio)
         media = (ANDROID / "media_android.py").read_text(encoding="utf-8")
         self.assertIn("b.setColorized(True)", media)
@@ -430,11 +434,15 @@ class NativeLayerAndNotificationTests(unittest.TestCase):
         method = audio.split("def _download_art_async(", 1)[1].split(
             "def _channel_avatar_cache_path(", 1
         )[0]
-        self.assertNotIn("ssl._create_unverified_context()", method)
-        self.assertIn("ssl.create_default_context(cafile=certifi.where())", method)
-        self.assertIn('class SafeArtRedirect(urllib.request.HTTPRedirectHandler)', method)
-        self.assertIn('image_bytes = response.read(2 * 1024 * 1024 + 1)', method)
-        self.assertIn("os.replace(temp, art_path)", method)
+        self.assertIn("request_cached_image(url, applied)", method)
+        images = (ANDROID / "offline_image_cache.py").read_text(encoding="utf-8")
+        self.assertNotIn("ssl._create_unverified_context()", images)
+        self.assertIn("ssl.create_default_context(cafile=certifi.where())", images)
+        self.assertIn("class SafeRedirect(urllib.request.HTTPRedirectHandler)", images)
+        self.assertIn("data = response.read(IMAGE_MAX_BYTES + 1)", images)
+        self.assertIn("IMAGE_MAX_BYTES = 2 * 1024 * 1024", images)
+        self.assertIn("image redirect left trusted YouTube HTTPS CDN", images)
+        self.assertIn("os.replace(tmp, path)", images)
 
 
 if __name__ == "__main__":
