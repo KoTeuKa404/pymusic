@@ -2222,36 +2222,49 @@ class AudioPlayerScreen(Screen):
 
 
     def _maybe_handle_track_end(self, pos: int, dur: int) -> bool:
+        """Final-position fallback; never truncate a still-playing track."""
         try:
             if not (
                 dur > 0
-                and (dur - pos) <= 1500
+                and pos > 0
+                and (dur - pos) <= 150
                 and self._playback_desired
                 and not self._user_paused
                 and self._bg_endguard_fired_gen != self._load_gen
             ):
+                return False
+            try:
+                still_playing = bool(ma.android_player and ma.android_player.isPlaying())
+            except Exception:
+                still_playing = True
+            if still_playing and pos < dur:
                 return False
             self._bg_endguard_fired_gen = self._load_gen
             self._resume_pos_ms = 0
             if self.repeat:
                 self._restart_same()
                 return True
-            if self._auto_skip and self._advance_to_next_track():
-                return True
+            if self._auto_skip:
+                # The Kivy event loop can be suspended by Android's lock
+                # screen, so the actual transition must not depend on Clock.
+                return bool(self._queue_auto_next())
             self._playback_desired = False
-            self._ui_set_playing(False)
+            self._user_paused = True
+            Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
             return True
-        except Exception:
+        except Exception as exc:
+            print("[BG-NEXT] final-position guard error:", exc)
             return False
 
     def _start_completion_guard(self, gen: int, dur_ms: int):
+        """Watch native completion even when duration arrives after prepare."""
         try:
-            dur_ms = int(dur_ms or 0)
+            observed_duration_ms = max(0, int(dur_ms or 0))
         except Exception:
-            dur_ms = 0
-        if dur_ms <= 0:
-            return
+            observed_duration_ms = 0
 
+        # Some Android MediaPlayers report duration=0 immediately after
+        # start(). Do not disable the only off-screen completion watchdog.
         self._completion_guard_gen = gen
         if getattr(self, "_pymusic_end_lock", None) is None:
             self._pymusic_end_lock = threading.Lock()
@@ -2265,16 +2278,17 @@ class AudioPlayerScreen(Screen):
                     return False
                 if self._bg_endguard_fired_gen == gen:
                     return False
+                if not self._playback_desired or self._user_paused:
+                    return False
                 self._bg_endguard_fired_gen = gen
 
             print(
                 "[BG-NEXT] completion guard fired "
-                f"gen={gen} pos={pos} dur={dur_ms} playing={playing} "
-                f"reason={reason}"
+                f"gen={gen} pos={pos} dur={observed_duration_ms} "
+                f"playing={playing} reason={reason}"
             )
             self._resume_pos_ms = 0
             if self.repeat:
-                # Keep repeat off the watcher thread too.
                 threading.Thread(target=self._restart_same, daemon=True).start()
             elif self._auto_skip:
                 self._queue_auto_next()
@@ -2285,6 +2299,9 @@ class AudioPlayerScreen(Screen):
             return True
 
         def job():
+            nonlocal observed_duration_ms
+            last_near_end_pos = -1
+            stalled_near_end_since = 0.0
             while (
                 self._is_current_gen(gen)
                 and self._completion_guard_gen == gen
@@ -2307,18 +2324,21 @@ class AudioPlayerScreen(Screen):
                     playing = bool(player.isPlaying())
                 except Exception:
                     playing = True
+                try:
+                    native_duration = max(0, int(player.getDuration() or 0))
+                    if native_duration > 0:
+                        observed_duration_ms = native_duration
+                except Exception:
+                    pass
+                if observed_duration_ms <= 0:
+                    time.sleep(0.75)
+                    continue
 
-                remaining = max(0, dur_ms - pos)
-
-                # A missed Android onCompletion is detected immediately once
-                # MediaPlayer stops at the end.  Do not treat buffering in
-                # the middle of a track as completion.
+                remaining = max(0, observed_duration_ms - pos)
                 if (not playing) and remaining <= 1500:
                     fire_end_once("player-stopped-near-end", pos, playing)
                     return
 
-                # Some vendor MediaPlayers keep reporting isPlaying() for a
-                # fraction of a second after their position reaches duration.
                 if remaining <= 80:
                     time.sleep(0.08)
                     try:
@@ -2329,12 +2349,27 @@ class AudioPlayerScreen(Screen):
                         playing2 = bool(player.isPlaying())
                     except Exception:
                         playing2 = playing
-                    if (not playing2) or pos2 >= max(0, dur_ms - 40):
+                    if (not playing2) or pos2 >= max(0, observed_duration_ms - 40):
                         fire_end_once("position-reached-end", pos2, playing2)
                         return
 
-                # Frequent enough for a seamless transition, cheap enough to
-                # keep a single daemon watcher alive for long tracks.
+                # Some vendor decoders remain nominally 'playing' but freeze
+                # on their last audio frame without posting onCompletion.
+                # Require a stable position for 3s to avoid skipping buffering.
+                if playing and remaining <= 250:
+                    if pos == last_near_end_pos:
+                        if stalled_near_end_since <= 0:
+                            stalled_near_end_since = time.monotonic()
+                        elif time.monotonic() - stalled_near_end_since >= 3.0:
+                            fire_end_once("last-frame-stalled", pos, playing)
+                            return
+                    else:
+                        stalled_near_end_since = 0.0
+                    last_near_end_pos = pos
+                else:
+                    stalled_near_end_since = 0.0
+                    last_near_end_pos = -1
+
                 if remaining > 5000:
                     delay = 0.75
                 elif remaining > 1500:
@@ -2343,7 +2378,9 @@ class AudioPlayerScreen(Screen):
                     delay = 0.12
                 time.sleep(delay)
 
-        threading.Thread(target=job, daemon=True).start()
+        threading.Thread(
+            target=job, name="pymusic-completion-guard", daemon=True
+        ).start()
 
     def _bind_keys(self):
         try:
@@ -2510,7 +2547,10 @@ class AudioPlayerScreen(Screen):
             clear_playlist = True
         self._mark_java_transport(False)
         Clock.schedule_once(lambda _dt: self._register_java_transport_players(), 0)
-        ui_allowed = not bool(getattr(self, "_app_in_background", False))
+        ui_allowed = (
+            not bool(getattr(self, "_app_in_background", False))
+            and threading.current_thread() is threading.main_thread()
+        )
         self._ensure_media_session()
         same_active_url = bool(
             video_url
@@ -4272,7 +4312,10 @@ class AudioPlayerScreen(Screen):
                 self._video_player.stop()
         except Exception:
             pass
-        if not self._app_in_background:
+        if (
+            not self._app_in_background
+            and threading.current_thread() is threading.main_thread()
+        ):
             try:
                 self._set_video_mode(False)
             except Exception:
@@ -6631,11 +6674,18 @@ class AudioPlayerScreen(Screen):
                 Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
             except Exception as exc:
                 print("[BG-NEXT] advance failed:", exc)
+                if int(getattr(self, "_load_gen", -1)) == gen:
+                    self._playback_desired = False
+                    self._user_paused = True
+                    Clock.schedule_once(lambda _dt: self._ui_set_playing(False), 0)
 
-        if bool(getattr(self, "_app_in_background", False)):
-            threading.Thread(target=run, daemon=True).start()
-        else:
-            Clock.schedule_once(lambda _dt: run(), 0)
+        # MediaPlayer completion arrives outside Kivy. Always execute the
+        # playlist transition on an independent worker: Android suspends
+        # Kivy Clock when the screen locks, and on_pause may arrive late.
+        # All widget updates remain dispatched to the Kivy thread.
+        threading.Thread(
+            target=run, name="pymusic-auto-next", daemon=True
+        ).start()
         return True
 
     def _act_next(self, *a):
