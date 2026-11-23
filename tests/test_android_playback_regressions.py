@@ -1793,5 +1793,144 @@ class PlaybackRegressionTests(unittest.TestCase):
         self.assertIn("ydlh.invalidate_audio_info_cache(", ui)
 
 
+    def test_lock_screen_auto_next_never_waits_for_kivy_clock(self):
+        jobs, advances = [], []
+
+        class DeferredThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                jobs.append(self.target)
+
+        def forbidden_clock(*_args):
+            raise AssertionError("auto-next must not depend on Kivy Clock")
+
+        advance = isolated_definition(
+            "audio_screen.py", "_queue_auto_next",
+            {
+                "threading": SimpleNamespace(
+                    Lock=threading.Lock, Thread=DeferredThread
+                ),
+                "Clock": SimpleNamespace(schedule_once=forbidden_clock),
+            },
+        )
+        owner = SimpleNamespace(
+            _load_gen=12,
+            _app_in_background=False,  # Android may not deliver on_pause yet
+            _advance_to_next_track=lambda: advances.append("next") or True,
+            _playback_desired=True,
+            _user_paused=False,
+        )
+        self.assertTrue(advance(owner))
+        self.assertTrue(advance(owner))
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(advances, [])
+        jobs[0]()
+        self.assertEqual(advances, ["next"])
+
+        # A previously queued completion must not skip the next song.
+        owner._load_gen = 13
+        self.assertTrue(advance(owner))
+        owner._load_gen = 14
+        jobs[1]()
+        self.assertEqual(advances, ["next"])
+
+    def test_completion_guard_waits_until_native_duration_is_known(self):
+        jobs, advances = [], []
+
+        class DeferredThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                jobs.append(self.target)
+
+        class NativePlayer:
+            def __init__(self):
+                self.samples = [
+                    (0, 0, True),
+                    (500, 3000, True),
+                    (3000, 3000, False),
+                ]
+                self.index = 0
+
+            def getCurrentPosition(self):
+                return self.samples[self.index][0]
+
+            def isPlaying(self):
+                return self.samples[self.index][2]
+
+            def getDuration(self):
+                result = self.samples[self.index][1]
+                self.index = min(self.index + 1, len(self.samples) - 1)
+                return result
+
+        watch = isolated_definition(
+            "audio_screen.py", "_start_completion_guard",
+            {
+                "threading": SimpleNamespace(
+                    Lock=threading.Lock, Thread=DeferredThread
+                ),
+                "time": SimpleNamespace(
+                    sleep=lambda _seconds: None, monotonic=lambda: 1.0
+                ),
+                "ma": SimpleNamespace(android_player=NativePlayer()),
+                "Clock": SimpleNamespace(
+                    schedule_once=lambda _callback, _delay: None
+                ),
+            },
+        )
+        owner = SimpleNamespace(
+            _load_gen=7,
+            _is_current_gen=lambda gen: gen == 7,
+            _completion_guard_gen=-1,
+            _bg_endguard_fired_gen=-1,
+            _pymusic_end_lock=None,
+            _playback_desired=True,
+            _user_paused=False,
+            repeat=False,
+            _auto_skip=True,
+            _resume_pos_ms=100,
+            _queue_auto_next=lambda: advances.append("next"),
+        )
+        watch(owner, 7, 0)  # Duration was not available at native start.
+        self.assertEqual(len(jobs), 1)
+        jobs[0]()
+        self.assertEqual(advances, ["next"])
+        self.assertEqual(owner._bg_endguard_fired_gen, 7)
+        self.assertEqual(owner._resume_pos_ms, 0)
+
+    def test_final_position_guard_does_not_skip_playing_audio_early(self):
+        advances = []
+        final_position = isolated_definition(
+            "audio_screen.py", "_maybe_handle_track_end",
+            {
+                "ma": SimpleNamespace(
+                    android_player=SimpleNamespace(isPlaying=lambda: True)
+                ),
+                "Clock": SimpleNamespace(
+                    schedule_once=lambda _callback, _delay: None
+                ),
+            },
+        )
+        owner = SimpleNamespace(
+            _load_gen=3,
+            _bg_endguard_fired_gen=-1,
+            _playback_desired=True,
+            _user_paused=False,
+            repeat=False,
+            _auto_skip=True,
+            _resume_pos_ms=100,
+            _queue_auto_next=lambda: advances.append("next") or True,
+        )
+        self.assertFalse(final_position(owner, 2900, 3000))
+        self.assertEqual(advances, [])
+        self.assertTrue(final_position(owner, 3000, 3000))
+        self.assertEqual(advances, ["next"])
+        self.assertFalse(final_position(owner, 3000, 3000))
+
+
+
 if __name__ == "__main__":
     unittest.main()
