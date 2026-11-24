@@ -1114,7 +1114,11 @@ class RootLayout(MDBoxLayout):
         super().__init__(orientation="vertical", **kwargs)
         self._active_tab = "web"
 
-        self._swipe_order = ("search", "web", "shorts", "audio")
+        # Shorts is an explicit destination, not a horizontal carousel page.
+        self._swipe_order = ("search", "web", "audio")
+        self._navigation_history = []
+        self._navigation_revision = 0
+        self._back_pending = False
         self.sm = ScreenManager(transition=NoTransition())
 
         # Якщо інтернету немає, не стартуємо одразу YT WebView.
@@ -1153,15 +1157,24 @@ class RootLayout(MDBoxLayout):
             self.sm.current = "search"
 
     def _switch_relative(self, delta: int) -> bool:
-        """Use ordered screens; a disabled edge does not wrap unexpectedly."""
+        """Move one page; never wrap, restart the Activity, or open Shorts."""
+        if delta not in (-1, 1):
+            return False
         current = self.sm.current
-        if current not in self._swipe_order:
+        if current == "shorts":
+            # A deliberately opened Short can be left with a normal edge swipe.
+            target = "web" if delta < 0 else "audio"
+        else:
+            if current not in self._swipe_order:
+                return False
+            index = self._swipe_order.index(current) + delta
+            if not 0 <= index < len(self._swipe_order):
+                return False
+            target = self._swipe_order[index]
+        if target == current:
             return False
-        index = self._swipe_order.index(current) + int(delta)
-        if index < 0 or index >= len(self._swipe_order):
-            return False
-        self.set_screen(self._swipe_order[index])
-        return True
+        self.set_screen(target)
+        return self.sm.current == target
 
     def on_touch_down(self, touch):
         # The native WebView is above SDL and has its own Java touch router.
@@ -1169,16 +1182,19 @@ class RootLayout(MDBoxLayout):
             edge = dp(80)
             if touch.x <= self.x + edge or touch.x >= self.right - edge:
                 touch.ud["pymusic_edge_swipe"] = (
-                    touch.x, touch.y, time.monotonic()
+                    touch.x, touch.y, time.monotonic(), self.sm.current
                 )
         return super().on_touch_down(touch)
 
     def on_touch_up(self, touch):
         origin = touch.ud.pop("pymusic_edge_swipe", None)
+        # Let existing widgets release their touch/grab before navigation.
         handled = super().on_touch_up(touch)
         if not origin or self.sm.current in ("web", "shorts"):
             return handled
-        x, y, started = origin
+        x, y, started, start_screen = origin
+        if self.sm.current != start_screen:
+            return handled
         dx, dy = touch.x - x, touch.y - y
         if not (0.06 < time.monotonic() - started < 0.95):
             return handled
@@ -1190,13 +1206,12 @@ class RootLayout(MDBoxLayout):
                     return handled
             except Exception:
                 pass
-        # Swipe from the physical edge towards the screen centre only.
+        # An outward/boundary gesture is a consumed no-op, not navigation.
         right_to_left = x >= self.right - dp(80) and dx < 0
         left_to_right = x <= self.x + dp(80) and dx > 0
-        if right_to_left:
-            return self._switch_relative(1) or handled
-        if left_to_right:
-            return self._switch_relative(-1) or handled
+        if right_to_left or left_to_right:
+            self._switch_relative(1 if right_to_left else -1)
+            return True
         return handled
 
     def open_shorts(self, url: str | None = None):
@@ -1216,35 +1231,88 @@ class RootLayout(MDBoxLayout):
             0.04,
         )
 
-    def set_screen(self, name: str):
+    def set_screen(self, name: str, *, record_history: bool = True):
         if name == "swipe_left":
             return self._switch_relative(1)
         if name == "swipe_right":
             return self._switch_relative(-1)
-        if name not in self.sm.screen_names:
-            return
-        # ScreenManager calls on_pre_leave/on_pre_enter itself. Let each screen
-        # own one transition: running hide_video_overlay_fast() here *and*
-        # AudioPlayerScreen.on_pre_leave used to release MediaPlayer twice.
-        if name == self.sm.current:
-            return
-        if name in ("web", "search", "shorts"):
-            self._active_tab = name
+        if name == "back":
+            return self.handle_back_navigation()
+        if name not in self.sm.screen_names or name == self.sm.current:
+            return False
         previous = self.sm.current
+        # ScreenManager owns screen enter/leave and native video cleanup.
         if previous in ("web", "shorts") and name in ("web", "shorts"):
-            # No native hide/show cycle for a WebView-to-WebView transition.
-            # On Android the decorated hide() can otherwise run after show(),
-            # exposing a blank Kivy page while consuming all touches.
             self.sm.get_screen(previous)._keep_webview_on_leave = True
         if previous == "shorts" and name == "web":
-            # Both screens share one browser. Returning to Web resets the
-            # Shorts player to normal YouTube browsing.
             self.sm.get_screen("web")._reset_after_shorts = True
-        self.sm.current = name
+        try:
+            self.sm.current = name
+        except Exception as exc:
+            ma.log(f"[NAV] screen transition failed: {previous} -> {name}: {exc}")
+            if previous in ("web", "shorts"):
+                self.sm.get_screen(previous)._keep_webview_on_leave = False
+            return False
+        if name in ("web", "search", "shorts"):
+            self._active_tab = name
+        if record_history and previous in self.sm.screen_names:
+            history = getattr(self, "_navigation_history", [])
+            if not history or history[-1] != previous:
+                history.append(previous)
+            self._navigation_history = history[-32:]
+        self._navigation_revision = int(getattr(self, "_navigation_revision", 0)) + 1
         try:
             ma.apply_light_system_bars()
         except Exception:
             pass
+        return True
+
+    def _back_to_previous_screen(self) -> bool:
+        history = getattr(self, "_navigation_history", [])
+        current = self.sm.current
+        while history:
+            target = history.pop()
+            if target != current and target in self.sm.screen_names:
+                return bool(self.set_screen(target, record_history=False))
+        if current == "audio":
+            target = getattr(self, "_active_tab", "web")
+            if target not in ("web", "search", "shorts"):
+                target = "web"
+            return bool(self.set_screen(target, record_history=False))
+        if current == "shorts":
+            return bool(self.set_screen("web", record_history=False))
+        # At the root keep the app open. Back must never terminate playback.
+        return True
+
+    def handle_back_navigation(self) -> bool:
+        current = self.sm.current
+        if current == "audio":
+            player = self.sm.get_screen("audio")
+            sheet = getattr(player, "_current_comments_popup_v4", None)
+            if sheet is not None:
+                sheet.dismiss()
+                return True
+        if current == "web":
+            if getattr(self, "_back_pending", False):
+                return True
+            self._back_pending = True
+            revision = int(getattr(self, "_navigation_revision", 0))
+
+            def completed(did_go_back):
+                self._back_pending = False
+                if (
+                    not did_go_back
+                    and self.sm.current == "web"
+                    and self._navigation_revision == revision
+                ):
+                    self._back_to_previous_screen()
+
+            try:
+                ma.webview_go_back(completed)
+            except Exception:
+                completed(False)
+            return True
+        return self._back_to_previous_screen()
 
     def open_audio(self):
         # YoutubeWebScreen.on_pre_leave hides its WebView exactly once.
