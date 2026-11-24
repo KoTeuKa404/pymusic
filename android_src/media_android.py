@@ -950,6 +950,45 @@ def webview_load(url: str):
         log(f"[WEB] load err: {e}")
 
 
+@run_on_ui_thread
+def webview_go_back(on_complete):
+    """Navigate the visible WebView on Android's UI thread.
+
+    Skip shared Shorts/watch pages: they would reopen the player instead of
+    returning to the previous browsing page. Report a missing history entry
+    to the Kivy screen navigation controller without blocking either UI.
+    """
+    handled = False
+    try:
+        if _webview is not None and _webview_shown:
+            history = _webview.copyBackForwardList()
+            current = int(history.getCurrentIndex())
+            from urllib.parse import urlparse
+            for index in range(current - 1, -1, -1):
+                entry = history.getItemAtIndex(index)
+                url = str(entry.getUrl() or "") if entry is not None else ""
+                parsed = urlparse(url)
+                if (
+                    parsed.scheme not in ("http", "https")
+                    or (parsed.hostname or "").lower() not in (
+                        "youtube.com", "www.youtube.com", "m.youtube.com",
+                        "music.youtube.com", "youtu.be",
+                    )
+                    or parsed.path.startswith("/shorts")
+                    or _is_youtube_watch_url(url)
+                ):
+                    continue
+                offset = index - current
+                if _webview.canGoBackOrForward(offset):
+                    _webview.goBackOrForward(offset)
+                    handled = True
+                    break
+    except Exception as exc:
+        log(f"[NAV] WebView back failed: {exc}")
+    finally:
+        Clock.schedule_once(lambda _dt: on_complete(handled), 0)
+
+
 def bind_webview_action_router(owner):
     global _webview_owner
     _webview_owner = owner
