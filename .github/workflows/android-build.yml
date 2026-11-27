@@ -27,6 +27,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Require configured signing secrets
+        env:
+          PYMUSIC_SIGNING_KEYSTORE_B64: ${{ secrets.PYMUSIC_SIGNING_KEYSTORE_B64 }}
+          PYMUSIC_SIGNING_PASSWORD: ${{ secrets.PYMUSIC_SIGNING_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "$PYMUSIC_SIGNING_KEYSTORE_B64" || -z "$PYMUSIC_SIGNING_PASSWORD" ]]; then
+            echo "::error::Configure the persistent PyMusic signing key and password before building a new APK."
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -76,13 +87,41 @@ jobs:
           set -e
           exit "$BUILD_STATUS"
 
-      - name: Prepare APK
+      - name: Sign and verify APK with persistent key
+        env:
+          PYMUSIC_SIGNING_KEYSTORE_B64: ${{ secrets.PYMUSIC_SIGNING_KEYSTORE_B64 }}
+          PYMUSIC_SIGNING_PASSWORD: ${{ secrets.PYMUSIC_SIGNING_PASSWORD }}
         shell: bash
         run: |
-          mkdir -p dist
-          APK_PATH="$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          set -euo pipefail
+          umask 077
+          test -n "$PYMUSIC_SIGNING_KEYSTORE_B64"
+          test -n "$PYMUSIC_SIGNING_PASSWORD"
+          signing_dir="$(mktemp -d "$RUNNER_TEMP/pymusic-signing.XXXXXXXX")"
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          printf '%s' "$PYMUSIC_SIGNING_KEYSTORE_B64" | base64 --decode > "$signing_dir/pymusic.p12"
+          unset PYMUSIC_SIGNING_KEYSTORE_B64
+
+          APK_PATH="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
           test -n "$APK_PATH"
-          cp "$APK_PATH" "dist/PyMusic-debug.apk"
+          APKSIGNER="$(find "$HOME/.buildozer/android/platform/android-sdk/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          mkdir -p dist
+
+          # Never publish the runner's randomly generated debug signature.
+          "$APKSIGNER" sign --ks "$signing_dir/pymusic.p12" \
+            --ks-key-alias pymusic \
+            --ks-pass env:PYMUSIC_SIGNING_PASSWORD \
+            --key-pass env:PYMUSIC_SIGNING_PASSWORD \
+            --out dist/PyMusic-debug.apk "$APK_PATH"
+
+          expected="$(keytool -exportcert -keystore "$signing_dir/pymusic.p12" \
+            -alias pymusic -storepass:env PYMUSIC_SIGNING_PASSWORD | sha256sum | cut -d ' ' -f 1)"
+          unset PYMUSIC_SIGNING_PASSWORD
+          "$APKSIGNER" verify --verbose --print-certs dist/PyMusic-debug.apk > "$signing_dir/verification.txt"
+          cat "$signing_dir/verification.txt"
+          grep -Fi "certificate SHA-256 digest: $expected" "$signing_dir/verification.txt"
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' "$signing_dir/verification.txt"
 
       - name: Publish direct APK download
         env:
