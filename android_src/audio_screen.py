@@ -1258,6 +1258,7 @@ class AudioPlayerScreen(Screen):
         self._playlist_thumb_waiters = {}
         self._playlist_thumb_sem = threading.BoundedSemaphore(4)
         self._fav_cache_inflight = set()
+        self._fav_cache_lock = threading.RLock()
         self._playlist_render_gen = 0
         self._similar_render_gen = 0
         self._playlist_collapsed = False
@@ -1683,6 +1684,15 @@ class AudioPlayerScreen(Screen):
         self._last_bg_resume_ts = time.time()
         self._last_watch_pos = None
         self._buffer_watchdog_ts = time.time()
+        # A favorite may have been added on a weak connection. Retry the
+        # current favorite when the app resumes with connectivity.
+        try:
+            if self._favorite and self._last_video_url and ma.is_network_available():
+                self._cache_current_favorite_async(
+                    self._last_video_url, notify=False,
+                )
+        except Exception as exc:
+            print("[OFFLINE-CACHE] resume retry scheduling failed:", type(exc).__name__)
         try:
             Clock.schedule_once(lambda dt: self._sync_ui_loaded(), 0)
             Clock.schedule_once(lambda dt: self._render_playlist_ui(force=True), 0)
@@ -5245,12 +5255,21 @@ class AudioPlayerScreen(Screen):
             # Save the complete audio bytes for tomorrow's offline replay.
             # A delayed worker handles network/disk I/O, never this playback path.
             try:
-                self._cache_audio_async(
-                    str(self._last_video_url or ""),
-                    str(self._stream_url or ""),
-                    dict(self._headers or {}),
-                    gen=gen,
-                )
+                cache_url = str(self._last_video_url or "")
+                cache_source = str(self._stream_url or "")
+                cache_headers = dict(self._headers or {})
+                if self._is_current_gen(gen):
+                    if self._favorite:
+                        # Pinned downloads must survive a track change. Retry
+                        # older favorites with missing cache on every replay.
+                        self._cache_current_favorite_async(
+                            cache_url, audio_url=cache_source,
+                            headers=cache_headers, notify=False,
+                        )
+                    else:
+                        self._cache_audio_async(
+                            cache_url, cache_source, cache_headers, gen=gen,
+                        )
             except Exception as exc:
                 # Optional caching must never stop audio or playback UI updates.
                 print("[OFFLINE-CACHE] scheduling failed:", type(exc).__name__, str(exc)[:240])
@@ -6476,36 +6495,97 @@ class AudioPlayerScreen(Screen):
         # selected/unselected PNG, without waiting for the playback ticker.
         self._publish_media_metadata_now()
 
-    def _cache_current_favorite_async(self, url: str):
-        if not url or url in self._fav_cache_inflight:
+    def _cache_current_favorite_async(
+        self, url: str, *, audio_url: str = "", headers: dict | None = None,
+        notify: bool = True,
+    ):
+        if not url:
             return
-        self._fav_cache_inflight.add(url)
+        key = self._cache_key(url)
+        # Capture the source supplied by the prepared generation only. A
+        # favorite tap without a prepared source extracts its own URL; it
+        # must never read a later track's mutable stream state.
+        stream_url = str(audio_url or "")
+        stream_headers = dict(headers or {})
+        with self._fav_cache_lock:
+            if key in self._fav_cache_inflight:
+                return
+            self._fav_cache_inflight.add(key)
+
+        def still_favorite():
+            return any(
+                self._cache_key(str(item.get("url") or "")) == key
+                for item in load_favorites() if isinstance(item, dict)
+            )
+
+        def show_result(saved):
+            if not notify:
+                return
+
+            def on_ui(_dt):
+                if (getattr(self, "_app_in_background", False)
+                        or self._cache_key(self._last_video_url or "") != key
+                        or not still_favorite()):
+                    return
+                try:
+                    from kivymd.toast import toast
+                    toast("Аудіо доступне офлайн" if saved else
+                          "Аудіо ще не збережено офлайн")
+                except Exception:
+                    pass
+
+            Clock.schedule_once(on_ui, 0)
 
         def _job():
+            path = None
             try:
-                cached = self._find_cached_audio(url)
-                if cached:
-                    update_favorite_cache(url, cached)
+                if not still_favorite():
                     return
-                # Never save a later track under the earlier favorite's key.
-                is_current = self._cache_key(self._last_video_url or "") == self._cache_key(url)
-                stream_url = str(self._stream_url or "") if is_current else ""
-                headers = dict(self._headers or {}) if is_current else {}
-                if not stream_url or stream_url.startswith("file://"):
-                    try:
-                        info = ydlh.extract_audio_info(url, prefer_compat=self._prefer_compat_audio)
-                        stream_url = str(info.get("audio_url") or "")
-                        headers = dict(info.get("http_headers") or headers)
-                    except Exception:
-                        stream_url = ""
-                if stream_url:
-                    path = self._download_audio_locally(url, stream_url, headers)
-                    if path:
-                        update_favorite_cache(url, path)
+                path = self._find_cached_audio(url)
+                if not path and ma.is_network_available():
+                    # Prefer the current prepared source (no extra extractor).
+                    # If it is absent, expired, or failed, refresh once with
+                    # the compatible audio profile. All media validation and
+                    # bounded disk usage remain in _download_audio_locally.
+                    if stream_url.startswith("https://"):
+                        path = self._download_audio_locally(
+                            url, stream_url, stream_headers
+                        )
+                    if not path and still_favorite() and ma.is_network_available():
+                        try:
+                            ydlh.invalidate_audio_info_cache(url)
+                            info = ydlh.extract_audio_info(url, prefer_compat=True)
+                            fresh = str(info.get("audio_url") or "")
+                            if fresh and still_favorite():
+                                path = self._download_audio_locally(
+                                    url, fresh, dict(info.get("http_headers") or {})
+                                )
+                        except Exception as exc:
+                            print("[OFFLINE-CACHE] favorite refresh failed:", type(exc).__name__)
+                if path and still_favorite():
+                    # Persist to all matching favorite aliases, not just the
+                    # exact watch URL used to start playback.
+                    for item in load_favorites():
+                        favorite_url = str(item.get("url") or "")
+                        if favorite_url and self._cache_key(favorite_url) == key:
+                            update_favorite_cache(favorite_url, path)
+                    update_recent_cache(url, path)
+                if still_favorite():
+                    print("[OFFLINE-CACHE] favorite saved" if path else
+                          "[OFFLINE-CACHE] favorite not saved; retry on replay/resume")
+                    show_result(bool(path))
             finally:
-                self._fav_cache_inflight.discard(url)
+                with self._fav_cache_lock:
+                    self._fav_cache_inflight.discard(key)
 
-        threading.Thread(target=_job, daemon=True).start()
+        try:
+            threading.Thread(
+                target=_job, daemon=True, name="pymusic-favorite-cache"
+            ).start()
+        except Exception:
+            with self._fav_cache_lock:
+                self._fav_cache_inflight.discard(key)
+            raise
 
     def seek(self, value):
         try:

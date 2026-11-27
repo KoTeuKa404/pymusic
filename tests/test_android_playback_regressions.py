@@ -31,6 +31,103 @@ def isolated_definition(filename, name, namespace):
 
 
 class PlaybackRegressionTests(unittest.TestCase):
+
+    def test_offline_cache_generation_is_not_overridden_by_runtime_patch(self):
+        patch = (ROOT / "pymusic_runtime_patch.py").read_text(encoding="utf-8")
+        self.assertNotIn("player_cls._cache_audio_async =", patch)
+        fn = load_definition("audio_screen.py", "_cache_audio_async")
+        self.assertIn("gen", [arg.arg for arg in fn.args.kwonlyargs])
+        code = (ROOT / "audio_screen.py").read_text(encoding="utf-8")
+        self.assertIn("cache_url, cache_source, cache_headers, gen=gen,", code)
+
+    def test_favorite_cache_retries_expired_source_after_track_change(self):
+        url = "https://www.youtube.com/watch?v=AAAAAAAAAAA"
+        old = "https://rr1.googlevideo.com/videoplayback?old"
+        fresh = "https://rr1.googlevideo.com/videoplayback?fresh"
+        jobs, downloads, saves, extracts = [], [], [], []
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+            def start(self):
+                jobs.append(self.target)
+        owner = SimpleNamespace(
+            _cache_key=lambda value: value,
+            _fav_cache_lock=threading.RLock(),
+            _fav_cache_inflight=set(),
+            _last_video_url=url,
+            _find_cached_audio=lambda _url: None,
+        )
+        def download(video, source, headers):
+            downloads.append((video, source, dict(headers)))
+            return "/private/audio.m4a" if source == fresh else None
+        owner._download_audio_locally = download
+        fn = isolated_definition("audio_screen.py", "_cache_current_favorite_async", {
+            "threading": SimpleNamespace(Thread=DeferredThread),
+            "load_favorites": lambda: [{"url": url}],
+            "ma": SimpleNamespace(is_network_available=lambda: True),
+            "ydlh": SimpleNamespace(
+                invalidate_audio_info_cache=lambda value: extracts.append(("invalidate", value)),
+                extract_audio_info=lambda value, **kw: (
+                    extracts.append((value, kw)) or
+                    {"audio_url": fresh, "http_headers": {"Referer": "fresh"}}
+                ),
+            ),
+            "update_favorite_cache": lambda *args: saves.append(args),
+            "update_recent_cache": lambda *args: saves.append(args),
+        })
+        fn(owner, url, audio_url=old, headers={"Referer": "old"}, notify=False)
+        fn(owner, url, notify=False)
+        self.assertEqual(len(jobs), 1)
+        owner._last_video_url = "https://www.youtube.com/watch?v=BBBBBBBBBBB"
+        jobs.pop()()
+        self.assertEqual(downloads, [
+            (url, old, {"Referer": "old"}), (url, fresh, {"Referer": "fresh"}),
+        ])
+        self.assertEqual(extracts, [
+            ("invalidate", url), (url, {"prefer_compat": True}),
+        ])
+        self.assertEqual(saves, [(url, "/private/audio.m4a")] * 2)
+        self.assertFalse(owner._fav_cache_inflight)
+
+    def test_favorite_cache_offline_failure_can_retry_on_next_request(self):
+        url = "https://www.youtube.com/watch?v=AAAAAAAAAAA"
+        jobs, saves = [], []
+        class DeferredThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+            def start(self):
+                jobs.append(self.target)
+        media = SimpleNamespace(is_network_available=lambda: False)
+        owner = SimpleNamespace(
+            _cache_key=lambda value: value,
+            _fav_cache_lock=threading.RLock(),
+            _fav_cache_inflight=set(),
+            _find_cached_audio=lambda _url: None,
+            _download_audio_locally=lambda *_args: "/private/audio.m4a",
+        )
+        fn = isolated_definition("audio_screen.py", "_cache_current_favorite_async", {
+            "threading": SimpleNamespace(Thread=DeferredThread),
+            "load_favorites": lambda: [{"url": url}],
+            "ma": media,
+            "ydlh": SimpleNamespace(
+                invalidate_audio_info_cache=lambda _value: None,
+                extract_audio_info=lambda *_args, **_kwargs: {
+                    "audio_url": "https://rr1.googlevideo.com/videoplayback",
+                },
+            ),
+            "update_favorite_cache": lambda *args: saves.append(args),
+            "update_recent_cache": lambda *args: saves.append(args),
+        })
+        fn(owner, url, notify=False)
+        jobs.pop()()
+        self.assertEqual(saves, [])
+        self.assertFalse(owner._fav_cache_inflight)
+        media.is_network_available = lambda: True
+        fn(owner, url, notify=False)
+        jobs.pop()()
+        self.assertEqual(saves, [(url, "/private/audio.m4a")] * 2)
+        self.assertFalse(owner._fav_cache_inflight)
+
     def test_prepared_listener_does_not_pass_borrowed_jni_proxy_to_thread(self):
         class FakeThread:
             def __init__(self, target, args=(), daemon=False):
