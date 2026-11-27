@@ -125,5 +125,66 @@ class ImageValidationTests(unittest.TestCase):
             self.assertEqual(lookup(url), image_path)
 
 
+class AudioCacheSchedulingTests(unittest.TestCase):
+    def test_runtime_patch_preserves_generation_aware_scheduler(self):
+        tree = ast.parse((ROOT / "pymusic_runtime_patch.py").read_text(encoding="utf-8"))
+        assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)]
+        self.assertFalse(any(isinstance(target, ast.Attribute) and
+                             target.attr == "_cache_audio_async"
+                             for node in assignments for target in node.targets))
+        screen = ast.parse((ROOT / "audio_screen.py").read_text(encoding="utf-8"))
+        scheduler = next(node for node in ast.walk(screen)
+                         if isinstance(node, ast.FunctionDef) and node.name == "_cache_audio_async")
+        self.assertIn("gen", [arg.arg for arg in scheduler.args.kwonlyargs])
+
+    def test_favorite_retries_with_fresh_source_after_failure(self):
+        tree = ast.parse((ROOT / "audio_screen.py").read_text(encoding="utf-8"))
+        method = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and
+                      node.name == "_cache_current_favorite_async")
+        calls = []
+        url = "https://www.youtube.com/watch?v=AAAAAAAAAAA"
+
+        class ImmediateThread:
+            def __init__(self, target, **kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        helper = SimpleNamespace(
+            extract_audio_info=lambda value, prefer_compat: (
+                calls.append(("extract", value, prefer_compat)) or
+                {"audio_url": "https://a.googlevideo.com/fresh" if prefer_compat
+                 else "https://a.googlevideo.com/expired"}),
+            invalidate_audio_info_cache=lambda value: calls.append(("invalidate", value)),
+        )
+        state = dict(
+            threading=SimpleNamespace(Thread=ImmediateThread),
+            time=SimpleNamespace(monotonic=lambda: 100.0, sleep=lambda _: None),
+            ma=SimpleNamespace(is_network_available=lambda: True),
+            is_favorite=lambda value: value == url, ydlh=helper,
+            update_favorite_cache=lambda value, path: calls.append(("saved", value, path)),
+        )
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+                     "audio_screen.py", "exec"), state)
+        owner = SimpleNamespace(
+            _cache_key=lambda value: value,
+            _offline_cache_state_lock=threading.RLock(),
+            _fav_cache_inflight=set(), _favorite_cache_retry_at={},
+            _find_cached_audio=lambda value: None,
+            _download_audio_locally=lambda value, source, headers:
+                "/private/track.m4a" if source.endswith("/fresh") else None,
+        )
+        run = state["_cache_current_favorite_async"]
+        self.assertTrue(run(owner, url))
+        self.assertEqual(calls, [
+            ("extract", url, False), ("invalidate", url),
+            ("extract", url, True), ("saved", url, "/private/track.m4a"),
+        ])
+        self.assertFalse(owner._fav_cache_inflight)
+        self.assertFalse(run(owner, url, retry=True))
+
+
 if __name__ == "__main__":
     unittest.main()
