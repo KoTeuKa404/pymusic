@@ -60,8 +60,6 @@ def _patch_audio_screen() -> bool:
                 self._hotfix_playlist_window = (0, 0)
             if not hasattr(self, "_hotfix_similar_sig"):
                 self._hotfix_similar_sig = None
-            if not hasattr(self, "_hotfix_cache_pending"):
-                self._hotfix_cache_pending = set()
 
         # The old audio extraction path fetched the watch page only to obtain
         # recommendations.  That could block playback for up to eight seconds.
@@ -825,53 +823,8 @@ def _patch_audio_screen() -> bool:
             prefetch_next_url_only
         )
 
-        # Keep normal cache behaviour, but delay it until playback is stable.
-        old_cache_audio = player_cls._cache_audio_async
-
-        def delayed_cache_audio(self, video_url, audio_url, headers=None):
-            ensure_state(self)
-            key = str(video_url or "")
-            if not key or key in self._hotfix_cache_pending:
-                return
-            if (
-                key == str(
-                    getattr(self, "_last_video_url", "") or ""
-                )
-                and bool(getattr(self, "_favorite", False))
-            ):
-                return old_cache_audio(
-                    self, video_url, audio_url, headers
-                )
-
-            self._hotfix_cache_pending.add(key)
-
-            def run_later():
-                try:
-                    if (
-                        key
-                        == str(
-                            getattr(
-                                self, "_last_video_url", ""
-                            )
-                            or ""
-                        )
-                        and bool(
-                            getattr(
-                                self, "_playback_desired", False
-                            )
-                        )
-                    ):
-                        old_cache_audio(
-                            self, video_url, audio_url, headers
-                        )
-                finally:
-                    self._hotfix_cache_pending.discard(key)
-
-            timer = threading.Timer(8.0, run_later)
-            timer.daemon = True
-            timer.start()
-
-        player_cls._cache_audio_async = delayed_cache_audio
+        # Core cache scheduling already delays downloads and accepts gen.
+        # Do not wrap it or discard the playback generation.
 
         player_cls._pymusic_hotfix_v4 = True
         _PATCHED = True
