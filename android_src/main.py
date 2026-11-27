@@ -1114,7 +1114,8 @@ class RootLayout(MDBoxLayout):
         super().__init__(orientation="vertical", **kwargs)
         self._active_tab = "web"
 
-        self._swipe_order = ("search", "web", "shorts", "audio")
+        # Only the browser and player participate in horizontal navigation.
+        self._swipe_order = ("web", "audio")
         self.sm = ScreenManager(transition=NoTransition())
 
         # Якщо інтернету немає, не стартуємо одразу YT WebView.
@@ -1153,8 +1154,12 @@ class RootLayout(MDBoxLayout):
             self.sm.current = "search"
 
     def _switch_relative(self, delta: int) -> bool:
-        """Use ordered screens; a disabled edge does not wrap unexpectedly."""
+        """Switch between YouTube (left) and PyMusic (right), without wrapping."""
         current = self.sm.current
+        # Explicit search/Shorts views belong to the browsing side, but are
+        # never destinations of a horizontal swipe.
+        if current in ("search", "shorts"):
+            current = "web"
         if current not in self._swipe_order:
             return False
         index = self._swipe_order.index(current) + int(delta)

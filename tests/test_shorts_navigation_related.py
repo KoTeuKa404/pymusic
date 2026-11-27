@@ -108,21 +108,50 @@ class ShortsAndNavigationTests(unittest.TestCase):
         self.assertIn('"source": self._related_source', runtime)
 
     def test_swipe_navigation_is_bounded_and_directional(self):
-        scope = {}
-        switch = isolate("main.py", "_switch_relative", scope)
+        switch = isolate("main.py", "_switch_relative", {})
+        module = ast.parse((ANDROID / "main.py").read_text(encoding="utf-8"))
+        root = next(node for node in module.body
+                    if isinstance(node, ast.ClassDef) and node.name == "RootLayout")
+        order = next(node for node in ast.walk(root)
+                     if isinstance(node, ast.Assign) and any(
+                         isinstance(target, ast.Attribute)
+                         and target.attr == "_swipe_order" for target in node.targets))
+        swipe_order = ast.literal_eval(order.value)
+        self.assertEqual(swipe_order, ("web", "audio"))
         holder = SimpleNamespace(
             sm=SimpleNamespace(current="web"),
-            _swipe_order=("search", "web", "shorts", "audio"),
+            _swipe_order=swipe_order,
         )
-        holder.set_screen = lambda name: setattr(holder.sm, "current", name)
-        self.assertTrue(switch(holder, 1))
-        self.assertEqual(holder.sm.current, "shorts")
+        transitions = []
+        def set_screen(name):
+            transitions.append(name)
+            holder.sm.current = name
+        holder.set_screen = set_screen
+
+        self.assertFalse(switch(holder, -1))
+        self.assertEqual(holder.sm.current, "web")
         self.assertTrue(switch(holder, 1))
         self.assertEqual(holder.sm.current, "audio")
         self.assertFalse(switch(holder, 1))
-        self.assertEqual(holder.sm.current, "audio")
+        self.assertFalse(switch(holder, 1))
         self.assertTrue(switch(holder, -1))
-        self.assertEqual(holder.sm.current, "shorts")
+        self.assertEqual(holder.sm.current, "web")
+        self.assertFalse(switch(holder, -1))
+        self.assertEqual(transitions, ["audio", "web"])
+
+        for screen in ("search", "shorts"):
+            with self.subTest(screen=screen):
+                holder.sm.current = screen
+                self.assertFalse(switch(holder, -1))
+                self.assertEqual(holder.sm.current, screen)
+                self.assertTrue(switch(holder, 1))
+                self.assertEqual(holder.sm.current, "audio")
+                self.assertTrue(switch(holder, -1))
+                self.assertEqual(holder.sm.current, "web")
+
+        holder.sm.current = "unknown"
+        self.assertFalse(switch(holder, 1))
+        self.assertEqual(holder.sm.current, "unknown")
 
     def test_pasted_shorts_link_is_routed_before_audio_extraction(self):
         import re
